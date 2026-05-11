@@ -1,4 +1,4 @@
-# 血管介入导航系统技术设计文档
+# 血管介入导航系统技术设计文档（0511 修订版）
 
 ## 1. 目标与范围
 
@@ -27,7 +27,7 @@ VLA Policy Layer         : VLA 高层策略辅助系统
 Supervised Autonomy      : 受监督自主导航系统
 ```
 
-系统包含影像导航、路径规划、状态估计、实时控制、安全监督、`RL/VLA/LLM` 高层智能模块。`FastAPI + WebSocket` 承担 UI、数据服务、日志和 AI 调度；`ROS2 + DDS + C++` 承担实时控制、状态发布、硬件接口和安全链路。
+系统包含影像导航、路径规划、状态估计、实时控制、安全监督、`RL/VLA/LLM` 高层智能模块。`FastAPI + WebSocket` 承担数据服务、日志和 AI 调度；`ROS2 + DDS + C++` 承担实时控制、状态发布、硬件接口和安全链路。前端导航工作站采用 `Python + PyQt5 + PyVista + VTK` 桌面应用架构，不依赖浏览器环境。
 
 ## 2. 术中导航界面目标
 
@@ -35,7 +35,7 @@ Supervised Autonomy      : 受监督自主导航系统
 
 ### 2.1 术中模式总体布局
 
-系统采用“主操作区 + 辅助导航区 + 顶部控制状态层 + 底部状态栏”的固定布局：
+系统采用“主操作区 + 辅助导航区 + 顶部控制状态层 + 底部状态栏”的固定布局，基于 Qt MainWindow + Qt Dock Layout 实现：
 
 ```text
 +--------------------------------------------------------------------------------------+
@@ -98,7 +98,7 @@ Red    : 运动学不可达、碰撞风险不可接受或禁入
 
 ### 2.4 顶部横向信息栏
 
-顶部信息栏采用单行半透明信息条，持续显示控制、路径、血管、安全和通信状态。
+顶部信息栏采用单行半透明信息条，由 Qt Widget 实现，持续显示控制、路径、血管、安全和通信状态。
 
 显示内容包括：
 
@@ -113,7 +113,7 @@ Red    : 运动学不可达、碰撞风险不可接受或禁入
 
 ### 2.5 右侧数据与安全面板
 
-右侧数据与安全面板固定显示：
+右侧数据与安全面板（Qt Panel）固定显示：
 
 - `d_wall`、`d_path`、`radius`、`curvature`
 - 推进速度、旋转速度、加速度和控制限幅状态
@@ -157,9 +157,9 @@ Red    : 运动学不可达、碰撞风险不可接受或禁入
 - 导丝/导管位姿估计、置信区间和不确定性范围
 - 目标点、风险点、分叉点、禁入区域和运动学不可达区域
 
-## 3. 总体架构（前后端分离）
+## 3. 总体架构（桌面工作站架构）
 
-系统采用前端导航工作站、Web 后端服务、算法服务、状态估计层、规划层、安全监督层、ROS2 实时控制层和机器人硬件层分离的工业级架构。Web 系统不承担硬实时控制，执行链路由 `ROS2 / DDS / C++` 和硬件驱动完成。
+系统采用桌面导航工作站、后端数据服务、算法服务、状态估计层、规划层、安全监督层、ROS2 实时控制层和机器人硬件层分离的工业级架构。桌面工作站不承担硬实时控制，执行链路由 `ROS2 / DDS / C++` 和硬件驱动完成。
 
 核心数据流如下：
 
@@ -182,10 +182,11 @@ DSA/X-ray
 
 ### 3.1 前端职责
 
-前端模块负责：
+前端桌面工作站模块负责：
 
-- 术中导航 UI 渲染与交互
+- 术中导航 UI 渲染与交互（PyQt5 MainWindow + Qt Dock Layout）
 - `DSA` 主窗口、3D 辅助窗口和三切面联动
+- PyVista Scene + VTK Renderer 实现血管模型、中心线和路径 3D 渲染
 - 位姿、路径进度、预测轨迹、控制模式和安全预警显示
 - 图层开关、透明度、模式切换和人工接管交互
 - `VLA` 策略输出、`LLM` 解释结果和决策追溯展示
@@ -259,27 +260,43 @@ replan_required
 
 ### 4.1 技术方案
 
-系统采用以下技术栈：
+系统依据开发阶段采用分层渐进的技术路线。所有阶段统一采用 Python + PyQt5 + PyVista + VTK 桌面工作站路线，不再采用浏览器前端或 WebGL 渲染方案。
 
-- 前端：`React + vtk.js`
-- Web 后端：`Python + FastAPI + WebSocket`
+**最终生产态（Phase 7）**：
+
+- 桌面工作站前端：`Python + PyQt5 + PyVista + VTK (QtInteractor)`
+- 后端数据服务：`Python + FastAPI + WebSocket`
 - 实时控制：`ROS2 + DDS + C++`
 - 硬件通信：`EtherCAT / CAN / 厂商 SDK`
-- 算法库：`VTK / NumPy / SciPy / NetworkX / VMTK`
+- 医学影像：`VTK / ITK / SimpleITK / MONAI / VMTK`
+- 算法库：`NumPy / SciPy / NetworkX`
 - 状态估计：`EKF / UKF / Particle Filter`
 - 控制算法：`PID / MPC / 限幅控制 / 力反馈控制`
 
-`FastAPI + WebSocket` 负责 UI、数据服务、日志和 AI 调度；`ROS2 + DDS + C++` 负责机器人执行、传感器回读、控制周期、安全监督和硬件驱动。
+**当前演示阶段（Phase 1-3）**：
+
+- 桌面工作站前端：`Python + PyVista + PyQt5 (QtInteractor)` — 详见 §4.3.9
+- 路径规划引擎：`vascular_path_planning/planning/a_star.py`（直接复用）
+- 数据加载：PyVista 原生加载 VTK/VTP 格式，零转换链路
+- 路径平滑：`preprocess/BSplineSmoother.py`（直接复用）
+
+**演进路线**：Python + PyVista + PyQt5 桌面应用（Phase 1-3）→ `FastAPI + WebSocket` 服务化（Phase 4）→ `ROS2 + DDS + C++` 实时控制 + 瑞鈊硬件联调（Phase 5）→ DSA 影像集成 + `2D/3D` 配准（Phase 6）→ 完整桌面式术中导航工作站（Phase 7）。路线详情见 §4.3.9.4。
+
+`FastAPI + WebSocket` 负责数据服务、日志和 AI 调度；`ROS2 + DDS + C++` 负责机器人执行、传感器回读、控制周期、安全监督和硬件驱动。
 
 ### 4.2 系统组件
 
 系统包含以下工程组件：
 
-- `Cornerstone3D`
-- `Three.js`
+- `PyVista`
+- `VTK`
+- `QtInteractor (PyQt5)`
+- `FastAPI`
 - `ROS2 Control`
 - `Orocos / 实时 Linux`
 - `MONAI Deploy`
+- `SOFA Framework`
+- `BeamAdapter`
 
 ### 4.3 面向手术机器人血管内导航的系统技术栈
 
@@ -475,15 +492,168 @@ ROS2 图结构包含：
 系统执行栈定义如下：
 
 ```text
-3D Slicer
-+ VMTK
-+ Python / FastAPI
-+ NetworkX
-+ SOFA + BeamAdapter
-+ ROS2 + DDS + C++
-+ MONAI / nnU-Net
-+ VLA / LLM Assistant
+PyQt5 Navigation Workstation
+    + PyVista 3D Visualization
+    + VTK Medical Rendering
+    + FastAPI Data Service
+    + NetworkX
+    + SOFA + BeamAdapter
+    + ROS2 + DDS + C++
+    + MONAI / nnU-Net
+    + VLA / LLM Assistant
+    + 3D Slicer + VMTK
 ```
+
+#### 4.3.9 路径规划3D演示阶段技术方案
+
+在未开展硬件联调联试阶段，系统前端采用 **Python + PyVista + Qt (PyQt5)** 桌面应用路线，专注于路径规划算法验证与 3D 可视化交互。该路线即为最终生产态的桌面工作站基础，不存在后续替换为浏览器前端的技术转折。
+
+##### 4.3.9.1 选型依据
+
+系统唯一采用方案：**Python (PyVista + Qt)**。
+
+| 维度 | 说明 |
+|------|------|
+| 渲染库 | PyVista / VTK + QtInteractor |
+| 语言 | Python |
+| 优势 | 已有代码直接复用；VTK 原生加载无需格式转换；开发速度最快；与生产态技术栈一致 |
+| 与生产态关系 | 持续演进为完整桌面导航工作站，非临时演示方案 |
+
+**选择该方案的理由**：
+
+1. **最大化代码复用**：现有 Python A\* 算法、VTK 加载、中心线分段、线段列表交互全部直接复用，零移植成本
+2. **零数据转换**：VTK 文件是 PyVista 原生格式，无需任何中间格式转换链路
+3. **医学影像生态**：PyVista 底层为 VTK，与 3D Slicer/VMTK 技术栈天然一致
+4. **验证速度最快**：在 Python 环境中可随时调用现有脚本进行算法调参、数据验证
+5. **技术路线统一**：不再存在“演示方案→Web 前端”的路线转换，避免重复开发和资产浪费
+
+##### 4.3.9.2 演示系统架构
+
+```
+┌─────────────────────────────────────────────────────┐
+│              UI Layer (PyQt5 MainWindow)              │
+│  ┌───────────┐ ┌──────────┐ ┌───────────────────┐  │
+│  │ 3D Viewer │ │  Info    │ │  Control Panel    │  │
+│  │ (PyVista  │ │  Panel   │ │ (权重/起终点/模式) │  │
+│  │ QtInter-  │ │ (QtWidget│ │ (QtWidgets)       │  │
+│  │  actor)   │ │ s)       │ │                   │  │
+│  └───────────┘ └──────────┘ └───────────────────┘  │
+├─────────────────────────────────────────────────────┤
+│              App State (QObject / Signals)            │
+│  ┌───────────┐ ┌──────────┐ ┌───────────────────┐  │
+│  │ Scene     │ │ Planner  │ │ Segment           │  │
+│  │ State     │ │ State    │ │ State             │  │
+│  └───────────┘ └──────────┘ └───────────────────┘  │
+├─────────────────────────────────────────────────────┤
+│               Logic Layer (Python 复用)              │
+│  ┌───────────┐ ┌──────────┐ ┌───────────────────┐  │
+│  │ a_star.py │ │ node.py  │ │ BSplineSmoother   │  │
+│  │ (A*全局   │ │ (节点    │ │ .py (B样条        │  │
+│  │  规划)    │ │  结构)   │ │  路径平滑)        │  │
+│  └───────────┘ └──────────┘ └───────────────────┘  │
+├─────────────────────────────────────────────────────┤
+│                  Data Layer                          │
+│  ┌───────────┐ ┌──────────┐ ┌───────────────────┐  │
+│  │ VTK       │ │ JSON     │ │ FCSV              │  │
+│  │ (pv.read) │ │ Graph    │ │ Endpoints         │  │
+│  └───────────┘ └──────────┘ └───────────────────┘  │
+└─────────────────────────────────────────────────────┘
+```
+
+##### 4.3.9.3 演示能力范围
+
+| 模块 | 说明 | 状态 |
+|------|------|------|
+| 血管3D模型渲染 | 基于现有 VTK 血管模型 + 中心线数据 | ✅ 包含 |
+| 中心线骨架显示 | 线段/管线渲染，分支拓扑可视化 | ✅ 包含 |
+| 路径规划引擎 | A\* 全局规划，基于中心线重采样图 | ✅ 包含 |
+| 规划路径可视化 | 路径高亮、起终点标记、可行性颜色编码 | ✅ 包含 |
+| 交互选点 | 3D 点拾取设定起点/终点，触发路径规划 | ✅ 包含 |
+| 路径信息面板 | 路径长度、节点数、曲率峰值、可行性等级 | ✅ 包含 |
+| 代价权重调节 | 前端滑块调节 w\_len / w\_curv / w\_rad 等 | ✅ 包含 |
+| 多候选路径对比 | A\* 多结果并行渲染 | ✅ 包含 |
+| 安全走廊可视化 | 管状半透明渲染 | ✅ 包含 |
+| B样条路径平滑 | 直接复用 `preprocess/BSplineSmoother.py` | ✅ 包含 |
+| 曲率热力图 | 路径分段着色 + colorbar | ✅ 包含 |
+| DSA/X-ray 2D 视图 | 需影像流 + 配准，非演示范围 | ❌ 不包含 |
+| 术中实时导航 UI | 需硬件 + ROS2 + 状态估计 | ❌ 不包含 |
+| 配准(2D/3D Registration) | 需术中影像 + 跟踪器 | ❌ 不包含 |
+| 安全监督/碰撞检测 | 需实时位姿 + 力反馈 | ❌ 不包含 |
+| ROS2 / DDS 通信 | 硬件未联调 | ❌ 不包含 |
+| VLA / LLM 模块 | 高层AI辅助，非演示核心 | ❌ 不包含 |
+| 瑞鈊跟踪设备对接 | 硬件未接入 | ❌ 不包含 |
+| WebSocket 实时推送 | 无后端/硬件数据源 | ❌ 不包含 |
+| 导丝/导管运动学仿真 | SOFA/Cosserat Rod 属仿真层 | ❌ 不包含 |
+
+##### 4.3.9.4 与完整系统演进关系
+
+```text
+Phase 1-3: 纯路径规划3D演示 (当前阶段)
+  Python + PyVista + PyQt5
+  └── 验证 A* 算法 + 3D 可视化交互
+        │
+        ▼
+Phase 4: FastAPI + WebSocket 服务化
+  └── 路径规划引擎 Python 原生复用，零移植
+        │
+        ▼
+Phase 5: ROS2 + DDS + 瑞鈊硬件联调
+  └── 引入 ROS2 + DDS + C++ 实时控制层
+        │
+        ▼
+Phase 6: DSA 影像集成
+  └── 引入 VTK Volume Rendering + 2D/3D 配准
+        │
+        ▼
+Phase 7: 完整桌面式术中导航工作站
+  PyQt5 + PyVista + ROS2 + FastAPI
+  └── 安全监督器 / 人工接管 / VLA / LLM 全量交付
+```
+
+系统不再提及 React、Three.js、Cornerstone3D 或 Web 前端替代路线。
+
+##### 4.3.9.5 完整系统前端技术路线
+
+系统所有阶段统一采用 PyQt5 + PyVista + VTK 桌面工作站路线，不存在向浏览器前端的转换：
+
+| 阶段 | 前端技术 | 说明 |
+|------|----------|------|
+| Phase 1-3 | PyVista + PyQt5 + QtInteractor | 路径规划演示与 3D 可视化 |
+| Phase 4 | PyVista + PyQt5 + FastAPI + WebSocket | 后端服务化，前端保持桌面应用 |
+| Phase 5 | PyVista + PyQt5 + ROS2 | 硬件联调，实时数据接入 |
+| Phase 6 | PyVista + PyQt5 + VTK Volume Rendering | DSA 影像叠加与配准显示 |
+| Phase 7 | PyVista + PyQt5 + VTK + ROS2 + FastAPI | 完整桌面式术中导航工作站 |
+
+WebSocket 仅作为桌面工作站的数据接口通道，系统不是浏览器 SPA。
+
+##### 4.3.9.6 已有代码资产
+
+| 模块 | 文件 | 复用方式 |
+|------|------|----------|
+| A\* 算法 | `vascular_path_planning/planning/a_star.py` | 直接复用 |
+| 节点类 | `vascular_path_planning/planning/node.py` | 直接复用 |
+| PyVista 可视化 | `path_planing/visualize.py` | 扩展核心逻辑 |
+| Qt 线段选择器 | `path_planing/visualize.py: CenterlineViewer` | 参考交互范式 |
+| 图转换器 | `preprocess/converter.py` | 理解邻接表结构 |
+| B样条平滑 | `preprocess/BSplineSmoother.py` | 直接复用 |
+| 区域生长 | `preprocess/region_growing.py` | 启发式距离预计算 |
+
+##### 4.3.9.7 已有数据资产
+
+| 文件 | 路径 | 用途 |
+|------|------|------|
+| 血管模型 | `source/vtk/blood_vessels.vtk` | 3D 血管表面渲染 |
+| 中心线(合并) | `source/vtk/Centerline_curves_merged.vtk` | 路径规划图 + 线段渲染 |
+| 中心线(原始) | `source/vtk/Centerline model.vtk` | 备选中心线 |
+| 有向图 JSON | `source/graphs/centerline_vessel_net.json` | A\* 搜索图（~3000+ 节点） |
+| 终点集 FCSV | `source/fcsv/Endpoints.fcsv` | 预设起点/终点 |
+| 分支 FCSV | `source/fcsv/intervenPoints.fcsv` | 分支交叉点 |
+
+##### 4.3.9.8 参考文档
+
+详细开发计划见 `PLAN_3D_DEMO.md`，包含完整架构设计、功能清单、实施计划、UI 布局设计、颜色编码规范、关键风险与应对、验收标准与里程碑。
+
+---
 
 ## 5. 数据与坐标规范
 
@@ -627,7 +797,7 @@ ROS2 图结构包含：
 - 尖端转向限制
 - 推进与旋转速度上限
 
-### 7.3 代价函数（示例）
+### 7.3 代价函数
 
 ```text
 cost = w_len  * length
@@ -826,7 +996,7 @@ WebSocket 推送频率定义如下：
 
 ### 10.5 智能交互与解释模块
 
-前端包含语音/文本交互面板，支持以下内容：
+前端包含语音/文本交互面板（Qt Widget），支持以下内容：
 
 - 当前状态说明
 - 路径解释与候选路径比较
@@ -899,52 +1069,74 @@ ROS2 主题、服务与动作接口定义如下：
 - `calibration_manager`：调用 `pivotTipCalibration / fixedDirCalibration`，更新 `TF tree`
 - `watchdog_node`：调用 `getNetAdaptorInfo / getConnectionStatus / getSensorConnected`，发布快速健康状态
 
-## 12. 前端模块结构
+## 12. 桌面工作站模块结构
 
 ```text
-src/
-  components/
-    MainDSAView/
-      DSAView.tsx
-      PredictionOverlay.tsx
-      SafetyCorridor.tsx
-      TrajectoryPreview.tsx
-    Navigation3D/
-      View3D.tsx
-      VesselRenderer.tsx
-      PathRenderer.tsx
-    MultiPlanarView/
-      AxialView.tsx
-      SagittalView.tsx
-      CoronalView.tsx
-    Panels/
-      ControllerStatus.tsx
-      SafetyPanel.tsx
-      PathInfoPanel.tsx
-      LLMChatPanel.tsx
-      VLAStatusPanel.tsx
-    Layout/
-      TopInfoBar.tsx
-      BottomStatusBar.tsx
+app/
+  ui/
+    main_window.py           # Qt MainWindow
+    top_info_bar.py          # 顶部信息栏 (Qt Widget)
+    bottom_status_bar.py     # 底部状态栏 (Qt Widget)
+    dsa_view.py              # DSA 主视图 (VTK Renderer)
+    navigation_3d_view.py    # 3D 导航辅助视图 (PyVista QtInteractor)
+    multi_planar_view.py     # 三切面视图
+    panels/
+      controller_status.py   # 控制器状态面板 (Qt Panel)
+      safety_panel.py        # 安全面板 (Qt Panel)
+      path_info_panel.py     # 路径信息面板 (Qt Panel)
+      llm_chat_panel.py      # LLM 交互面板 (Qt Panel)
+      vla_status_panel.py    # VLA 状态面板 (Qt Panel)
+    layout/
+      dock_layout.py         # Qt Dock Layout 管理
+  visualization/
+    vessel_renderer.py       # 血管模型渲染 (VTK)
+    centerline_renderer.py   # 中心线渲染 (VTK)
+    path_renderer.py         # 路径渲染 (VTK)
+    overlay_renderer.py      # 叠加对象渲染 (安全走廊/风险区域等)
+    curvature_heatmap.py     # 曲率热力图
+    multi_view_sync.py       # 多窗口联动
+  planning/
+    global_planner.py
+    local_planner.py
+    path_smoother.py
+    feasibility_checker.py
+    cost_model.py
+  registration/
+    registration_manager.py  # 2D/3D 配准管理
+    transform_manager.py     # TF 变换管理
+  tracking/
+    tool_tracker.py          # 器械跟踪
+    time_sync.py             # 时间同步
+  safety/
+    safety_supervisor.py     # 安全监督器
+    collision_detector.py    # 碰撞检测
+    fsm.py                   # 安全状态机
+    watchdog.py              # 看门狗
+  ros2_bridge/
+    ros2_interface.py        # ROS2 桥接
+    topic_manager.py         # 主题管理
+    service_manager.py       # 服务管理
   services/
-    api.ts
-    websocket.ts
-    rosBridge.ts
-  vtk/
-    volumeLoader.ts
-    modelLoader.ts
-    pathRenderer.ts
-    crosshairController.ts
-    cameraSync.ts
-  store/
-    caseStore.ts
-    viewerStore.ts
-    robotStore.ts
-    safetyStore.ts
-    plannerStore.ts
-    llmStore.ts
-  pages/
-    NavigationPage.tsx
+    api_client.py            # FastAPI 客户端
+    websocket_client.py      # WebSocket 客户端
+    data_loader.py           # 数据加载器
+    event_logger.py          # 事件日志
+  state/
+    app_state.py             # 应用状态 (QObject)
+    planner_state.py         # 规划状态
+    robot_state.py           # 机器人状态
+    safety_state.py          # 安全状态
+  io/
+    dicom_loader.py
+    vtk_loader.py
+    graph_loader.py
+    config_loader.py
+  simulation/
+    sofa_bridge.py           # SOFA 仿真桥接
+    beam_adapter.py          # BeamAdapter
+  calibration/
+    pivot_calibration.py     # 尖端标定
+    direction_calibration.py # 方向标定
 ```
 
 ## 13. 工程交付模块
@@ -985,7 +1177,7 @@ src/
 
 交付内容包括：
 
-- 术中导航 UI
+- 术中导航桌面工作站（PyQt5 + PyVista + VTK）
 - 配准与跟踪接口
 - 状态显示与日志模块
 - 控制模式管理模块
@@ -1020,7 +1212,7 @@ src/
 
 ### 14.2 性能验收
 
-- 首屏加载 `< 3 s`
+- 桌面工作站启动时间 `< 3 s`
 - 交互帧率 `>= 30 FPS`
 - 单次全局路径计算 `< 200 ms`
 - 局部规划周期满足设定频率
@@ -1080,7 +1272,7 @@ src/
        -> LLM 风险解释
 ```
 
-系统包含独立硬件急停链路，不依赖 Web、ROS2 高层节点或 AI 模块。
+系统包含独立硬件急停链路，不依赖桌面工作站、ROS2 高层节点或 AI 模块。
 
 瑞鈊跟踪设备链路状态纳入安全监督器输入。系统将 `getNetAdaptorInfo` 定义为硬件断连快速检测接口，并将其直接接入 `watchdog_node`。网络链路异常、适配器断连、设备失联或传感器不可用时，安全状态机立即执行以下动作：
 
