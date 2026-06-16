@@ -59,6 +59,13 @@ class NavigationEngine:
         engine = NavigationEngine(phantom="low_tort", target="bca")
         state = engine.reset()
         state = engine.step(delta_push=0.5, delta_rotate=0.1)
+
+    For VPP phantoms:
+        engine = NavigationEngine(
+            phantom="case_001_vpp",
+            target="endpoints_1",
+            assets_dir="/path/to/vpp_assets/case_001/mujoco"
+        )
     """
 
     VALID_PHANTOMS = ("low_tort", "phantom2", "phantom3", "phantom4")
@@ -70,19 +77,23 @@ class NavigationEngine:
         target: str = "bca",
         use_pixels: bool = False,
         image_size: int = 80,
+        assets_dir: str = None,
     ):
         """Initialize the navigation engine.
 
         Args:
             phantom: Phantom model name (low_tort, phantom2, phantom3, phantom4)
-            target: Target site name (bca, lcca)
+                     or VPP case name (e.g., case_001_vpp)
+            target: Target site name (bca, lcca) or VPP endpoint (e.g., endpoints_1)
             use_pixels: Whether to include pixel observations
             image_size: Image size for pixel observations
+            assets_dir: Optional path to phantom assets directory for VPP phantoms
         """
         self.phantom = phantom
         self.target = target
         self.use_pixels = use_pixels
         self.image_size = image_size
+        self.assets_dir = assets_dir
 
         self._env = None
         self._time_step = None
@@ -105,6 +116,7 @@ class NavigationEngine:
             visualize_sites=False,
             visualize_target=False,
             sample_target=False,
+            assets_dir=self.assets_dir,
         )
         self._initialized = True
 

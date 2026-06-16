@@ -17,14 +17,18 @@ class Phantom(BasePhantom):
 
         Args:
             phantom_xml: Name of the XML file to use
-            assets_dir: Directory where assets are saved
+            assets_dir: Directory where assets are saved. If None, uses default phantom_assets.
         """
 
         self.rgba = normalize_rgba(phantom_default["geom"]["rgba"])
         self.scale = [phantom_config["scale"] for i in range(3)]
 
-        path = Path(__file__).parent
-        model_dir = path / "phantom_assets"
+        if assets_dir is not None:
+            model_dir = Path(assets_dir)
+        else:
+            path = Path(__file__).parent
+            model_dir = path / "phantom_assets"
+
         phantom_xml_path = (model_dir / phantom_xml).as_posix()
         self._mjcf_root = mjcf.from_file(
             phantom_xml_path, False, model_dir.as_posix(), **kwargs

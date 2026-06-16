@@ -56,3 +56,26 @@ def test_path_plan_endpoint_uses_vpp_graph():
     assert payload["node_count"] == 52
     assert round(payload["length_mm"], 3) == 52.127
     assert len(payload["waypoints"]) == 52
+
+
+def test_path_plan_with_smooth():
+    client = TestClient(app)
+    request = {
+        "case_id": "case_001",
+        "start": [0.1732872575521469, -268.2406921386719, 291.2464599609375],
+        "end": [0.655612051486969, -265.73321533203125, 304.354736328125],
+        "smooth": True,
+    }
+
+    response = client.post("/api/v1/path/plan", json=request)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["case_id"] == "case_001"
+    assert "smooth_waypoints" in payload
+    assert payload["smooth_waypoints"] is not None
+    assert len(payload["smooth_waypoints"]) > len(payload["waypoints"])
+    assert "smooth_length_mm" in payload
+    assert payload["smooth_length_mm"] is not None
+    assert "max_curvature" in payload
+    assert payload["max_curvature"] >= 0

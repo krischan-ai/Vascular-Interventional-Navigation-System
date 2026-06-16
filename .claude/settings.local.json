@@ -9,7 +9,13 @@
       "Bash(\".venv/Scripts/pip.exe\" install pytest --quiet)",
       "Bash(MUJOCO_GL=glfw \".venv/Scripts/python.exe\" -m pytest:*)",
       "Bash(\".venv/Scripts/pip.exe\" install fastapi httpx --quiet)",
-      "Bash(\".venv/Scripts/python.exe\" -m pytest tests/test_websocket.py -v -m \"not slow\" --tb=short)"
+      "Bash(\".venv/Scripts/python.exe\" -m pytest tests/test_websocket.py -v -m \"not slow\" --tb=short)",
+      "Bash(\".venv/Scripts/python.exe\" -m pytest tests/test_vpp_path_planner.py -v --tb=short)",
+      "Bash(\".venv/Scripts/python.exe\" -m pytest tests/test_services_api.py -v --tb=short)",
+      "Bash(\".venv/Scripts/python.exe\" -m pytest tests/test_services_api.py tests/test_vpp_path_planner.py -v --tb=short)",
+      "Bash(\".venv/Scripts/python.exe\":*)",
+      "Bash(pip show:*)",
+      "Bash(python:*)"
     ]
   }
 }

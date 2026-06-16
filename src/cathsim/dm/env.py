@@ -611,12 +611,16 @@ class Navigate(composer.Task):
 def make_dm_env(
     phantom: str = "phantom3",
     target: str = "bca",
+    assets_dir: str = None,
     **kwargs,
 ) -> composer.Environment:
     """Makes a dm_control environment given a configuration.
 
     Args:
       phantom: str:  (Default value = "phantom3") The phantom to use
+      target: str: Target site name (e.g., "bca", "lcca", or VPP endpoint names)
+      assets_dir: str: Optional path to phantom assets directory. If provided,
+                       loads phantom from this directory instead of default.
       **kwargs: Additional arguments for the environment
 
     Returns:
@@ -624,11 +628,11 @@ def make_dm_env(
 
     """
 
-    phantom = Phantom(phantom + ".xml")
+    phantom_obj = Phantom(phantom + ".xml", assets_dir=assets_dir)
     tip = Tip(n_bodies=4)
     guidewire = Guidewire(n_bodies=80)
     task = Navigate(
-        phantom=phantom,
+        phantom=phantom_obj,
         guidewire=guidewire,
         tip=tip,
         target=target,
