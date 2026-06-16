@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
 
 Vector3 = list[float]
+SafetyStatus = Literal["STANDBY", "SAFE_NAV", "DANGER_WARNING", "COLLISION_STOP"]
 
 
 class HealthResponse(BaseModel):
@@ -56,3 +58,77 @@ class PlanPathResponse(BaseModel):
     max_curvature: float | None = None
     node_count: int
     compute_time_ms: float
+
+
+# Session models
+
+
+class SessionStartRequest(BaseModel):
+    phantom: str = Field(
+        default="low_tort",
+        description="Phantom model: low_tort, phantom2, phantom3, phantom4",
+    )
+    target: str = Field(
+        default="bca",
+        description="Target site: bca, lcca",
+    )
+    use_pixels: bool = Field(
+        default=False,
+        description="Include pixel observations",
+    )
+
+
+class NavigationStateResponse(BaseModel):
+    tip_position: Vector3 = Field(description="Guidewire tip position (MuJoCo coords)")
+    tip_direction: Vector3 = Field(description="Tip direction unit vector")
+    velocity: float = Field(description="Tip velocity (m/s)")
+    contact_force: float = Field(description="Contact force magnitude (N)")
+    episode_length: int = Field(description="Steps in current episode")
+    target_position: Vector3 = Field(description="Target position")
+    reward: float = Field(description="Reward from last step")
+    done: bool = Field(description="Episode terminated")
+    safety_status: SafetyStatus = Field(default="STANDBY", description="Safety status")
+
+
+class SessionStartResponse(BaseModel):
+    session_id: str
+    phantom: str
+    target: str
+    state: NavigationStateResponse
+
+
+class SessionInfoResponse(BaseModel):
+    session_id: str
+    phantom: str
+    target: str
+    created_at: str
+    last_active: str
+    episode_count: int
+    total_steps: int
+
+
+class StepRequest(BaseModel):
+    delta_push: float = Field(
+        ...,
+        ge=-1.0,
+        le=1.0,
+        description="Push force coefficient [-1.0, 1.0], positive = forward",
+    )
+    delta_rotate: float = Field(
+        ...,
+        ge=-1.0,
+        le=1.0,
+        description="Rotation force coefficient [-1.0, 1.0], positive = clockwise",
+    )
+
+
+class StepResponse(BaseModel):
+    session_id: str
+    state: NavigationStateResponse
+    step_count: int
+
+
+class ResetResponse(BaseModel):
+    session_id: str
+    state: NavigationStateResponse
+    episode_count: int

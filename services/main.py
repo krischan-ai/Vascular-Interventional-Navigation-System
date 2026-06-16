@@ -12,9 +12,17 @@ from services.schemas import (
     CaseManifestResponse,
     CaseSummary,
     HealthResponse,
+    NavigationStateResponse,
     PlanPathRequest,
     PlanPathResponse,
+    ResetResponse,
+    SessionInfoResponse,
+    SessionStartRequest,
+    SessionStartResponse,
+    StepRequest,
+    StepResponse,
 )
+from services.session_manager import get_session_manager
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -117,6 +125,139 @@ def plan_path(request: PlanPathRequest) -> PlanPathResponse:
         case_id=request.case_id,
         **result.as_dict(),
     )
+
+
+# ============================================================================
+# Session Management Endpoints
+# ============================================================================
+
+
+def _state_to_response(state, engine) -> NavigationStateResponse:
+    """Convert NavigationState to response model."""
+    return NavigationStateResponse(
+        tip_position=state.tip_position,
+        tip_direction=state.tip_direction,
+        velocity=state.velocity,
+        contact_force=state.contact_force,
+        episode_length=state.episode_length,
+        target_position=state.target_position,
+        reward=state.reward,
+        done=state.done,
+        safety_status=engine.get_safety_status(state),
+    )
+
+
+@app.post("/api/v1/session/start", response_model=SessionStartResponse)
+def session_start(request: SessionStartRequest) -> SessionStartResponse:
+    """Start a new CathSim navigation session."""
+    manager = get_session_manager()
+    try:
+        session_id, state = manager.create_session(
+            phantom=request.phantom,
+            target=request.target,
+            use_pixels=request.use_pixels,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    engine = manager.get_session(session_id)
+    return SessionStartResponse(
+        session_id=session_id,
+        phantom=request.phantom,
+        target=request.target,
+        state=_state_to_response(state, engine),
+    )
+
+
+@app.get("/api/v1/session", response_model=list[SessionInfoResponse])
+def list_sessions() -> list[SessionInfoResponse]:
+    """List all active sessions."""
+    manager = get_session_manager()
+    sessions = manager.list_sessions()
+    return [
+        SessionInfoResponse(
+            session_id=info.session_id,
+            phantom=info.phantom,
+            target=info.target,
+            created_at=info.created_at.isoformat(),
+            last_active=info.last_active.isoformat(),
+            episode_count=info.episode_count,
+            total_steps=info.total_steps,
+        )
+        for info in sessions
+    ]
+
+
+@app.get("/api/v1/session/{session_id}", response_model=SessionInfoResponse)
+def get_session_info(session_id: str) -> SessionInfoResponse:
+    """Get session metadata."""
+    manager = get_session_manager()
+    try:
+        info = manager.get_session_info(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return SessionInfoResponse(
+        session_id=info.session_id,
+        phantom=info.phantom,
+        target=info.target,
+        created_at=info.created_at.isoformat(),
+        last_active=info.last_active.isoformat(),
+        episode_count=info.episode_count,
+        total_steps=info.total_steps,
+    )
+
+
+@app.post("/api/v1/session/{session_id}/step", response_model=StepResponse)
+def session_step(session_id: str, request: StepRequest) -> StepResponse:
+    """Execute one simulation step in the specified session."""
+    manager = get_session_manager()
+    try:
+        state = manager.step(
+            session_id=session_id,
+            delta_push=request.delta_push,
+            delta_rotate=request.delta_rotate,
+        )
+        info = manager.get_session_info(session_id)
+        engine = manager.get_session(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return StepResponse(
+        session_id=session_id,
+        state=_state_to_response(state, engine),
+        step_count=info.total_steps,
+    )
+
+
+@app.post("/api/v1/session/{session_id}/reset", response_model=ResetResponse)
+def session_reset(session_id: str) -> ResetResponse:
+    """Reset the environment in the specified session."""
+    manager = get_session_manager()
+    try:
+        state = manager.reset_session(session_id)
+        info = manager.get_session_info(session_id)
+        engine = manager.get_session(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return ResetResponse(
+        session_id=session_id,
+        state=_state_to_response(state, engine),
+        episode_count=info.episode_count,
+    )
+
+
+@app.delete("/api/v1/session/{session_id}")
+def session_close(session_id: str) -> dict:
+    """Close and cleanup a session."""
+    manager = get_session_manager()
+    if not manager.close_session(session_id):
+        raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
+
+    return {"status": "closed", "session_id": session_id}
 
 
 def main() -> None:

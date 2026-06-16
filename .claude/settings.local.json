@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest:*)",
+      "Bash(set MUJOCO_GL=glfw)",
+      "Bash(.venvScriptspython.exe -c \"import cathsim; print\\(''cathsim OK''\\)\")",
+      "Bash(e:)",
+      "Bash(\".venv/Scripts/python.exe\" -c \"import cathsim; print\\(''cathsim OK''\\)\")",
+      "Bash(\".venv/Scripts/pip.exe\" install pytest --quiet)",
+      "Bash(MUJOCO_GL=glfw \".venv/Scripts/python.exe\" -m pytest:*)",
+      "Bash(\".venv/Scripts/pip.exe\" install fastapi httpx --quiet)"
+    ]
+  }
+}
