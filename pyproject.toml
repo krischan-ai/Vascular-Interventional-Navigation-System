@@ -33,7 +33,9 @@ dependencies = [
     "rich",
     "mergedeep",
     "rtree",
-    "toolz"
+    "toolz",
+    "fastapi",
+    "uvicorn[standard]"
 ]
 
 [tool.setuptools.packages.find]
