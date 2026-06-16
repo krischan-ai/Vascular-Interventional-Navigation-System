@@ -5,7 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket
 
 from services.path_planner import PathPlanner
 from services.schemas import (
@@ -258,6 +258,25 @@ def session_close(session_id: str) -> dict:
         raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
 
     return {"status": "closed", "session_id": session_id}
+
+
+# ============================================================================
+# WebSocket Endpoints
+# ============================================================================
+
+
+@app.websocket("/ws/session")
+async def websocket_session(websocket: WebSocket) -> None:
+    """WebSocket endpoint for real-time session control.
+
+    Protocol:
+    - Client sends: control, session_start, session_stop, reset, pong
+    - Server sends: state_update, state_batch, error, ping, session_started
+    """
+    from services.websocket_handler import get_websocket_handler
+
+    handler = get_websocket_handler(get_session_manager())
+    await handler.handle_connection(websocket)
 
 
 def main() -> None:
