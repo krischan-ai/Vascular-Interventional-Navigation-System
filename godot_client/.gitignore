@@ -1,0 +1,6 @@
+# Godot 4+ editor cache and generated import data (regenerated on first open).
+.godot/
+/android/
+
+# Large generated mesh asset (regenerate with tools/export_godot_assets.py).
+assets/models/*.glb
