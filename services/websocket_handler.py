@@ -9,13 +9,28 @@ import asyncio
 import time
 from dataclasses import dataclass, field
 from enum import Enum
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field, ValidationError
 
-from services.navigation_engine import NavigationState
+from services.navigation_engine import NavigationEngine, NavigationState
+from services.path_planner import PathPlanner
 from services.session_manager import SessionManager
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_DATA_ROOT = _PROJECT_ROOT / "data" / "vpp_assets"
+
+
+@lru_cache(maxsize=8)
+def _get_path_planner(case_id: str) -> PathPlanner:
+    """Load (and cache) a PathPlanner for the given case's VPP graph."""
+    graph_path = _DATA_ROOT / case_id / "graph" / "graph.json"
+    if not graph_path.is_file():
+        raise FileNotFoundError(f"Graph not found for case: {case_id}")
+    return PathPlanner(graph_path)
 
 
 class MessageType(str, Enum):
@@ -25,12 +40,14 @@ class MessageType(str, Enum):
     CONTROL = "control"
     SESSION_START = "session_start"
     SESSION_STOP = "session_stop"
+    PATH_REQUEST = "path_request"
     RESET = "reset"
     PONG = "pong"
 
     # Server -> Client
     STATE_UPDATE = "state_update"
     STATE_BATCH = "state_batch"
+    PATH_RESPONSE = "path_response"
     ERROR = "error"
     PING = "ping"
     SESSION_STARTED = "session_started"
@@ -50,12 +67,23 @@ class SessionStartData(BaseModel):
     phantom: str = "low_tort"
     target: str = "bca"
     use_pixels: bool = False
+    batch_mode: bool = False
 
 
 class ResetData(BaseModel):
     """Reset request data."""
 
     randomize: bool = False
+
+
+class PathRequestData(BaseModel):
+    """Path planning request data (positions in LPS millimeters)."""
+
+    case_id: str = "case_001"
+    start_position: list[float] = Field(min_length=3, max_length=3)
+    end_position: list[float] = Field(min_length=3, max_length=3)
+    algorithm: str = "astar"
+    smooth: bool = False
 
 
 class WebSocketMessage(BaseModel):
@@ -77,6 +105,7 @@ class ConnectionState:
     last_pong_time: float = field(default_factory=time.time)
     is_alive: bool = True
     control_rate_limiter: float = 0.0  # Last control timestamp
+    batch_mode: bool = False  # Send state_batch (with render data) instead of state_update
 
 
 class WebSocketHandler:
@@ -196,6 +225,9 @@ class WebSocketHandler:
         elif msg_type == MessageType.CONTROL:
             await self._handle_control(conn_state, message.data)
 
+        elif msg_type == MessageType.PATH_REQUEST:
+            await self._handle_path_request(conn_state, message.data)
+
         elif msg_type == MessageType.RESET:
             await self._handle_reset(conn_state, message.data)
 
@@ -229,8 +261,7 @@ class WebSocketHandler:
                 use_pixels=params.use_pixels,
             )
             conn_state.session_id = session_id
-
-            engine = self._session_manager.get_session(session_id)
+            conn_state.batch_mode = params.batch_mode
 
             await self._send_message(
                 conn_state,
@@ -239,7 +270,7 @@ class WebSocketHandler:
                 data={
                     "phantom": params.phantom,
                     "target": params.target,
-                    "state": self._state_to_dict(state, engine),
+                    "state": self._state_to_dict(state),
                 },
             )
 
@@ -294,14 +325,22 @@ class WebSocketHandler:
                 delta_push=control.delta_push,
                 delta_rotate=control.delta_rotate,
             )
-            engine = self._session_manager.get_session(conn_state.session_id)
 
-            await self._send_message(
-                conn_state,
-                MessageType.STATE_UPDATE,
-                session_id=conn_state.session_id,
-                data=self._state_to_dict(state, engine),
-            )
+            if conn_state.batch_mode:
+                engine = self._session_manager.get_session(conn_state.session_id)
+                await self._send_message(
+                    conn_state,
+                    MessageType.STATE_BATCH,
+                    session_id=conn_state.session_id,
+                    data=self._state_to_batch(state, engine),
+                )
+            else:
+                await self._send_message(
+                    conn_state,
+                    MessageType.STATE_UPDATE,
+                    session_id=conn_state.session_id,
+                    data=self._state_to_dict(state),
+                )
 
         except KeyError:
             conn_state.session_id = None
@@ -310,6 +349,44 @@ class WebSocketHandler:
             )
         except RuntimeError as e:
             await self._send_error(conn_state, "STEP_ERROR", str(e))
+
+    async def _handle_path_request(
+        self, conn_state: ConnectionState, data: dict
+    ) -> None:
+        """Handle a path planning request over the WebSocket.
+
+        Does not require an active session: a client may request a route before
+        starting a navigation session.
+        """
+        try:
+            req = PathRequestData(**data)
+        except ValidationError as e:
+            await self._send_error(conn_state, "INVALID_PARAMS", str(e))
+            return
+
+        try:
+            planner = _get_path_planner(req.case_id)
+        except FileNotFoundError as e:
+            await self._send_error(conn_state, "PATH_NOT_FOUND", str(e))
+            return
+
+        try:
+            result = planner.plan(
+                req.start_position,
+                req.end_position,
+                algorithm=req.algorithm,
+                smooth=req.smooth,
+            )
+        except ValueError as e:
+            await self._send_error(conn_state, "PATH_NOT_FOUND", str(e))
+            return
+
+        await self._send_message(
+            conn_state,
+            MessageType.PATH_RESPONSE,
+            session_id=conn_state.session_id,
+            data=result.as_dict(),
+        )
 
     async def _handle_reset(
         self, conn_state: ConnectionState, data: dict
@@ -323,17 +400,27 @@ class WebSocketHandler:
 
         try:
             state = self._session_manager.reset_session(conn_state.session_id)
-            engine = self._session_manager.get_session(conn_state.session_id)
             info = self._session_manager.get_session_info(conn_state.session_id)
+
+            if conn_state.batch_mode:
+                engine = self._session_manager.get_session(conn_state.session_id)
+                payload = {
+                    **self._state_to_batch(state, engine),
+                    "episode_count": info.episode_count,
+                }
+                msg_type = MessageType.STATE_BATCH
+            else:
+                payload = {
+                    **self._state_to_dict(state),
+                    "episode_count": info.episode_count,
+                }
+                msg_type = MessageType.STATE_UPDATE
 
             await self._send_message(
                 conn_state,
-                MessageType.STATE_UPDATE,
+                msg_type,
                 session_id=conn_state.session_id,
-                data={
-                    **self._state_to_dict(state, engine),
-                    "episode_count": info.episode_count,
-                },
+                data=payload,
             )
 
         except KeyError:
@@ -342,18 +429,46 @@ class WebSocketHandler:
                 conn_state, "SESSION_EXPIRED", "Session no longer exists"
             )
 
-    def _state_to_dict(self, state: NavigationState, engine) -> dict:
-        """Convert NavigationState to dictionary for WebSocket transmission."""
+    def _state_to_dict(self, state: NavigationState) -> dict:
+        """Convert NavigationState to dictionary for WebSocket transmission.
+
+        Emits the full state (including wall_distance, curvature, path_progress,
+        path_deviation, safety_status and tip_quaternion) per the state_update
+        schema in doc/03-API与通信协议.md §1.4.
+        """
+        return state.as_dict()
+
+    def _state_to_batch(self, state: NavigationState, engine: NavigationEngine) -> dict:
+        """Build the state_batch payload with guidewire render data.
+
+        Follows the state_batch structure in doc/03-API与通信协议.md §1.4,
+        adding per-segment body positions (for tube rendering), the planned path,
+        and aggregated safety/episode blocks.
+        """
         return {
-            "tip_position": state.tip_position,
-            "tip_direction": state.tip_direction,
-            "velocity": state.velocity,
-            "contact_force": state.contact_force,
-            "episode_length": state.episode_length,
-            "target_position": state.target_position,
-            "reward": state.reward,
-            "done": state.done,
-            "safety_status": engine.get_safety_status(state),
+            "tip": {
+                "position": state.tip_position,
+                "direction": state.tip_direction,
+                "quaternion": state.tip_quaternion,
+            },
+            "bodies": engine.get_render_bodies(),
+            "path": {
+                "waypoints": engine.planned_path,
+                "progress": state.path_progress,
+                "deviation": state.path_deviation,
+            },
+            "safety": {
+                "status": state.safety_status,
+                "wall_distance": state.wall_distance,
+                "curvature": state.curvature,
+                "speed": state.velocity,
+                "risk_score": state.risk_score,
+            },
+            "episode": {
+                "length": state.episode_length,
+                "reward": state.reward,
+                "done": state.done,
+            },
         }
 
     async def _send_message(

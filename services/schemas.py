@@ -81,10 +81,18 @@ class SessionStartRequest(BaseModel):
 class NavigationStateResponse(BaseModel):
     tip_position: Vector3 = Field(description="Guidewire tip position (MuJoCo coords)")
     tip_direction: Vector3 = Field(description="Tip direction unit vector")
+    tip_quaternion: Vector3 = Field(
+        default_factory=lambda: [0.0, 0.0, 0.0, 1.0],
+        description="Tip orientation quaternion [x, y, z, w]",
+    )
     velocity: float = Field(description="Tip velocity (m/s)")
     contact_force: float = Field(description="Contact force magnitude (N)")
+    wall_distance: float = Field(default=0.0, description="Min wall distance (m)")
+    curvature: float = Field(default=0.0, description="Local tip curvature (m^-1)")
     episode_length: int = Field(description="Steps in current episode")
     target_position: Vector3 = Field(description="Target position")
+    path_progress: float = Field(default=0.0, description="Planned-path progress [0, 1]")
+    path_deviation: float = Field(default=0.0, description="Deviation from path (m)")
     reward: float = Field(description="Reward from last step")
     done: bool = Field(description="Episode terminated")
     safety_status: SafetyStatus = Field(default="STANDBY", description="Safety status")

@@ -133,18 +133,23 @@ def plan_path(request: PlanPathRequest) -> PlanPathResponse:
 # ============================================================================
 
 
-def _state_to_response(state, engine) -> NavigationStateResponse:
+def _state_to_response(state, engine=None) -> NavigationStateResponse:
     """Convert NavigationState to response model."""
     return NavigationStateResponse(
         tip_position=state.tip_position,
         tip_direction=state.tip_direction,
+        tip_quaternion=state.tip_quaternion,
         velocity=state.velocity,
         contact_force=state.contact_force,
+        wall_distance=state.wall_distance,
+        curvature=state.curvature,
         episode_length=state.episode_length,
         target_position=state.target_position,
+        path_progress=state.path_progress,
+        path_deviation=state.path_deviation,
         reward=state.reward,
         done=state.done,
-        safety_status=engine.get_safety_status(state),
+        safety_status=state.safety_status,
     )
 
 

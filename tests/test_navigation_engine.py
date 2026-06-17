@@ -110,6 +110,88 @@ class TestSchemas:
         assert request.use_pixels is False
 
 
+class TestNavigationStateExtended:
+    """Tests for the extended NavigationState fields (Stage 7)."""
+
+    def test_extended_defaults(self):
+        from services.navigation_engine import NavigationState
+
+        state = NavigationState()
+        assert state.tip_quaternion == [0.0, 0.0, 0.0, 1.0]
+        assert state.wall_distance == 0.0
+        assert state.curvature == 0.0
+        assert state.path_progress == 0.0
+        assert state.path_deviation == 0.0
+        assert state.safety_status == "STANDBY"
+
+    def test_as_dict_contains_extended_fields(self):
+        from services.navigation_engine import NavigationState
+
+        result = NavigationState().as_dict()
+        for key in (
+            "tip_quaternion",
+            "wall_distance",
+            "curvature",
+            "path_progress",
+            "path_deviation",
+            "safety_status",
+        ):
+            assert key in result
+
+
+class TestNavigationEngineHelpers:
+    """Unit tests for pure NavigationEngine helpers (no MuJoCo required)."""
+
+    def _engine(self, **kwargs):
+        from services.navigation_engine import NavigationEngine
+
+        return NavigationEngine(**kwargs)
+
+    def test_no_planned_path_returns_zero(self):
+        engine = self._engine()
+        assert engine._compute_path_progress([1.0, 2.0, 3.0]) == (0.0, 0.0)
+
+    def test_planned_path_progress_midpoint(self):
+        engine = self._engine(planned_path=[[0, 0, 0], [0, 0, 1], [0, 0, 2]])
+        progress, deviation = engine._compute_path_progress([0.0, 0.0, 1.0])
+        assert progress == pytest.approx(0.5)
+        assert deviation == pytest.approx(0.0)
+
+    def test_planned_path_progress_endpoint_with_deviation(self):
+        engine = self._engine(planned_path=[[0, 0, 0], [0, 0, 1], [0, 0, 2]])
+        progress, deviation = engine._compute_path_progress([0.5, 0.0, 2.0])
+        assert progress == pytest.approx(1.0)
+        assert deviation == pytest.approx(0.5)
+
+    def test_set_planned_path_clear(self):
+        engine = self._engine(planned_path=[[0, 0, 0], [0, 0, 1]])
+        assert engine._path_total_len > 0
+        engine.set_planned_path(None)
+        assert engine._compute_path_progress([0.0, 0.0, 0.5]) == (0.0, 0.0)
+
+    def test_curvature_insufficient_history(self):
+        engine = self._engine()
+        engine._tip_history.extend([[0, 0, 0], [1, 0, 0]])
+        assert engine._compute_curvature() == 0.0
+
+    def test_curvature_collinear_is_zero(self):
+        engine = self._engine()
+        engine._tip_history.extend([[0, 0, 0], [1, 0, 0], [2, 0, 0]])
+        assert engine._compute_curvature() == 0.0
+
+    def test_curvature_right_angle_positive(self):
+        engine = self._engine()
+        engine._tip_history.extend([[0, 0, 0], [1, 0, 0], [1, 1, 0]])
+        assert engine._compute_curvature() > 0.0
+
+    def test_safety_status_bands(self):
+        engine = self._engine()
+        assert engine._compute_safety_status(0, 0.0) == "STANDBY"
+        assert engine._compute_safety_status(5, 0.05) == "SAFE_NAV"
+        assert engine._compute_safety_status(5, 0.0007) == "DANGER_WARNING"
+        assert engine._compute_safety_status(5, 0.0001) == "COLLISION_STOP"
+
+
 # ============================================================================
 # Integration Tests (Require MuJoCo)
 # ============================================================================
@@ -237,6 +319,57 @@ class TestVPPPhantomIntegration:
         assert state.episode_length == 1
         assert len(state.tip_position) == 3
         assert state.contact_force >= 0.0
+
+        engine.close()
+
+    def test_vpp_phantom_extended_state_fields(self, vpp_mujoco_dir):
+        from services.navigation_engine import NavigationEngine
+
+        engine = NavigationEngine(
+            phantom="case_001_vpp",
+            target="endpoints_1",
+            assets_dir=str(vpp_mujoco_dir),
+        )
+
+        state = engine.reset()
+        # At reset the episode has not started -> STANDBY.
+        assert state.safety_status == "STANDBY"
+        assert len(state.tip_quaternion) == 4
+
+        state = engine.step(delta_push=0.2, delta_rotate=0.0)
+        assert state.safety_status in (
+            "SAFE_NAV",
+            "DANGER_WARNING",
+            "COLLISION_STOP",
+        )
+        assert state.wall_distance >= 0.0
+        assert state.curvature >= 0.0
+        assert 0.0 <= state.path_progress <= 1.0
+        assert state.path_deviation == 0.0  # no planned path provided
+
+        engine.close()
+
+    def test_vpp_phantom_path_progress_tracking(self, vpp_mujoco_dir):
+        from services.navigation_engine import NavigationEngine
+
+        engine = NavigationEngine(
+            phantom="case_001_vpp",
+            target="endpoints_1",
+            assets_dir=str(vpp_mujoco_dir),
+        )
+
+        # Reset once to obtain a valid tip position, then build a trivial path
+        # passing through it so progress/deviation are well-defined.
+        state = engine.reset()
+        tip = state.tip_position
+        engine.set_planned_path([tip, [tip[0], tip[1], tip[2] + 0.05]])
+
+        state = engine.reset()
+        for _ in range(5):
+            state = engine.step(delta_push=0.3, delta_rotate=0.0)
+
+        assert 0.0 <= state.path_progress <= 1.0
+        assert state.path_deviation >= 0.0
 
         engine.close()
 

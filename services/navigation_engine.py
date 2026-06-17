@@ -6,25 +6,37 @@ guidewire simulation through the NavigationEngine class.
 
 from __future__ import annotations
 
-import time
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 
 import numpy as np
 
 
 @dataclass
 class NavigationState:
-    """Normalized state representation from CathSim environment."""
+    """Normalized state representation from CathSim environment.
+
+    Coordinates and distances are in MuJoCo units (meters). Curvature is in
+    inverse meters (m^-1). The quaternion uses [x, y, z, w] order to match the
+    Godot/WebSocket protocol convention.
+    """
 
     tip_position: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     tip_direction: list[float] = field(default_factory=lambda: [0.0, 0.0, 1.0])
+    tip_quaternion: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0, 1.0])
     velocity: float = 0.0
     contact_force: float = 0.0
+    wall_distance: float = 0.0
+    curvature: float = 0.0
     episode_length: int = 0
     target_position: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    path_progress: float = 0.0
+    path_deviation: float = 0.0
     joint_positions: list[float] = field(default_factory=list)
     joint_velocities: list[float] = field(default_factory=list)
+    safety_status: str = "STANDBY"
+    risk_score: float = 0.0
     reward: float = 0.0
     done: bool = False
 
@@ -33,12 +45,19 @@ class NavigationState:
         return {
             "tip_position": self.tip_position,
             "tip_direction": self.tip_direction,
+            "tip_quaternion": self.tip_quaternion,
             "velocity": self.velocity,
             "contact_force": self.contact_force,
+            "wall_distance": self.wall_distance,
+            "curvature": self.curvature,
             "episode_length": self.episode_length,
             "target_position": self.target_position,
+            "path_progress": self.path_progress,
+            "path_deviation": self.path_deviation,
             "joint_positions": self.joint_positions,
             "joint_velocities": self.joint_velocities,
+            "safety_status": self.safety_status,
+            "risk_score": self.risk_score,
             "reward": self.reward,
             "done": self.done,
         }
@@ -71,6 +90,14 @@ class NavigationEngine:
     VALID_PHANTOMS = ("low_tort", "phantom2", "phantom3", "phantom4")
     VALID_TARGETS = ("bca", "lcca")
 
+    # Distance reported when the guidewire is not in contact with any wall (m).
+    MAX_WALL_DISTANCE = 0.05
+    # Safety thresholds on wall distance, in MuJoCo meters (1.0mm / 0.5mm).
+    WALL_DISTANCE_SAFE = 0.001
+    WALL_DISTANCE_DANGER = 0.0005
+    # Number of recent tip samples kept for curvature estimation.
+    TIP_HISTORY_LEN = 5
+
     def __init__(
         self,
         phantom: str = "low_tort",
@@ -78,6 +105,7 @@ class NavigationEngine:
         use_pixels: bool = False,
         image_size: int = 80,
         assets_dir: str = None,
+        planned_path: Sequence[Sequence[float]] | None = None,
     ):
         """Initialize the navigation engine.
 
@@ -88,6 +116,9 @@ class NavigationEngine:
             use_pixels: Whether to include pixel observations
             image_size: Image size for pixel observations
             assets_dir: Optional path to phantom assets directory for VPP phantoms
+            planned_path: Optional planned path as a list of [x, y, z] points in
+                          MuJoCo meters. When provided, path_progress and
+                          path_deviation are computed each step.
         """
         self.phantom = phantom
         self.target = target
@@ -100,6 +131,49 @@ class NavigationEngine:
         self._episode_length = 0
         self._previous_tip_pos = None
         self._initialized = False
+
+        self._tip_history: deque[list[float]] = deque(maxlen=self.TIP_HISTORY_LEN)
+
+        from services.risk_assessor import RiskAssessor
+
+        self._risk_assessor = RiskAssessor()
+
+        # Planned path state (populated by set_planned_path / _setup_path).
+        self._path_points: np.ndarray | None = None
+        self._path_cumlen: np.ndarray | None = None
+        self._path_total_len: float = 0.0
+        self._path_kdtree = None
+        if planned_path is not None:
+            self.set_planned_path(planned_path)
+
+    def set_planned_path(self, planned_path: Sequence[Sequence[float]] | None) -> None:
+        """Set or clear the planned path used for progress/deviation tracking.
+
+        Args:
+            planned_path: List of [x, y, z] points in MuJoCo meters, or None to
+                          disable path tracking.
+        """
+        if planned_path is None or len(planned_path) < 2:
+            self._path_points = None
+            self._path_cumlen = None
+            self._path_total_len = 0.0
+            self._path_kdtree = None
+            return
+
+        points = np.asarray(planned_path, dtype=np.float64)
+        segment_len = np.linalg.norm(np.diff(points, axis=0), axis=1)
+        cumlen = np.concatenate([[0.0], np.cumsum(segment_len)])
+
+        self._path_points = points
+        self._path_cumlen = cumlen
+        self._path_total_len = float(cumlen[-1])
+
+        try:
+            from scipy.spatial import cKDTree
+
+            self._path_kdtree = cKDTree(points)
+        except Exception:
+            self._path_kdtree = None
 
     def _ensure_initialized(self) -> None:
         """Lazy initialization of CathSim environment."""
@@ -131,6 +205,7 @@ class NavigationEngine:
         self._time_step = self._env.reset()
         self._episode_length = 0
         self._previous_tip_pos = None
+        self._tip_history.clear()
 
         return self._extract_state()
 
@@ -163,16 +238,22 @@ class NavigationEngine:
         task = self._env.task
 
         tip_pos = task.get_head_pos(physics).tolist()
+        self._tip_history.append(tip_pos)
 
         tip_direction = self._compute_tip_direction(physics)
+        tip_quaternion = self._compute_tip_quaternion(physics)
 
         velocity = self._compute_velocity(tip_pos)
 
-        contact_force = task.get_total_force(physics)
+        contact_force = float(task.get_total_force(physics))
+        wall_distance = self._compute_wall_distance(physics)
+        curvature = self._compute_curvature()
 
         target_pos = task.target_pos
         if isinstance(target_pos, np.ndarray):
             target_pos = target_pos.tolist()
+
+        path_progress, path_deviation = self._compute_path_progress(tip_pos)
 
         joint_pos = obs.get("joint_pos", np.array([])).tolist()
         joint_vel = obs.get("joint_vel", np.array([])).tolist()
@@ -180,18 +261,115 @@ class NavigationEngine:
         reward = self._time_step.reward if self._time_step.reward is not None else 0.0
         done = self._time_step.last()
 
-        return NavigationState(
+        safety_status = self._compute_safety_status(self._episode_length, wall_distance)
+
+        state = NavigationState(
             tip_position=tip_pos,
             tip_direction=tip_direction,
+            tip_quaternion=tip_quaternion,
             velocity=float(velocity),
-            contact_force=float(contact_force),
+            contact_force=contact_force,
+            wall_distance=float(wall_distance),
+            curvature=float(curvature),
             episode_length=self._episode_length,
             target_position=target_pos,
+            path_progress=float(path_progress),
+            path_deviation=float(path_deviation),
             joint_positions=joint_pos,
             joint_velocities=joint_vel,
+            safety_status=safety_status,
             reward=float(reward),
             done=done,
         )
+        state.risk_score = self._risk_assessor.assess(state)["risk_score"]
+        return state
+
+    def _compute_tip_quaternion(self, physics) -> list[float]:
+        """Get the tip body orientation as a quaternion in [x, y, z, w] order.
+
+        MuJoCo stores quaternions as [w, x, y, z]; we reorder to [x, y, z, w] to
+        match the Godot/WebSocket protocol convention.
+        """
+        try:
+            body_id = int(physics.model.geom_bodyid[-1])
+            w, x, y, z = (float(v) for v in physics.data.xquat[body_id])
+            return [x, y, z, w]
+        except Exception:
+            return [0.0, 0.0, 0.0, 1.0]
+
+    def _compute_wall_distance(self, physics) -> float:
+        """Estimate the minimum gap between the guidewire and the vessel wall.
+
+        This is a contact-based proxy: when MuJoCo reports active contacts the
+        gap distance (clamped at 0 for penetration) is used; otherwise a large
+        sentinel (MAX_WALL_DISTANCE) is returned. Distances are in meters.
+        """
+        ncon = int(physics.data.ncon)
+        if ncon == 0:
+            return self.MAX_WALL_DISTANCE
+
+        dists = np.asarray(physics.data.contact.dist[:ncon], dtype=np.float64)
+        min_gap = float(np.clip(dists, 0.0, None).min())
+        return min(min_gap, self.MAX_WALL_DISTANCE)
+
+    def _compute_curvature(self) -> float:
+        """Estimate local tip curvature (m^-1) via Menger curvature.
+
+        Uses the last three tip positions; returns 0 when insufficient history
+        or when the points are (near-)collinear or coincident.
+        """
+        if len(self._tip_history) < 3:
+            return 0.0
+
+        p1 = np.asarray(self._tip_history[-3], dtype=np.float64)
+        p2 = np.asarray(self._tip_history[-2], dtype=np.float64)
+        p3 = np.asarray(self._tip_history[-1], dtype=np.float64)
+
+        a = np.linalg.norm(p1 - p2)
+        b = np.linalg.norm(p2 - p3)
+        c = np.linalg.norm(p1 - p3)
+        if a < 1e-9 or b < 1e-9 or c < 1e-9:
+            return 0.0
+
+        area = 0.5 * np.linalg.norm(np.cross(p2 - p1, p3 - p1))
+        if area < 1e-12:
+            return 0.0
+
+        return 4.0 * area / (a * b * c)
+
+    def _compute_path_progress(self, tip_pos: list[float]) -> tuple[float, float]:
+        """Compute progress along and deviation from the planned path.
+
+        Returns:
+            (path_progress, path_deviation) where progress is in [0, 1] and
+            deviation is the distance to the nearest path vertex (meters).
+            Returns (0.0, 0.0) when no planned path is set.
+        """
+        if self._path_points is None or self._path_total_len <= 0.0:
+            return 0.0, 0.0
+
+        tip = np.asarray(tip_pos, dtype=np.float64)
+        if self._path_kdtree is not None:
+            deviation, idx = self._path_kdtree.query(tip)
+            idx = int(idx)
+        else:
+            diffs = self._path_points - tip
+            sq = np.einsum("ij,ij->i", diffs, diffs)
+            idx = int(np.argmin(sq))
+            deviation = float(np.sqrt(sq[idx]))
+
+        progress = float(self._path_cumlen[idx] / self._path_total_len)
+        return progress, float(deviation)
+
+    def _compute_safety_status(self, episode_length: int, wall_distance: float) -> SafetyStatus:
+        """Derive the safety status from episode state and wall distance."""
+        if episode_length == 0:
+            return "STANDBY"
+        if wall_distance >= self.WALL_DISTANCE_SAFE:
+            return "SAFE_NAV"
+        if wall_distance >= self.WALL_DISTANCE_DANGER:
+            return "DANGER_WARNING"
+        return "COLLISION_STOP"
 
     def _compute_tip_direction(self, physics) -> list[float]:
         """Compute tip direction from the last two geom positions."""
@@ -224,8 +402,38 @@ class NavigationEngine:
 
         return velocity_per_second
 
+    def get_render_bodies(self) -> list[dict[str, list[float]]]:
+        """Return per-segment guidewire render data for tube rendering.
+
+        Each entry is ``{"pos": [x, y, z], "quat": [x, y, z, w]}`` for one
+        guidewire geom, ordered from base to tip. Quaternions are reordered from
+        MuJoCo's [w, x, y, z] to the protocol's [x, y, z, w]. Returns an empty
+        list when the environment is not initialized.
+        """
+        if not self._initialized or self._env is None:
+            return []
+
+        physics = self._env.physics
+        model = physics.model
+        data = physics.data
+
+        bodies: list[dict[str, list[float]]] = []
+        for geom_id in range(model.ngeom):
+            body_id = int(model.geom_bodyid[geom_id])
+            name = model.id2name(body_id, "body") or ""
+            if "guidewire" not in name:
+                continue
+            pos = [float(v) for v in data.geom_xpos[geom_id]]
+            w, x, y, z = (float(v) for v in data.xquat[body_id])
+            bodies.append({"pos": pos, "quat": [x, y, z, w]})
+        return bodies
+
     def get_safety_status(self, state: NavigationState) -> SafetyStatus:
-        """Determine safety status based on current state.
+        """Return the safety status carried by the given state.
+
+        The status is computed during state extraction from the episode length
+        and wall distance (see ``_compute_safety_status``). This accessor is
+        kept for backward compatibility with existing callers.
 
         Args:
             state: Current navigation state
@@ -233,16 +441,7 @@ class NavigationEngine:
         Returns:
             Safety status string
         """
-        if self._episode_length == 0:
-            return "STANDBY"
-
-        if state.contact_force > 0.5:
-            return "COLLISION_STOP"
-
-        if state.contact_force > 0.1:
-            return "DANGER_WARNING"
-
-        return "SAFE_NAV"
+        return state.safety_status  # type: ignore[return-value]
 
     def close(self) -> None:
         """Clean up resources."""
@@ -264,3 +463,10 @@ class NavigationEngine:
     def episode_length(self) -> int:
         """Current episode length."""
         return self._episode_length
+
+    @property
+    def planned_path(self) -> list[list[float]]:
+        """The active planned path as a list of [x, y, z] points (meters)."""
+        if self._path_points is None:
+            return []
+        return self._path_points.tolist()

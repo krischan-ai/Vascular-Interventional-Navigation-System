@@ -77,6 +77,8 @@ class SessionManager:
         phantom: str = "low_tort",
         target: str = "bca",
         use_pixels: bool = False,
+        assets_dir: str | None = None,
+        planned_path=None,
     ) -> tuple[str, NavigationState]:
         """Create a new navigation session.
 
@@ -84,6 +86,9 @@ class SessionManager:
             phantom: Phantom model name
             target: Target site name
             use_pixels: Whether to include pixel observations
+            assets_dir: Optional phantom assets directory for VPP phantoms
+            planned_path: Optional planned path ([x, y, z] points in meters) for
+                          path progress/deviation tracking
 
         Returns:
             Tuple of (session_id, initial_state)
@@ -106,6 +111,8 @@ class SessionManager:
                 phantom=phantom,
                 target=target,
                 use_pixels=use_pixels,
+                assets_dir=assets_dir,
+                planned_path=planned_path,
             )
 
             initial_state = engine.reset()
