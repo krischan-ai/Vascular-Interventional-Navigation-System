@@ -6,11 +6,20 @@ guidewire simulation through the NavigationEngine class.
 
 from __future__ import annotations
 
+import sys
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal, Sequence
 
 import numpy as np
+
+# Make the in-repo `cathsim` package importable even when the server runs in a
+# Python environment where it was not installed editable (e.g. uvicorn launched
+# outside the project venv). cathsim lives under <project_root>/src.
+_SRC_DIR = Path(__file__).resolve().parents[1] / "src"
+if _SRC_DIR.is_dir() and str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
 
 
 @dataclass
@@ -106,6 +115,8 @@ class NavigationEngine:
         image_size: int = 80,
         assets_dir: str = None,
         planned_path: Sequence[Sequence[float]] | None = None,
+        n_bodies: int = 80,
+        n_substeps: int | None = None,
     ):
         """Initialize the navigation engine.
 
@@ -119,12 +130,18 @@ class NavigationEngine:
             planned_path: Optional planned path as a list of [x, y, z] points in
                           MuJoCo meters. When provided, path_progress and
                           path_deviation are computed each step.
+            n_bodies: Number of guidewire segments. Fewer segments greatly reduce
+                      per-step cost (fewer contacts/DOFs) for interactive use.
+            n_substeps: Physics substeps per control step. Fewer is faster; None
+                        uses the model default (3).
         """
         self.phantom = phantom
         self.target = target
         self.use_pixels = use_pixels
         self.image_size = image_size
         self.assets_dir = assets_dir
+        self.n_bodies = n_bodies
+        self.n_substeps = n_substeps
 
         self._env = None
         self._time_step = None
@@ -133,6 +150,9 @@ class NavigationEngine:
         self._initialized = False
 
         self._tip_history: deque[list[float]] = deque(maxlen=self.TIP_HISTORY_LEN)
+        # Cached (geom_id, body_id) pairs for guidewire render data; built once
+        # since the model structure is fixed after initialization.
+        self._render_geom_ids: list[tuple[int, int]] | None = None
 
         from services.risk_assessor import RiskAssessor
 
@@ -191,6 +211,8 @@ class NavigationEngine:
             visualize_target=False,
             sample_target=False,
             assets_dir=self.assets_dir,
+            n_bodies=self.n_bodies,
+            n_substeps=self.n_substeps,
         )
         self._initialized = True
 
@@ -417,12 +439,17 @@ class NavigationEngine:
         model = physics.model
         data = physics.data
 
+        if self._render_geom_ids is None:
+            ids: list[tuple[int, int]] = []
+            for geom_id in range(model.ngeom):
+                body_id = int(model.geom_bodyid[geom_id])
+                name = model.id2name(body_id, "body") or ""
+                if "guidewire" in name:
+                    ids.append((geom_id, body_id))
+            self._render_geom_ids = ids
+
         bodies: list[dict[str, list[float]]] = []
-        for geom_id in range(model.ngeom):
-            body_id = int(model.geom_bodyid[geom_id])
-            name = model.id2name(body_id, "body") or ""
-            if "guidewire" not in name:
-                continue
+        for geom_id, body_id in self._render_geom_ids:
             pos = [float(v) for v in data.geom_xpos[geom_id]]
             w, x, y, z = (float(v) for v in data.xquat[body_id])
             bodies.append({"pos": pos, "quat": [x, y, z, w]})

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import traceback
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import lru_cache
@@ -68,6 +69,8 @@ class SessionStartData(BaseModel):
     target: str = "bca"
     use_pixels: bool = False
     batch_mode: bool = False
+    n_bodies: int = 80
+    n_substeps: int | None = None
 
 
 class ResetData(BaseModel):
@@ -120,7 +123,7 @@ class WebSocketHandler:
     """
 
     PING_INTERVAL = 5.0  # seconds
-    PONG_TIMEOUT = 15.0  # seconds
+    PONG_TIMEOUT = 45.0  # seconds (generous margin for MuJoCo cold-start init)
     MIN_CONTROL_INTERVAL = 0.033  # ~30Hz max
 
     def __init__(self, session_manager: SessionManager):
@@ -197,9 +200,20 @@ class WebSocketHandler:
                 conn_state.is_alive = False
                 break
             except Exception as e:
+                traceback.print_exc()
                 await self._send_error(
-                    conn_state, "PARSE_ERROR", f"Invalid message: {e}"
+                    conn_state, "PARSE_ERROR", f"{type(e).__name__}: {e}"
                 )
+
+    async def _run_blocking(self, func, *args, **kwargs):
+        """Run a blocking call (MuJoCo step/reset, path planning) off the event
+        loop so heartbeats keep flowing and the connection does not time out."""
+        loop = asyncio.get_running_loop()
+        if kwargs:
+            from functools import partial
+
+            return await loop.run_in_executor(None, partial(func, *args, **kwargs))
+        return await loop.run_in_executor(None, func, *args)
 
     async def _handle_message(
         self, conn_state: ConnectionState, raw_data: dict
@@ -255,10 +269,13 @@ class WebSocketHandler:
             return
 
         try:
-            session_id, state = self._session_manager.create_session(
+            session_id, state = await self._run_blocking(
+                self._session_manager.create_session,
                 phantom=params.phantom,
                 target=params.target,
                 use_pixels=params.use_pixels,
+                n_bodies=params.n_bodies,
+                n_substeps=params.n_substeps,
             )
             conn_state.session_id = session_id
             conn_state.batch_mode = params.batch_mode
@@ -274,8 +291,11 @@ class WebSocketHandler:
                 },
             )
 
-        except RuntimeError as e:
-            await self._send_error(conn_state, "SESSION_ERROR", str(e))
+        except Exception as e:  # noqa: BLE001 - report any init failure to the client
+            traceback.print_exc()
+            await self._send_error(
+                conn_state, "SESSION_ERROR", f"{type(e).__name__}: {e}"
+            )
 
     async def _handle_session_stop(self, conn_state: ConnectionState) -> None:
         """Handle session_stop message."""
@@ -320,7 +340,8 @@ class WebSocketHandler:
             return
 
         try:
-            state = self._session_manager.step(
+            state = await self._run_blocking(
+                self._session_manager.step,
                 session_id=conn_state.session_id,
                 delta_push=control.delta_push,
                 delta_rotate=control.delta_rotate,
@@ -371,7 +392,8 @@ class WebSocketHandler:
             return
 
         try:
-            result = planner.plan(
+            result = await self._run_blocking(
+                planner.plan,
                 req.start_position,
                 req.end_position,
                 algorithm=req.algorithm,
@@ -399,7 +421,9 @@ class WebSocketHandler:
             return
 
         try:
-            state = self._session_manager.reset_session(conn_state.session_id)
+            state = await self._run_blocking(
+                self._session_manager.reset_session, conn_state.session_id
+            )
             info = self._session_manager.get_session_info(conn_state.session_id)
 
             if conn_state.batch_mode:

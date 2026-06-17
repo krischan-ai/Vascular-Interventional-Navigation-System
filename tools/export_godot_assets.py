@@ -22,6 +22,30 @@ import trimesh
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_ROOT = PROJECT_ROOT / "data" / "vpp_assets"
 GODOT_MODELS = PROJECT_ROOT / "godot_client" / "assets" / "models"
+PHANTOM_MESH_ROOT = (
+    PROJECT_ROOT / "src" / "cathsim" / "dm" / "components" / "phantom_assets" / "meshes"
+)
+
+
+def export_cathsim_phantom(phantom_name: str) -> None:
+    """Export a CathSim phantom's visual mesh to GLB for the Godot client.
+
+    The guidewire is simulated inside this phantom (at native scale, origin), so
+    rendering it aligns the vessel with the streamed guidewire positions.
+    """
+    visual_stl = PHANTOM_MESH_ROOT / phantom_name / "visual.stl"
+    if not visual_stl.is_file():
+        raise FileNotFoundError(f"Phantom visual mesh not found: {visual_stl}")
+
+    print(f"Loading phantom visual mesh: {visual_stl}")
+    mesh = trimesh.load(visual_stl)
+    print(f"  {len(mesh.vertices)} verts / {len(mesh.faces)} faces")
+
+    GODOT_MODELS.mkdir(parents=True, exist_ok=True)
+    out_path = GODOT_MODELS / f"{phantom_name}.glb"
+    mesh.export(out_path, file_type="glb")
+    size_mb = out_path.stat().st_size / (1024 * 1024)
+    print(f"Exported GLB: {out_path} ({size_mb:.2f} MB)")
 
 
 def decimate(mesh: trimesh.Trimesh, max_faces: int) -> trimesh.Trimesh:
@@ -85,8 +109,16 @@ def main() -> None:
         default=120000,
         help="Decimate the vessel mesh down to at most this many faces",
     )
+    parser.add_argument(
+        "--phantom",
+        default=None,
+        help="Export a CathSim phantom visual mesh (e.g. low_tort) instead of the VPP case",
+    )
     args = parser.parse_args()
-    export_case(args.case_id, args.max_faces)
+    if args.phantom:
+        export_cathsim_phantom(args.phantom)
+    else:
+        export_case(args.case_id, args.max_faces)
 
 
 if __name__ == "__main__":

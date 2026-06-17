@@ -79,6 +79,8 @@ class SessionManager:
         use_pixels: bool = False,
         assets_dir: str | None = None,
         planned_path=None,
+        n_bodies: int = 80,
+        n_substeps: int | None = None,
     ) -> tuple[str, NavigationState]:
         """Create a new navigation session.
 
@@ -113,6 +115,8 @@ class SessionManager:
                 use_pixels=use_pixels,
                 assets_dir=assets_dir,
                 planned_path=planned_path,
+                n_bodies=n_bodies,
+                n_substeps=n_substeps,
             )
 
             initial_state = engine.reset()

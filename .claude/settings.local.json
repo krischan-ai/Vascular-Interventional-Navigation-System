@@ -16,7 +16,8 @@
       "Bash(\".venv/Scripts/python.exe\":*)",
       "Bash(pip show:*)",
       "Bash(python:*)",
-      "Bash(git stash *)"
+      "Bash(git stash *)",
+      "Bash(.venv/Scripts/python.exe -c \"from cathsim.dm import make_dm_env; print\\('import OK'\\)\")"
     ]
   }
 }

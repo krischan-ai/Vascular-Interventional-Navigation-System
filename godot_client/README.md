@@ -24,25 +24,40 @@ godot_client/
 > 设计取舍：场景采用「最小 `.tscn` + 代码构建」，把节点装配放进 GDScript，
 > 降低手写 `.tscn`/`InputMap` 序列化出错的风险。键盘用物理按键轮询，无需自定义 InputMap。
 
-## 前置：生成血管 GLB
+## 前置：生成血管/体模 GLB
 
-Godot 只能导入 glTF/GLB，无法直接读 VTK/STL。运行以下命令从 `visual.stl`
-（已是 MuJoCo 米制，与导丝物理坐标同帧）导出 GLB：
+Godot 只能导入 glTF/GLB，无法直接读 VTK/STL。
+
+**当前默认渲染 low_tort 体模**（与后端默认仿真的 phantom 一致，二者同坐标系、导丝叠加对齐）：
+
+```powershell
+python tools/export_godot_assets.py --phantom low_tort
+```
+输出 `godot_client/assets/models/low_tort.glb`（约 0.3MB）。
+
+VPP 真实血管（case_001，约 10MB，**注意**：当前后端默认在 low_tort 体模里仿真，
+渲染 VPP 血管会与导丝坐标不一致，留待后续 VPP 导航对齐）：
 
 ```powershell
 python tools/export_godot_assets.py
 ```
-
-输出 `godot_client/assets/models/blood_vessels.glb`（约 10MB）。
+输出 `godot_client/assets/models/blood_vessels.glb`。
 
 ## 运行
 
-1. 启动后端服务：
+1. 启动后端服务（**必须用安装了 `cathsim` 的 `.venv` Python**，否则建会话时报
+   `ModuleNotFoundError: No module named 'cathsim'`）：
 
    ```powershell
-   $env:MUJOCO_GL="glfw"
+   # 推荐：直接用 venv 的 python 启动
+   .\.venv\Scripts\python.exe -m uvicorn services.main:app --host 0.0.0.0 --port 8000
+
+   # 或先激活 venv 再启动
+   .\.venv\Scripts\Activate.ps1
    uvicorn services.main:app --host 0.0.0.0 --port 8000
    ```
+
+   > 仿真不渲染像素（`use_pixels=False`），无需设置 `MUJOCO_GL`。
 
 2. 用 Godot 4.4 打开 `godot_client/`（首次打开会自动导入 GLB 并生成 `.godot/` 缓存）。
 

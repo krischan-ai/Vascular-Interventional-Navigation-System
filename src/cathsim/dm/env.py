@@ -612,6 +612,8 @@ def make_dm_env(
     phantom: str = "phantom3",
     target: str = "bca",
     assets_dir: str = None,
+    n_bodies: int = 80,
+    n_substeps: int = None,
     **kwargs,
 ) -> composer.Environment:
     """Makes a dm_control environment given a configuration.
@@ -630,7 +632,7 @@ def make_dm_env(
 
     phantom_obj = Phantom(phantom + ".xml", assets_dir=assets_dir)
     tip = Tip(n_bodies=4)
-    guidewire = Guidewire(n_bodies=80)
+    guidewire = Guidewire(n_bodies=n_bodies)
     task = Navigate(
         phantom=phantom_obj,
         guidewire=guidewire,
@@ -638,6 +640,11 @@ def make_dm_env(
         target=target,
         **kwargs,
     )
+    # Optional override of the number of physics substeps per control step.
+    # Fewer substeps -> faster stepping (useful for interactive sessions) at the
+    # cost of integration accuracy. Must be set before the Environment caches it.
+    if n_substeps is not None:
+        task.control_timestep = task.physics_timestep * n_substeps
     env = composer.Environment(
         task=task,
         random_state=random_state,

@@ -1,28 +1,28 @@
-; Godot 4.4 project configuration for the CathSim VPP navigation client.
 ; Engine configuration file.
-; Generated/authored for Stage 8 (see doc/05-开发进度记录.md).
+; It's best edited using the editor UI and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
 
 config_version=5
+
+[animation]
+
+compatibility/default_parent_skeleton_in_mesh_instance_3d=true
 
 [application]
 
 config/name="CathSim VPP Client"
 run/main_scene="res://scenes/main.tscn"
-config/features=PackedStringArray("4.4", "Forward Plus")
+config/features=PackedStringArray("4.6", "Forward Plus")
 
 [display]
 
 window/size/viewport_width=1280
 window/size/viewport_height=720
 
-[rendering]
-
-renderer/rendering_method="forward_plus"
-
 [network]
 
-; Backend WebSocket endpoint (FastAPI service from services/main.py).
-; Read by scripts/websocket_client.gd. Keyboard control (W/S/A/D, R) is handled
-; via direct physical-key polling in scripts/input_handler.gd, so no custom
-; InputMap actions are required here.
 config/server_url="ws://localhost:8000/ws/session"
