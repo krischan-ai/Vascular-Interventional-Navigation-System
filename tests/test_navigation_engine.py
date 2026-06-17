@@ -184,6 +184,64 @@ class TestNavigationEngineIntegration:
 
 
 @pytest.mark.slow
+class TestVPPPhantomIntegration:
+    """End-to-end checks for the generated VPP MuJoCo phantom."""
+
+    @pytest.fixture
+    def vpp_mujoco_dir(self):
+        from pathlib import Path
+
+        case_dir = Path(__file__).resolve().parents[1] / "data" / "vpp_assets" / "case_001"
+        mujoco_dir = case_dir / "mujoco"
+        if not (mujoco_dir / "case_001_vpp.xml").is_file():
+            pytest.skip("VPP MuJoCo phantom is not generated")
+        return mujoco_dir
+
+    def test_vpp_phantom_sites_load(self, vpp_mujoco_dir):
+        from cathsim.dm.components.phantom import Phantom
+
+        phantom = Phantom("case_001_vpp.xml", assets_dir=vpp_mujoco_dir)
+
+        assert len(phantom.sites) == 25
+        assert "endpoints_1" in phantom.sites
+        assert phantom.phantom_visual.is_file()
+
+    def test_vpp_mjcf_physics_compiles(self, vpp_mujoco_dir):
+        from dm_control import mjcf
+
+        root = mjcf.from_file(
+            (vpp_mujoco_dir / "case_001_vpp.xml").as_posix(),
+            False,
+            vpp_mujoco_dir.as_posix(),
+        )
+        physics = mjcf.Physics.from_mjcf_model(root)
+
+        assert physics.model.nmesh == 129
+        assert physics.model.ngeom == 129
+
+    def test_navigation_engine_vpp_phantom_reset_and_step(self, vpp_mujoco_dir):
+        from services.navigation_engine import NavigationEngine
+
+        engine = NavigationEngine(
+            phantom="case_001_vpp",
+            target="endpoints_1",
+            assets_dir=str(vpp_mujoco_dir),
+        )
+
+        state = engine.reset()
+        assert state.episode_length == 0
+        assert len(state.tip_position) == 3
+        assert state.target_position == [-0.97565564, -0.21722368, 0.25031761]
+
+        state = engine.step(delta_push=0.1, delta_rotate=0.0)
+        assert state.episode_length == 1
+        assert len(state.tip_position) == 3
+        assert state.contact_force >= 0.0
+
+        engine.close()
+
+
+@pytest.mark.slow
 class TestSessionAPIIntegration:
     """Integration tests for Session REST API."""
 

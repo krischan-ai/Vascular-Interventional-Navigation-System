@@ -134,10 +134,11 @@ def load_targets(case_dir: Path) -> dict[str, list[float]]:
         data = json.load(f)
 
     targets = {}
-    for key, value in data.items():
-        if isinstance(value, list) and len(value) == 3:
-            pos_m = [v / 1000.0 for v in value]
-            targets[key] = pos_m
+    for key, value in data.get("endpoints", {}).items():
+        position = value.get("position_lps") if isinstance(value, dict) else None
+        if isinstance(position, list) and len(position) == 3:
+            pos_m = [v / 1000.0 for v in position]
+            targets[key.lower().replace("-", "_").replace(" ", "_")] = pos_m
 
     return targets
 
@@ -156,7 +157,6 @@ def generate_mujoco_xml(
         '    <geom type="mesh" />',
         '  </default>',
         '  <asset>',
-        f'    <mesh name="visual" file="{case_id}/{mesh_info["visual"]}" />',
     ]
 
     for hull_file in mesh_info["hulls"]:
@@ -171,7 +171,6 @@ def generate_mujoco_xml(
         lines.append(f'    <site name="{name}" pos="{pos_str}" />')
 
     lines.append('    <body name="phantom">')
-    lines.append('      <geom name="visual" mesh="visual" contype="0" conaffinity="0" />')
 
     for hull_file in mesh_info["hulls"]:
         hull_name = hull_file.replace(".stl", "")

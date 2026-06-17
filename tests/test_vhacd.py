@@ -59,9 +59,10 @@ class TestVHACDGeneration:
         meshes = assets.findall("mesh")
         assert len(meshes) > 1, "Expected multiple mesh definitions"
 
-        # Check for visual mesh
+        # The high-resolution visual mesh is kept on disk for renderers, but is
+        # intentionally not loaded by MuJoCo because it exceeds STL decoder limits.
         visual_mesh = [m for m in meshes if m.get("name") == "visual"]
-        assert len(visual_mesh) == 1, "Visual mesh not found in assets"
+        assert len(visual_mesh) == 0, "Visual mesh should not be loaded into MuJoCo"
 
         # Check worldbody
         worldbody = root.find("worldbody")
@@ -78,7 +79,7 @@ class TestVHACDGeneration:
 
         # Check geoms in phantom body
         geoms = body.findall("geom")
-        assert len(geoms) > 1, "Expected multiple geoms in phantom body"
+        assert len(geoms) > 10, "Expected multiple collision geoms in phantom body"
 
     def test_xml_sites_have_positions(self, mujoco_dir):
         """Test that all sites have valid positions."""
@@ -154,6 +155,12 @@ class TestManifestIntegration:
         assert "mujoco" in manifest, "manifest.json missing 'mujoco' section"
         assert "xml" in manifest["mujoco"]
         assert "mesh_dir" in manifest["mujoco"]
+
+        xml_ref = manifest["mujoco"]["xml"]
+        xml_path = CASE_DIR / xml_ref
+        assert xml_path.is_file(), (
+            f"manifest.mujoco.xml references '{xml_ref}' but file not found at {xml_path}"
+        )
 
 
 pytestmark = pytest.mark.skipif(

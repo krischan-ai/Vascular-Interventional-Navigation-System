@@ -37,12 +37,13 @@ class Phantom(BasePhantom):
 
         self.set_scale(scale=self.scale)
         self.set_rgba(rgba=self.rgba)
-        self.phantom_visual = (
-            model_dir / f'meshes/{phantom_xml.split(".")[0]}/visual.stl'
-        )
-        self.simplified = (
-            model_dir / f'meshes/{phantom_xml.split(".")[0]}/simplified.stl'
-        )
+        mesh_stem = phantom_xml.split(".")[0]
+        mesh_dir = model_dir / "meshes" / mesh_stem
+        if not mesh_dir.exists() and mesh_stem.endswith("_vpp"):
+            mesh_dir = model_dir / "meshes" / mesh_stem.removesuffix("_vpp")
+
+        self.phantom_visual = mesh_dir / "visual.stl"
+        self.simplified = mesh_dir / "simplified.stl"
 
     def _set_defaults(self):
         """Sets the default values for the Phantom3."""
@@ -62,7 +63,9 @@ class Phantom(BasePhantom):
             rgba (list): List of RGBA values (normalized to 1.0)
         """
         self.rgba = rgba
-        self._mjcf_root.find("geom", "visual").rgba = self.rgba
+        visual_geom = self._mjcf_root.find("geom", "visual")
+        if visual_geom is not None:
+            visual_geom.rgba = self.rgba
         collision_rgba = rgba.copy()
         collision_rgba[-1] = 0
         self._mjcf_root.default.geom.set_attributes(rgba=collision_rgba)
@@ -86,7 +89,9 @@ class Phantom(BasePhantom):
             scale (tuple): The scale to set
         """
         self._mjcf_root.default.mesh.set_attributes(scale=scale)
-        self._mjcf_root.find("mesh", "visual").scale = [x * 1.005 for x in scale]
+        visual_mesh = self._mjcf_root.find("mesh", "visual")
+        if visual_mesh is not None:
+            visual_mesh.scale = [x * 1.005 for x in scale]
 
     def get_scale(self) -> list:
         return self.scale

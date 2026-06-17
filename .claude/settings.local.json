@@ -15,7 +15,8 @@
       "Bash(\".venv/Scripts/python.exe\" -m pytest tests/test_services_api.py tests/test_vpp_path_planner.py -v --tb=short)",
       "Bash(\".venv/Scripts/python.exe\":*)",
       "Bash(pip show:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(git stash *)"
     ]
   }
 }

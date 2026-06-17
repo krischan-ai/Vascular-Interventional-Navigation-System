@@ -24,9 +24,13 @@ dependencies = [
     "stable_baselines3@git+https://github.com/DLR-RM/stable-baselines3",
     "tensorboard",
     "pyaml",
-    "dm-control",
-    # "mujoco",
+    "dm-control==1.0.14",
+    "mujoco==2.3.7",
+    "pympler",
     "trimesh",
+    "pyvista",
+    "vhacdx",
+    "scipy",
     "opencv-python",
     "matplotlib",
     "tqdm",
@@ -40,6 +44,11 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: tests that require MuJoCo physics initialization",
+]
 
 
 [project.optional-dependencies]
