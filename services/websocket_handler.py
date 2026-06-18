@@ -63,7 +63,13 @@ class ControlData(BaseModel):
 
 
 class SessionStartData(BaseModel):
-    """Session start request data."""
+    """Session start request data.
+
+    For VPP navigation the client may either pass an explicit ``planned_path``
+    (MuJoCo meters) or let the server plan it by providing ``start_position`` and
+    ``end_position`` (LPS millimeters) plus ``case_id``. The first path point is
+    used as the guidewire entry, aligning it with the offset VPP vessel.
+    """
 
     phantom: str = "low_tort"
     target: str = "bca"
@@ -71,6 +77,12 @@ class SessionStartData(BaseModel):
     batch_mode: bool = False
     n_bodies: int = 80
     n_substeps: int | None = None
+    # VPP path/entry options.
+    case_id: str = "case_001"
+    start_position: list[float] | None = None
+    end_position: list[float] | None = None
+    smooth: bool = True
+    planned_path: list[list[float]] | None = None
 
 
 class ResetData(BaseModel):
@@ -269,6 +281,12 @@ class WebSocketHandler:
             return
 
         try:
+            planned_path = await self._resolve_session_path(params)
+        except (FileNotFoundError, ValueError) as e:
+            await self._send_error(conn_state, "PATH_NOT_FOUND", str(e))
+            return
+
+        try:
             session_id, state = await self._run_blocking(
                 self._session_manager.create_session,
                 phantom=params.phantom,
@@ -276,6 +294,7 @@ class WebSocketHandler:
                 use_pixels=params.use_pixels,
                 n_bodies=params.n_bodies,
                 n_substeps=params.n_substeps,
+                planned_path=planned_path,
             )
             conn_state.session_id = session_id
             conn_state.batch_mode = params.batch_mode
@@ -296,6 +315,34 @@ class WebSocketHandler:
             await self._send_error(
                 conn_state, "SESSION_ERROR", f"{type(e).__name__}: {e}"
             )
+
+    async def _resolve_session_path(
+        self, params: SessionStartData
+    ) -> list[list[float]] | None:
+        """Resolve the planned path (MuJoCo meters) for a navigation session.
+
+        An explicit ``planned_path`` is used as-is. Otherwise, when both
+        ``start_position`` and ``end_position`` (LPS millimeters) are given, the
+        path is planned server-side and converted to meters. Returns None when no
+        path is requested (e.g. plain low_tort sessions).
+        """
+        if params.planned_path is not None:
+            return params.planned_path
+
+        if params.start_position is None or params.end_position is None:
+            return None
+
+        planner = _get_path_planner(params.case_id)
+        result = await self._run_blocking(
+            planner.plan,
+            params.start_position,
+            params.end_position,
+            smooth=params.smooth,
+        )
+        waypoints = result.smooth_waypoints or result.waypoints
+        # Graph/planner coordinates are LPS millimeters; the MuJoCo phantom frame
+        # is meters (V-HACD applied a /1000 scale with no axis change).
+        return [[c / 1000.0 for c in point] for point in waypoints]
 
     async def _handle_session_stop(self, conn_state: ConnectionState) -> None:
         """Handle session_stop message."""

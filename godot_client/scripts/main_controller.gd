@@ -5,16 +5,22 @@ extends Node3D
 ## guidewire renderer, HUD) and wires the WebSocket client and input handler
 ## together. Kept code-driven so the .tscn stays minimal and robust.
 
-# Render the mesh of the phantom actually being simulated so the vessel and the
-# streamed guidewire share one coordinate frame. The client defaults to the
-# low_tort phantom (native scale, at origin), exported via
-# `python tools/export_godot_assets.py --phantom low_tort`.
-const VESSEL_GLB := "res://assets/models/low_tort.glb"
+# Navigation configuration (single source of truth, pushed to the WebSocket
+# client). For VPP navigation set phantom to "<case>_vpp" and provide start/end
+# endpoint positions in LPS millimeters; the backend plans the route, spawns the
+# guidewire at the vessel entry, and streams the path for visualization.
+@export var phantom: String = "low_tort"
+@export var target: String = "bca"
+@export var case_id: String = "case_001"
+## LPS millimeters; leave empty for non-VPP (low_tort) sessions.
+@export var start_position: Array = []
+@export var end_position: Array = []
 
 var _ws  # WebSocketClient node
 var _input  # InputHandler node
 var _hud  # HUD CanvasLayer
 var _guidewire  # GuidewireRenderer node
+var _path  # PathRenderer node
 var _camera: Camera3D
 
 # On-screen diagnostics.
@@ -34,11 +40,13 @@ func _ready() -> void:
 	_setup_environment()
 	_setup_camera_and_light()
 	var vessel := _setup_vessel()
-	# Parent the guidewire under the vessel scene root so both share the same
-	# coordinate space (the glTF/trimesh axis-conversion transform applies
-	# equally to the mesh and the streamed guidewire positions). Falls back to
-	# this node when the vessel GLB is missing.
-	_setup_guidewire(vessel if vessel != null else self)
+	# Parent the guidewire and planned-path renderers under the vessel scene root
+	# so all three share the same coordinate space (the glTF/trimesh axis-
+	# conversion transform applies equally to the mesh and the streamed
+	# guidewire/path positions). Falls back to this node when the GLB is missing.
+	var frame: Node = vessel if vessel != null else self
+	_setup_guidewire(frame)
+	_setup_path(frame)
 	_setup_hud()
 	_setup_network_and_input()
 	if vessel != null:
@@ -80,13 +88,25 @@ func _setup_camera_and_light() -> void:
 	_camera.make_current()
 
 
+func _resolve_vessel_glb() -> String:
+	# Prefer a phantom-named GLB (e.g. case_001_vpp.glb); fall back to the VPP
+	# vessel export for any *_vpp phantom, else the low_tort phantom mesh.
+	var direct := "res://assets/models/%s.glb" % phantom
+	if ResourceLoader.exists(direct):
+		return direct
+	if phantom.ends_with("_vpp"):
+		return "res://assets/models/blood_vessels.glb"
+	return "res://assets/models/low_tort.glb"
+
+
 func _setup_vessel() -> Node3D:
-	if not ResourceLoader.exists(VESSEL_GLB):
-		push_warning("Vessel GLB not found at %s. Run tools/export_godot_assets.py." % VESSEL_GLB)
+	var glb := _resolve_vessel_glb()
+	if not ResourceLoader.exists(glb):
+		push_warning("Vessel GLB not found at %s. Run tools/export_godot_assets.py." % glb)
 		return null
-	var packed: PackedScene = load(VESSEL_GLB)
+	var packed: PackedScene = load(glb)
 	if packed == null:
-		push_warning("Failed to load vessel GLB (import may have failed): %s" % VESSEL_GLB)
+		push_warning("Failed to load vessel GLB (import may have failed): %s" % glb)
 		return null
 	var vessel: Node3D = packed.instantiate()
 	add_child(vessel)
@@ -111,6 +131,11 @@ func _setup_guidewire(parent: Node) -> void:
 	parent.add_child(_guidewire)
 
 
+func _setup_path(parent: Node) -> void:
+	_path = preload("res://scripts/path_renderer.gd").new()
+	parent.add_child(_path)
+
+
 func _setup_hud() -> void:
 	_hud = preload("res://scripts/hud_controller.gd").new()
 	add_child(_hud)
@@ -118,6 +143,13 @@ func _setup_hud() -> void:
 
 func _setup_network_and_input() -> void:
 	_ws = preload("res://scripts/websocket_client.gd").new()
+	# Push the navigation configuration before the node enters the tree, so the
+	# first session_start (sent in _process) carries the right phantom/route.
+	_ws.phantom = phantom
+	_ws.target = target
+	_ws.case_id = case_id
+	_ws.start_position = start_position
+	_ws.end_position = end_position
 	add_child(_ws)
 	_input = preload("res://scripts/input_handler.gd").new()
 	add_child(_input)
@@ -166,6 +198,7 @@ func _on_session_started(sid: String, state: Dictionary) -> void:
 
 func _on_batch(batch: Dictionary) -> void:
 	_guidewire.update_from_batch(batch)
+	_path.update_from_batch(batch)
 	var safety: Dictionary = batch.get("safety", {})
 	var episode: Dictionary = batch.get("episode", {})
 	_hud.update_safety(str(safety.get("status", "STANDBY")))

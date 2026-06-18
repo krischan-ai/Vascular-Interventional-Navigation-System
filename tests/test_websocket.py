@@ -416,3 +416,97 @@ class TestWebSocketIntegration:
                 "COLLISION_STOP",
             )
             assert data["episode"]["length"] == 1
+
+
+class TestSessionStartDataVPP:
+    """Unit checks for the VPP session_start fields (no MuJoCo)."""
+
+    def test_vpp_fields_default_to_none(self):
+        from services.websocket_handler import SessionStartData
+
+        params = SessionStartData()
+        assert params.case_id == "case_001"
+        assert params.start_position is None
+        assert params.end_position is None
+        assert params.planned_path is None
+        assert params.smooth is True
+
+    def test_resolve_vpp_assets_dir(self):
+        from services.navigation_engine import resolve_vpp_assets_dir
+
+        # Non-VPP phantom -> built-in assets (None).
+        assert resolve_vpp_assets_dir("low_tort") is None
+        # Unknown VPP case -> None (directory does not exist).
+        assert resolve_vpp_assets_dir("nope_vpp") is None
+        # Known VPP case -> its mujoco assets dir (when generated).
+        resolved = resolve_vpp_assets_dir("case_001_vpp")
+        if resolved is not None:
+            assert resolved.replace("\\", "/").endswith("data/vpp_assets/case_001/mujoco")
+
+
+def _recv_pong(websocket):
+    """Receive the next non-ping message, answering ping heartbeats with pong.
+
+    VPP sessions have a slow MuJoCo cold start; replying to pings keeps the
+    connection alive past PONG_TIMEOUT during the wait.
+    """
+    while True:
+        message = websocket.receive_json()
+        if message.get("type") == "ping":
+            websocket.send_json({"type": "pong", "data": {}})
+            continue
+        return message
+
+
+@pytest.mark.slow
+class TestWebSocketVPPNavigation:
+    """End-to-end VPP navigation over WebSocket with server-side planning."""
+
+    def _vpp_available(self):
+        from pathlib import Path
+
+        xml = (
+            Path(__file__).resolve().parents[1]
+            / "data" / "vpp_assets" / "case_001" / "mujoco" / "case_001_vpp.xml"
+        )
+        if not xml.is_file():
+            pytest.skip("VPP MuJoCo phantom is not generated")
+
+    def test_vpp_session_plans_path_and_aligns_entry(self):
+        self._vpp_available()
+        client = TestClient(app)
+
+        with client.websocket_connect("/ws/session") as websocket:
+            websocket.send_json({
+                "type": "session_start",
+                "data": {
+                    "phantom": "case_001_vpp",
+                    "target": "endpoints_1",
+                    "batch_mode": True,
+                    "n_bodies": 40,
+                    "n_substeps": 2,
+                    "case_id": "case_001",
+                    # Endpoints-24 (proximal) -> Endpoints-1 (distal), LPS mm.
+                    "start_position": [0.173, -268.24, 291.25],
+                    "end_position": [-975.65, -217.22, 250.32],
+                    "smooth": True,
+                },
+            })
+            start = _recv_pong(websocket)
+            assert start["type"] == "session_started"
+            state = start["data"]["state"]
+            # Server planned the path and spawned the guidewire at the vessel
+            # entry: the tip starts on the path (within a few mm), not ~1m away.
+            assert state["path_deviation"] < 0.02
+
+            websocket.send_json({
+                "type": "control",
+                "data": {"delta_push": 0.6, "delta_rotate": 0.0},
+            })
+            batch = _recv_pong(websocket)
+            assert batch["type"] == "state_batch"
+            data = batch["data"]
+            # The planned path streams to the client for visualization.
+            assert len(data["path"]["waypoints"]) > 100
+            assert len(data["bodies"]) > 0
+            assert 0.0 <= data["path"]["progress"] <= 1.0

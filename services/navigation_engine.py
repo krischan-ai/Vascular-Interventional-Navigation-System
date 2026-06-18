@@ -21,6 +21,24 @@ _SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 if _SRC_DIR.is_dir() and str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
+_VPP_DATA_ROOT = Path(__file__).resolve().parents[1] / "data" / "vpp_assets"
+
+
+def resolve_vpp_assets_dir(phantom: str) -> str | None:
+    """Resolve the MuJoCo assets directory for a VPP phantom from its name.
+
+    VPP phantoms are named ``<case_id>_vpp`` (e.g. ``case_001_vpp``) and their
+    generated MuJoCo assets live under ``data/vpp_assets/<case_id>/mujoco``.
+    Returns the directory path as a string when it exists, otherwise None.
+    Non-VPP phantoms (e.g. ``low_tort``) return None so the built-in phantom
+    assets are used.
+    """
+    if not phantom.endswith("_vpp"):
+        return None
+    case_id = phantom[: -len("_vpp")]
+    mujoco_dir = _VPP_DATA_ROOT / case_id / "mujoco"
+    return str(mujoco_dir) if mujoco_dir.is_dir() else None
+
 
 @dataclass
 class NavigationState:
@@ -148,7 +166,10 @@ class NavigationEngine:
         self.target = target
         self.use_pixels = use_pixels
         self.image_size = image_size
-        self.assets_dir = assets_dir
+        # Auto-resolve the assets directory for VPP phantoms so callers only need
+        # to pass the phantom name (e.g. "case_001_vpp"); an explicit assets_dir
+        # still wins for custom layouts.
+        self.assets_dir = assets_dir or resolve_vpp_assets_dir(phantom)
         self.n_bodies = n_bodies
         self.n_substeps = n_substeps
         self._entry_point = (

@@ -20,6 +20,12 @@ signal error_received(error: Dictionary)        ## error payload
 @export var phantom: String = "low_tort"
 @export var target: String = "bca"
 @export var batch_mode: bool = true
+# VPP navigation: when start/end positions (LPS millimeters) are set, the backend
+# plans the route, spawns the guidewire at the vessel entry, and streams the path.
+@export var case_id: String = "case_001"
+@export var start_position: Array = []
+@export var end_position: Array = []
+@export var smooth: bool = true
 # Interactive performance profile: a lighter guidewire and fewer physics
 # substeps cut per-step cost ~10-15x for responsive control (full fidelity is
 # n_bodies=80, n_substeps=3).
@@ -74,13 +80,7 @@ func _process(delta: float) -> void:
 					_session_attempts += 1
 					_session_accum = 0.0
 					print("[WS] sending session_start (attempt %d)" % _session_attempts)
-					_send("session_start", {
-						"phantom": phantom,
-						"target": target,
-						"batch_mode": batch_mode,
-						"n_bodies": n_bodies,
-						"n_substeps": n_substeps,
-					})
+					_send("session_start", _build_session_start())
 			while _socket.get_available_packet_count() > 0:
 				var packet := _socket.get_packet().get_string_from_utf8()
 				_handle_packet(packet)
@@ -88,6 +88,24 @@ func _process(delta: float) -> void:
 			if _was_open:
 				_was_open = false
 				disconnected.emit()
+
+
+func _build_session_start() -> Dictionary:
+	var data := {
+		"phantom": phantom,
+		"target": target,
+		"batch_mode": batch_mode,
+		"n_bodies": n_bodies,
+		"n_substeps": n_substeps,
+		"case_id": case_id,
+	}
+	# Request server-side path planning + entry alignment only when a VPP route
+	# is configured; low_tort sessions omit these and spawn near the origin.
+	if start_position.size() == 3 and end_position.size() == 3:
+		data["start_position"] = start_position
+		data["end_position"] = end_position
+		data["smooth"] = smooth
+	return data
 
 
 func _handle_packet(packet: String) -> void:

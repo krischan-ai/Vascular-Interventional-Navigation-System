@@ -14,6 +14,7 @@ godot_client/
 │   ├── main_controller.gd     # 代码构建场景并装配所有节点/信号
 │   ├── websocket_client.gd    # WebSocket 协议客户端
 │   ├── guidewire_renderer.gd  # 导丝尖端 + 导丝体（line strip）渲染
+│   ├── path_renderer.gd       # 规划路径折线渲染（state_batch.path.waypoints）
 │   ├── hud_controller.gd      # 安全状态灯 + 指标读数
 │   └── input_handler.gd       # WASD/R 键盘输入 → 控制命令
 └── assets/
@@ -35,13 +36,34 @@ python tools/export_godot_assets.py --phantom low_tort
 ```
 输出 `godot_client/assets/models/low_tort.glb`（约 0.3MB）。
 
-VPP 真实血管（case_001，约 10MB，**注意**：当前后端默认在 low_tort 体模里仿真，
-渲染 VPP 血管会与导丝坐标不一致，留待后续 VPP 导航对齐）：
+VPP 真实血管（case_001，约 10MB）：
 
 ```powershell
 python tools/export_godot_assets.py
 ```
 输出 `godot_client/assets/models/blood_vessels.glb`。
+
+## VPP 真实血管导航（阶段十）
+
+阶段十后端已支持 VPP 入口对齐 + 服务端路径规划。要在 VPP 血管内导航，
+在 `main_controller.gd` 的导出变量（或 `main.tscn` Inspector）设置：
+
+| 变量 | VPP 取值示例 | 说明 |
+|------|-------------|------|
+| `phantom` | `case_001_vpp` | VPP phantom 名（后端按名自动解析 assets 目录） |
+| `target` | `endpoints_1` | 目标 endpoint site 名 |
+| `case_id` | `case_001` | 规划用 case |
+| `start_position` | `[0.173, -268.24, 291.25]` | 入口 endpoint（**LPS 毫米**） |
+| `end_position` | `[-975.65, -217.22, 250.32]` | 目标 endpoint（**LPS 毫米**） |
+
+设置 `start_position`/`end_position` 后，客户端在 `session_start` 携带这两点，
+后端自动：规划 A*+B-spline 路径 → 转米制 → 在路径起点生成导丝并对齐血管走向 →
+通过 `state_batch.path.waypoints` 回传路径供 `path_renderer` 可视化。
+
+渲染 GLB 按 `phantom` 自动选择：`res://assets/models/<phantom>.glb`，
+找不到则 `*_vpp` 回退到 `blood_vessels.glb`，否则 `low_tort.glb`。
+
+留空 `start_position`/`end_position` 即为默认 low_tort 会话（导丝在原点附近生成）。
 
 ## 运行
 
@@ -87,9 +109,9 @@ HUD（左上）显示：安全状态灯（STANDBY/SAFE_NAV/DANGER_WARNING/COLLIS
 | C→S | `path_request` | `send_path_request()`（暂未绑定按键，供后续扩展） |
 | C→S | `pong` | 收到 `ping` 时立即回复 |
 | S→C | `session_started` | 读取 `session_id` 与 `data.state` |
-| S→C | `state_batch` | 更新导丝（tip + bodies）与 HUD |
+| S→C | `state_batch` | 更新导丝（tip + bodies）、路径折线与 HUD |
 | S→C | `state_update` | 非 batch 模式回退路径 |
-| S→C | `path_response` | `path_received` 信号（供后续路径可视化） |
+| S→C | `path_response` | `path_received` 信号（独立 path_request 用） |
 
 字段契约已用后端 `TestClient` 回放校验（见 `doc/05-开发进度记录.md` 阶段八记录）。
 
@@ -101,5 +123,5 @@ HUD（左上）显示：安全状态灯（STANDBY/SAFE_NAV/DANGER_WARNING/COLLIS
 - **冷启动卡顿**：后端首次 MuJoCo 初始化会同步阻塞事件循环若干秒；
   期间若客户端不及时回 `pong`，连接会 `PONG_TIMEOUT`。Godot 客户端每帧回 `pong`，
   正常情况无碍；但单步阻塞超过 15s 仍可能断连（后端可改为线程池执行 step 以根治）。
-- 本阶段未做 X-ray 着色器、双视角、手柄映射、路径线可视化——留作后续。
+- 未做 X-ray 着色器、双视角、手柄映射——留作后续。
 - 本客户端无法在当前 CI/无 GUI 环境中自动化验证，仅通过后端契约回放间接验证。
