@@ -33,6 +33,45 @@ SKYBOX_TEXTURE = env_config["skybox_texture"]
 random_state = np.random.RandomState(42)
 
 
+# World-frame direction the guidewire feeds toward when its attachment frame has
+# identity orientation (slider pushes the tip along this axis). Calibrated from a
+# default phantom: a forward push advances the tip along +y. Used to align the
+# guidewire to a vessel entry direction (see Navigate._guidewire_entry_quat).
+GUIDEWIRE_FEED_AXIS = np.array([0.0, 1.0, 0.0])
+
+
+def quat_from_vectors(source: np.ndarray, target: np.ndarray) -> np.ndarray:
+    """Return the MuJoCo quaternion [w, x, y, z] that rotates ``source`` onto ``target``.
+
+    Both vectors are normalized internally. Handles the parallel and anti-parallel
+    edge cases. Returns the identity quaternion when either vector is degenerate.
+    """
+    a = np.asarray(source, dtype=np.float64)
+    b = np.asarray(target, dtype=np.float64)
+    na = np.linalg.norm(a)
+    nb = np.linalg.norm(b)
+    if na < 1e-9 or nb < 1e-9:
+        return np.array([1.0, 0.0, 0.0, 0.0])
+    a = a / na
+    b = b / nb
+
+    d = float(np.dot(a, b))
+    if d > 1.0 - 1e-9:
+        return np.array([1.0, 0.0, 0.0, 0.0])
+    if d < -1.0 + 1e-9:
+        # 180 degrees: rotate about any axis orthogonal to a.
+        axis = np.cross(a, np.array([1.0, 0.0, 0.0]))
+        if np.linalg.norm(axis) < 1e-6:
+            axis = np.cross(a, np.array([0.0, 0.0, 1.0]))
+        axis = axis / np.linalg.norm(axis)
+        return np.array([0.0, axis[0], axis[1], axis[2]])
+
+    axis = np.cross(a, b)
+    w = 1.0 + d
+    quat = np.array([w, axis[0], axis[1], axis[2]])
+    return quat / np.linalg.norm(quat)
+
+
 def make_scene(geom_groups: list):
     """Make a scene option for the phantom. This is used to set the visibility of the different parts of the environment.
 
@@ -274,6 +313,8 @@ class Navigate(composer.Task):
         target_from_sites: bool = True,
         random_init_distance: float = 0.001,
         target: Union[str, np.ndarray] = None,
+        entry_point: np.ndarray = None,
+        entry_direction: np.ndarray = None,
     ):
         self.delta = delta
         self.dense_reward = dense_reward
@@ -290,6 +331,21 @@ class Navigate(composer.Task):
         self.target_from_sites = target_from_sites
         self.sampling_bounds = (0.0954, 0.1342)
         self.random_init_distance = random_init_distance
+
+        # Optional vessel-entry placement for the guidewire. When entry_point is
+        # given the guidewire spawns there (plus the usual small jitter) instead
+        # of near the world origin; entry_direction aligns its feed axis so the
+        # tip advances into the vessel rather than into a wall. Used for VPP
+        # phantoms whose vessels are offset ~1m from the origin.
+        self._entry_point = (
+            np.asarray(entry_point, dtype=np.float64) if entry_point is not None else None
+        )
+        if entry_direction is not None and self._entry_point is not None:
+            self._entry_quat = quat_from_vectors(
+                GUIDEWIRE_FEED_AXIS, np.asarray(entry_direction, dtype=np.float64)
+            )
+        else:
+            self._entry_quat = None
 
         self._setup_arena_and_attachments(phantom, guidewire, tip)
 
@@ -452,7 +508,13 @@ class Navigate(composer.Task):
         guidewire_pose = variation.evaluate(
             self._guidewire_initial_pose, random_state=random_state
         )
-        self._guidewire.set_pose(physics, position=guidewire_pose)
+        if self._entry_point is not None:
+            position = self._entry_point + np.asarray(guidewire_pose, dtype=np.float64)
+            self._guidewire.set_pose(
+                physics, position=position, quaternion=self._entry_quat
+            )
+        else:
+            self._guidewire.set_pose(physics, position=guidewire_pose)
 
         self.success = False
         if self.sample_target:
@@ -614,6 +676,8 @@ def make_dm_env(
     assets_dir: str = None,
     n_bodies: int = 80,
     n_substeps: int = None,
+    entry_point: np.ndarray = None,
+    entry_direction: np.ndarray = None,
     **kwargs,
 ) -> composer.Environment:
     """Makes a dm_control environment given a configuration.
@@ -623,6 +687,10 @@ def make_dm_env(
       target: str: Target site name (e.g., "bca", "lcca", or VPP endpoint names)
       assets_dir: str: Optional path to phantom assets directory. If provided,
                        loads phantom from this directory instead of default.
+      entry_point: Optional [x, y, z] in MuJoCo meters where the guidewire spawns
+                   (e.g. a VPP vessel entry). Defaults to near the world origin.
+      entry_direction: Optional [x, y, z] direction the guidewire feeds toward at
+                       spawn; aligns the tip with the vessel at the entry point.
       **kwargs: Additional arguments for the environment
 
     Returns:
@@ -638,6 +706,8 @@ def make_dm_env(
         guidewire=guidewire,
         tip=tip,
         target=target,
+        entry_point=entry_point,
+        entry_direction=entry_direction,
         **kwargs,
     )
     # Optional override of the number of physics substeps per control step.

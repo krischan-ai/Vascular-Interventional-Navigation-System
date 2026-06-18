@@ -191,6 +191,36 @@ class TestNavigationEngineHelpers:
         assert engine._compute_safety_status(5, 0.0007) == "DANGER_WARNING"
         assert engine._compute_safety_status(5, 0.0001) == "COLLISION_STOP"
 
+    def test_resolve_entry_none_without_path(self):
+        engine = self._engine()
+        point, direction = engine._resolve_entry()
+        assert point is None
+        assert direction is None
+
+    def test_resolve_entry_from_planned_path(self):
+        engine = self._engine(planned_path=[[1, 0, 0], [1, 0, 1], [1, 0, 2]])
+        point, direction = engine._resolve_entry()
+        assert list(point) == [1.0, 0.0, 0.0]
+        # Direction is the first non-degenerate segment.
+        assert list(direction) == [0.0, 0.0, 1.0]
+
+    def test_resolve_entry_skips_degenerate_first_segment(self):
+        # First two points coincide; direction must come from the next segment.
+        engine = self._engine(planned_path=[[0, 0, 0], [0, 0, 0], [0, 1, 0]])
+        point, direction = engine._resolve_entry()
+        assert list(point) == [0.0, 0.0, 0.0]
+        assert list(direction) == [0.0, 1.0, 0.0]
+
+    def test_resolve_entry_explicit_overrides_path(self):
+        engine = self._engine(
+            planned_path=[[1, 0, 0], [1, 0, 1]],
+            entry_point=[5, 5, 5],
+            entry_direction=[1, 0, 0],
+        )
+        point, direction = engine._resolve_entry()
+        assert list(point) == [5.0, 5.0, 5.0]
+        assert list(direction) == [1.0, 0.0, 0.0]
+
 
 # ============================================================================
 # Integration Tests (Require MuJoCo)
@@ -263,6 +293,51 @@ class TestNavigationEngineIntegration:
         assert status in ("SAFE_NAV", "DANGER_WARNING", "COLLISION_STOP")
 
         engine.close()
+
+
+@pytest.mark.slow
+class TestQuatFromVectors:
+    """Math checks for the guidewire entry-alignment quaternion.
+
+    Marked slow because importing cathsim.dm.env pulls in dm_control/MuJoCo.
+    """
+
+    def _rotate(self, quat, vec):
+        import numpy as np
+
+        w, x, y, z = quat
+        # Rotate vec by quaternion [w, x, y, z].
+        q = np.array([x, y, z])
+        v = np.asarray(vec, dtype=float)
+        return v + 2 * np.cross(q, np.cross(q, v) + w * v)
+
+    def test_identity_for_parallel(self):
+        import numpy as np
+
+        from cathsim.dm.env import quat_from_vectors
+
+        q = quat_from_vectors([0, 1, 0], [0, 2, 0])
+        assert np.allclose(q, [1, 0, 0, 0])
+
+    def test_rotates_feed_axis_onto_target(self):
+        import numpy as np
+
+        from cathsim.dm.env import GUIDEWIRE_FEED_AXIS, quat_from_vectors
+
+        target = np.array([-0.956, -0.005, 0.292])
+        target = target / np.linalg.norm(target)
+        q = quat_from_vectors(GUIDEWIRE_FEED_AXIS, target)
+        rotated = self._rotate(q, GUIDEWIRE_FEED_AXIS)
+        assert np.allclose(rotated, target, atol=1e-6)
+
+    def test_antiparallel_is_180_degrees(self):
+        import numpy as np
+
+        from cathsim.dm.env import quat_from_vectors
+
+        q = quat_from_vectors([0, 1, 0], [0, -1, 0])
+        rotated = self._rotate(q, [0, 1, 0])
+        assert np.allclose(rotated, [0, -1, 0], atol=1e-6)
 
 
 @pytest.mark.slow
@@ -370,6 +445,50 @@ class TestVPPPhantomIntegration:
 
         assert 0.0 <= state.path_progress <= 1.0
         assert state.path_deviation >= 0.0
+
+        engine.close()
+
+    def test_vpp_guidewire_spawns_at_planned_path_entry(self, vpp_mujoco_dir):
+        """The guidewire must spawn at the VPP vessel entry, not the world origin.
+
+        Without entry alignment the guidewire spawns ~1m away from the offset VPP
+        vessel and never enters it. With a planned path, the entry is derived from
+        the path's first point, so the tip starts on the path (small deviation)
+        and advances into the vessel under a forward push.
+        """
+        from services.navigation_engine import NavigationEngine
+
+        # A short straight path near endpoints_24 (proximal, x~0) heading toward
+        # the descending vessel (-x), in MuJoCo meters.
+        entry = [0.0, -0.268, 0.291]
+        planned_path = [
+            entry,
+            [-0.02, -0.268, 0.291],
+            [-0.04, -0.270, 0.292],
+        ]
+
+        engine = NavigationEngine(
+            phantom="case_001_vpp",
+            target="endpoints_1",
+            assets_dir=str(vpp_mujoco_dir),
+            planned_path=planned_path,
+            n_bodies=40,
+            n_substeps=2,
+        )
+
+        state = engine.reset()
+        # Tip starts on the planned path (within a few mm), proving the guidewire
+        # spawned at the vessel entry rather than ~1m away at the origin.
+        assert state.path_deviation < 0.02
+        # The spawn is far from the world origin (the vessel is offset ~1m).
+        assert abs(state.tip_position[1]) > 0.1
+
+        for _ in range(20):
+            state = engine.step(delta_push=0.6, delta_rotate=0.0)
+
+        # Advancing forward registers vessel contact and keeps progress valid.
+        assert state.episode_length == 20
+        assert 0.0 <= state.path_progress <= 1.0
 
         engine.close()
 

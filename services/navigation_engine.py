@@ -117,6 +117,8 @@ class NavigationEngine:
         planned_path: Sequence[Sequence[float]] | None = None,
         n_bodies: int = 80,
         n_substeps: int | None = None,
+        entry_point: Sequence[float] | None = None,
+        entry_direction: Sequence[float] | None = None,
     ):
         """Initialize the navigation engine.
 
@@ -134,6 +136,13 @@ class NavigationEngine:
                       per-step cost (fewer contacts/DOFs) for interactive use.
             n_substeps: Physics substeps per control step. Fewer is faster; None
                         uses the model default (3).
+            entry_point: Optional [x, y, z] in MuJoCo meters where the guidewire
+                         spawns. Required for VPP phantoms whose vessels are
+                         offset from the origin. When None and planned_path is
+                         set, it is derived from the path's first point.
+            entry_direction: Optional [x, y, z] feed direction at the entry. When
+                             None and planned_path is set, it is derived from the
+                             first path segment.
         """
         self.phantom = phantom
         self.target = target
@@ -142,6 +151,14 @@ class NavigationEngine:
         self.assets_dir = assets_dir
         self.n_bodies = n_bodies
         self.n_substeps = n_substeps
+        self._entry_point = (
+            np.asarray(entry_point, dtype=np.float64) if entry_point is not None else None
+        )
+        self._entry_direction = (
+            np.asarray(entry_direction, dtype=np.float64)
+            if entry_direction is not None
+            else None
+        )
 
         self._env = None
         self._time_step = None
@@ -195,12 +212,37 @@ class NavigationEngine:
         except Exception:
             self._path_kdtree = None
 
+    def _resolve_entry(self) -> tuple[np.ndarray | None, np.ndarray | None]:
+        """Resolve the guidewire entry pose, deriving it from the planned path.
+
+        An explicit entry_point/entry_direction always wins. Otherwise, when a
+        planned path is set, the entry is the first path point and the direction
+        is the first non-degenerate path segment.
+        """
+        entry_point = self._entry_point
+        entry_direction = self._entry_direction
+
+        if entry_point is None and self._path_points is not None:
+            entry_point = self._path_points[0]
+
+        if entry_direction is None and self._path_points is not None:
+            origin = self._path_points[0]
+            for point in self._path_points[1:]:
+                seg = point - origin
+                if np.linalg.norm(seg) > 1e-9:
+                    entry_direction = seg
+                    break
+
+        return entry_point, entry_direction
+
     def _ensure_initialized(self) -> None:
         """Lazy initialization of CathSim environment."""
         if self._initialized:
             return
 
         from cathsim.dm import make_dm_env
+
+        entry_point, entry_direction = self._resolve_entry()
 
         self._env = make_dm_env(
             phantom=self.phantom,
@@ -213,6 +255,8 @@ class NavigationEngine:
             assets_dir=self.assets_dir,
             n_bodies=self.n_bodies,
             n_substeps=self.n_substeps,
+            entry_point=entry_point,
+            entry_direction=entry_direction,
         )
         self._initialized = True
 
