@@ -26,6 +26,10 @@ signal error_received(error: Dictionary)        ## error payload
 @export var start_position: Array = []
 @export var end_position: Array = []
 @export var smooth: bool = true
+# Kinematic centerline-follow: drive the guidewire along the planned path so it
+# reliably reaches the target on full-length VPP vessels. Only takes effect when
+# a path is planned (low_tort sessions stay physics-driven regardless).
+@export var guided: bool = true
 # Interactive performance profile: a lighter guidewire and fewer physics
 # substeps cut per-step cost ~10-15x for responsive control (full fidelity is
 # n_bodies=80, n_substeps=3).
@@ -113,6 +117,7 @@ func _build_session_start() -> Dictionary:
 		data["start_position"] = start_position
 		data["end_position"] = end_position
 		data["smooth"] = smooth
+		data["guided"] = guided
 	return data
 
 

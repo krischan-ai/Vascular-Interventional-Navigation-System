@@ -81,6 +81,7 @@ class SessionManager:
         planned_path=None,
         n_bodies: int = 80,
         n_substeps: int | None = None,
+        guided: bool = False,
     ) -> tuple[str, NavigationState]:
         """Create a new navigation session.
 
@@ -117,6 +118,7 @@ class SessionManager:
                 planned_path=planned_path,
                 n_bodies=n_bodies,
                 n_substeps=n_substeps,
+                guided=guided,
             )
 
             initial_state = engine.reset()

@@ -221,6 +221,85 @@ class TestNavigationEngineHelpers:
         assert list(point) == [5.0, 5.0, 5.0]
         assert list(direction) == [1.0, 0.0, 0.0]
 
+    def test_entry_pose_empty_without_path(self):
+        engine = self._engine()
+        pose = engine.entry_pose
+        assert pose["position"] == []
+        assert pose["direction"] == []
+
+    def test_entry_pose_from_planned_path_is_normalized(self):
+        engine = self._engine(planned_path=[[1, 0, 0], [1, 0, 2], [1, 0, 4]])
+        pose = engine.entry_pose
+        assert pose["position"] == [1.0, 0.0, 0.0]
+        # Direction is the unit feed direction into the vessel.
+        assert pose["direction"] == pytest.approx([0.0, 0.0, 1.0])
+
+
+class TestGuidedMode:
+    """Kinematic centerline-follow mode (no MuJoCo required)."""
+
+    # A simple 3 m straight path along +x.
+    PATH = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [3.0, 0.0, 0.0]]
+
+    def _engine(self, **kwargs):
+        from services.navigation_engine import NavigationEngine
+
+        kwargs.setdefault("planned_path", self.PATH)
+        kwargs.setdefault("guided", True)
+        return NavigationEngine(**kwargs)
+
+    def test_guided_requires_path(self):
+        from services.navigation_engine import NavigationEngine
+
+        engine = NavigationEngine(guided=True)  # no planned path
+        assert engine._is_guided() is False
+
+    def test_reset_spawns_at_entry(self):
+        engine = self._engine()
+        state = engine.reset()
+        assert state.tip_position == pytest.approx([0.0, 0.0, 0.0])
+        assert state.path_progress == 0.0
+        assert state.path_deviation == 0.0
+        assert state.safety_status == "STANDBY"
+        assert engine.entry_pose["position"] == pytest.approx([0.0, 0.0, 0.0])
+
+    def test_push_advances_progress_to_target(self):
+        engine = self._engine(advance_per_step=0.1)
+        engine.reset()
+        last = -1.0
+        state = None
+        for _ in range(200):
+            state = engine.step(1.0, 0.0)
+            assert state.path_progress >= last - 1e-9  # monotonic non-decreasing
+            last = state.path_progress
+            if state.done:
+                break
+        assert state.done is True
+        assert state.path_progress == pytest.approx(1.0)
+        # Reached the planned target (last path point).
+        assert state.tip_position == pytest.approx([3.0, 0.0, 0.0])
+
+    def test_retract_decreases_progress(self):
+        engine = self._engine(advance_per_step=0.1)
+        engine.reset()
+        for _ in range(10):
+            engine.step(1.0, 0.0)
+        advanced = engine.step(0.0, 0.0).path_progress
+        retracted = engine.step(-1.0, 0.0).path_progress
+        assert retracted < advanced
+
+    def test_render_bodies_follow_path(self):
+        engine = self._engine(advance_per_step=0.1, wire_length=0.3)
+        engine.reset()
+        for _ in range(15):
+            engine.step(1.0, 0.0)
+        bodies = engine.get_render_bodies()
+        assert len(bodies) > 1
+        # Bodies lie on the +x axis (the straight path), tip is the last one.
+        for body in bodies:
+            assert body["pos"][1] == pytest.approx(0.0, abs=1e-9)
+        assert bodies[-1]["pos"][0] > bodies[0]["pos"][0]
+
 
 # ============================================================================
 # Integration Tests (Require MuJoCo)

@@ -4,6 +4,8 @@ These tests verify the WebSocket protocol implementation. Tests involving
 the actual MuJoCo environment are marked with pytest.mark.slow.
 """
 
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -510,3 +512,26 @@ class TestWebSocketVPPNavigation:
             assert len(data["path"]["waypoints"]) > 100
             assert len(data["bodies"]) > 0
             assert 0.0 <= data["path"]["progress"] <= 1.0
+            # Entry (vascular access) and target markers are highlighted in the
+            # client. The entry rides the first batch and sits at the path start.
+            assert len(data["entry"]["position"]) == 3
+            assert len(data["entry"]["direction"]) == 3
+            assert data["entry"]["position"] == pytest.approx(
+                data["path"]["waypoints"][0], abs=1e-6
+            )
+            assert len(data["target"]) == 3
+
+            # Guided (centerline-follow) mode is auto-enabled for VPP routes:
+            # pushing advances the guidewire along the planned path. Pace sends
+            # above the 33ms control rate limit so none are dropped. (Full
+            # traversal to the target is covered by TestGuidedMode.)
+            start_progress = data["path"]["progress"]
+            last_progress = start_progress
+            for _ in range(8):
+                time.sleep(0.04)
+                websocket.send_json({
+                    "type": "control",
+                    "data": {"delta_push": 1.0, "delta_rotate": 0.0},
+                })
+                last_progress = _recv_pong(websocket)["data"]["path"]["progress"]
+            assert last_progress > start_progress

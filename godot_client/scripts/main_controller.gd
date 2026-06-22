@@ -28,6 +28,7 @@ var _input  # InputHandler node
 var _hud  # HUD CanvasLayer
 var _guidewire  # GuidewireRenderer node
 var _path  # PathRenderer node
+var _entry_marker  # EntryMarker node (vessel entry + target highlights)
 var _rig  # CameraRig node (follow + endoscope cameras)
 var _camera: Camera3D  # overview camera
 var _cam_mode: int = CamMode.OVERVIEW
@@ -59,6 +60,7 @@ func _ready() -> void:
 	var frame: Node = vessel if vessel != null else self
 	_setup_guidewire(frame)
 	_setup_path(frame)
+	_setup_entry_marker(frame)
 	_setup_rig(frame)
 	_setup_hud()
 	_setup_network_and_input()
@@ -149,6 +151,13 @@ func _setup_path(parent: Node) -> void:
 	parent.add_child(_path)
 
 
+func _setup_entry_marker(parent: Node) -> void:
+	# Parented under the vessel frame (same as the guidewire/path) so the entry
+	# and target marker coordinates need no conversion.
+	_entry_marker = preload("res://scripts/entry_marker.gd").new()
+	parent.add_child(_entry_marker)
+
+
 func _setup_rig(parent: Node) -> void:
 	# Parent under the vessel frame so tip coordinates need no conversion.
 	_rig = preload("res://scripts/camera_rig.gd").new()
@@ -219,6 +228,7 @@ func _on_session_started(sid: String, state: Dictionary) -> void:
 func _on_batch(batch: Dictionary) -> void:
 	_guidewire.update_from_batch(batch)
 	_path.update_from_batch(batch)
+	_entry_marker.update_from_batch(batch)
 	_feed_rig(batch.get("tip", {}))
 	var safety: Dictionary = batch.get("safety", {})
 	var episode: Dictionary = batch.get("episode", {})

@@ -87,6 +87,13 @@ func _ready() -> void:
 	hint.add_theme_color_override("font_color", Color(0.65, 0.65, 0.7))
 	vbox.add_child(hint)
 
+	var legend := HBoxContainer.new()
+	legend.add_theme_constant_override("separation", 12)
+	legend.add_child(_legend_item("● 入口 Entry", Color(0.15, 1.0, 0.4)))
+	legend.add_child(_legend_item("● 目标 Target", Color(1.0, 0.2, 0.2)))
+	legend.add_child(_legend_item("● 路径 Path", Color(0.2, 0.8, 1.0)))
+	vbox.add_child(legend)
+
 	vbox.add_child(_separator())
 
 	_debug_label = Label.new()
@@ -100,6 +107,14 @@ func _ready() -> void:
 
 func _separator() -> HSeparator:
 	return HSeparator.new()
+
+
+func _legend_item(text: String, color: Color) -> Label:
+	var label := Label.new()
+	label.text = text
+	label.add_theme_font_size_override("font_size", 13)
+	label.add_theme_color_override("font_color", color)
+	return label
 
 
 func set_connection(connected: bool) -> void:

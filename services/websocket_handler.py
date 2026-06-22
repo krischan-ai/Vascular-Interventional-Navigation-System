@@ -83,6 +83,10 @@ class SessionStartData(BaseModel):
     end_position: list[float] | None = None
     smooth: bool = True
     planned_path: list[list[float]] | None = None
+    # Kinematic centerline-follow mode: drive the guidewire along the planned
+    # path so it reliably reaches the target on full-length VPP vessels that the
+    # physical guidewire cannot traverse. Auto-enabled for VPP routes below.
+    guided: bool = False
 
 
 class ResetData(BaseModel):
@@ -291,6 +295,12 @@ class WebSocketHandler:
             await self._send_error(conn_state, "PATH_NOT_FOUND", str(e))
             return
 
+        # Full-length VPP vessels cannot be traversed by the physical guidewire,
+        # so default to kinematic centerline-follow when a VPP route is planned.
+        guided = params.guided or (
+            planned_path is not None and params.phantom.endswith("_vpp")
+        )
+
         try:
             session_id, state = await self._run_blocking(
                 self._session_manager.create_session,
@@ -300,6 +310,7 @@ class WebSocketHandler:
                 n_bodies=params.n_bodies,
                 n_substeps=params.n_substeps,
                 planned_path=planned_path,
+                guided=guided,
             )
             conn_state.session_id = session_id
             conn_state.batch_mode = params.batch_mode
@@ -547,6 +558,12 @@ class WebSocketHandler:
                 "progress": state.path_progress,
                 "deviation": state.path_deviation,
             },
+            # Vessel-entry (vascular access) and target markers, for highlighting
+            # in the client. The entry is constant for a session, so it rides the
+            # same first-batch/reset frame as the path; the target is small and
+            # sent every frame.
+            "entry": engine.entry_pose if include_path else {},
+            "target": state.target_position,
             "safety": {
                 "status": state.safety_status,
                 "wall_distance": state.wall_distance,

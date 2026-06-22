@@ -137,6 +137,9 @@ class NavigationEngine:
         n_substeps: int | None = None,
         entry_point: Sequence[float] | None = None,
         entry_direction: Sequence[float] | None = None,
+        guided: bool = False,
+        advance_per_step: float = 0.01,
+        wire_length: float = 0.12,
     ):
         """Initialize the navigation engine.
 
@@ -161,6 +164,17 @@ class NavigationEngine:
             entry_direction: Optional [x, y, z] feed direction at the entry. When
                              None and planned_path is set, it is derived from the
                              first path segment.
+            guided: Kinematic centerline-follow mode. When True together with a
+                    planned_path, MuJoCo physics is bypassed: the guidewire is
+                    driven along the planned centerline by an insertion-depth
+                    parameter, so ``delta_push`` advances/retracts the tip along
+                    the route and it reliably reaches the target. Required for
+                    full-length VPP vessels (path ~1.1m) that the physical
+                    guidewire (~0.08m, 0.2m insertion cap) cannot traverse.
+            advance_per_step: Arc-length advanced per unit push in guided mode
+                              (meters). delta_push=1.0 advances this much.
+            wire_length: Visible guidewire length trailing the tip in guided
+                         mode (meters), used to render the wire along the path.
         """
         self.phantom = phantom
         self.target = target
@@ -180,6 +194,12 @@ class NavigationEngine:
             if entry_direction is not None
             else None
         )
+
+        # Guided (kinematic centerline-follow) mode state.
+        self._guided = bool(guided)
+        self._advance_per_step = float(advance_per_step)
+        self._wire_length = float(wire_length)
+        self._s = 0.0  # current insertion depth as arc length along the path (m)
 
         self._env = None
         self._time_step = None
@@ -287,6 +307,13 @@ class NavigationEngine:
         Returns:
             NavigationState with initial positions and zeroed dynamics
         """
+        if self._is_guided():
+            self._s = 0.0
+            self._episode_length = 0
+            self._previous_tip_pos = None
+            self._tip_history.clear()
+            return self._guided_state()
+
         self._ensure_initialized()
 
         self._time_step = self._env.reset()
@@ -306,17 +333,137 @@ class NavigationEngine:
         Returns:
             NavigationState after the step
         """
-        if not self._initialized or self._time_step is None:
-            raise RuntimeError("Engine not initialized. Call reset() first.")
-
         delta_push = float(np.clip(delta_push, -1.0, 1.0))
         delta_rotate = float(np.clip(delta_rotate, -1.0, 1.0))
+
+        if self._is_guided():
+            self._s = float(
+                np.clip(
+                    self._s + delta_push * self._advance_per_step,
+                    0.0,
+                    self._path_total_len,
+                )
+            )
+            self._episode_length += 1
+            return self._guided_state()
+
+        if not self._initialized or self._time_step is None:
+            raise RuntimeError("Engine not initialized. Call reset() first.")
 
         action = np.array([delta_push, delta_rotate], dtype=np.float64)
         self._time_step = self._env.step(action)
         self._episode_length += 1
 
         return self._extract_state()
+
+    def _is_guided(self) -> bool:
+        """Whether kinematic centerline-follow mode is active.
+
+        Requires both the guided flag and a valid planned path; otherwise the
+        engine falls back to the physical MuJoCo simulation.
+        """
+        return self._guided and self._path_points is not None and self._path_total_len > 0.0
+
+    def _point_at_arclen(self, s: float) -> np.ndarray:
+        """Interpolate a point on the planned path at arc length ``s`` (meters)."""
+        cum = self._path_cumlen
+        pts = self._path_points
+        s = float(np.clip(s, 0.0, self._path_total_len))
+        idx = int(np.searchsorted(cum, s))
+        if idx <= 0:
+            return pts[0].copy()
+        if idx >= len(pts):
+            return pts[-1].copy()
+        s0, s1 = cum[idx - 1], cum[idx]
+        t = 0.0 if s1 <= s0 else (s - s0) / (s1 - s0)
+        return pts[idx - 1] + t * (pts[idx] - pts[idx - 1])
+
+    def _tangent_at_arclen(self, s: float) -> np.ndarray:
+        """Unit tangent of the planned path at arc length ``s`` (meters)."""
+        eps = max(self._path_total_len * 1e-3, 1e-4)
+        p0 = self._point_at_arclen(s - eps)
+        p1 = self._point_at_arclen(s + eps)
+        d = p1 - p0
+        n = float(np.linalg.norm(d))
+        return d / n if n > 1e-9 else np.array([0.0, 0.0, 1.0])
+
+    @staticmethod
+    def _quat_from_direction(direction: np.ndarray) -> list[float]:
+        """Quaternion [x, y, z, w] rotating +z onto ``direction`` (protocol order)."""
+        a = np.array([0.0, 0.0, 1.0])
+        b = np.asarray(direction, dtype=np.float64)
+        nb = float(np.linalg.norm(b))
+        if nb < 1e-9:
+            return [0.0, 0.0, 0.0, 1.0]
+        b = b / nb
+        d = float(np.dot(a, b))
+        if d > 1.0 - 1e-9:
+            return [0.0, 0.0, 0.0, 1.0]
+        if d < -1.0 + 1e-9:
+            return [1.0, 0.0, 0.0, 0.0]  # 180 deg about x
+        axis = np.cross(a, b)
+        w = 1.0 + d
+        q = np.array([axis[0], axis[1], axis[2], w])
+        q = q / np.linalg.norm(q)
+        return [float(v) for v in q]
+
+    def _guided_state(self) -> NavigationState:
+        """Synthesize a NavigationState from the centerline-follow parameter.
+
+        The tip rides the planned path at arc length ``self._s``; progress is the
+        normalized arc length and deviation is zero by construction. No physical
+        contact is modeled (wall_distance is the free-space sentinel), so the
+        guidewire reliably traverses the full route to the target.
+        """
+        tip_pos_arr = self._point_at_arclen(self._s)
+        tip_pos = [float(v) for v in tip_pos_arr]
+        self._tip_history.append(tip_pos)
+
+        tip_dir = self._tangent_at_arclen(self._s)
+        tip_direction = [float(v) for v in tip_dir]
+        tip_quaternion = self._quat_from_direction(tip_dir)
+
+        velocity = self._compute_velocity(tip_pos)
+        curvature = self._compute_curvature()
+
+        target_pos = [float(v) for v in self._path_points[-1]]
+        progress = float(self._s / self._path_total_len) if self._path_total_len > 0 else 0.0
+
+        safety_status = "STANDBY" if self._episode_length == 0 else "SAFE_NAV"
+
+        state = NavigationState(
+            tip_position=tip_pos,
+            tip_direction=tip_direction,
+            tip_quaternion=tip_quaternion,
+            velocity=float(velocity),
+            contact_force=0.0,
+            wall_distance=self.MAX_WALL_DISTANCE,
+            curvature=float(curvature),
+            episode_length=self._episode_length,
+            target_position=target_pos,
+            path_progress=progress,
+            path_deviation=0.0,
+            joint_positions=[],
+            joint_velocities=[],
+            safety_status=safety_status,
+            reward=0.0,
+            done=progress >= 0.999,
+        )
+        state.risk_score = self._risk_assessor.assess(state)["risk_score"]
+        return state
+
+    def _guided_render_bodies(self) -> list[dict[str, list[float]]]:
+        """Sample the planned path behind the tip as guidewire render segments."""
+        n = 24
+        s_tip = self._s
+        s_back = max(0.0, s_tip - self._wire_length)
+        bodies: list[dict[str, list[float]]] = []
+        for i in range(n + 1):
+            s = s_back + (s_tip - s_back) * i / n
+            pos = self._point_at_arclen(s)
+            quat = self._quat_from_direction(self._tangent_at_arclen(s))
+            bodies.append({"pos": [float(v) for v in pos], "quat": quat})
+        return bodies
 
     def _extract_state(self) -> NavigationState:
         """Extract normalized state from current time_step."""
@@ -484,7 +631,11 @@ class NavigationEngine:
         velocity = np.linalg.norm(delta)
         self._previous_tip_pos = tip_pos
 
-        control_timestep = getattr(self._env.task, "control_timestep", 0.02)
+        # Guided mode has no MuJoCo env; assume a nominal ~30Hz control step.
+        if self._env is not None:
+            control_timestep = getattr(self._env.task, "control_timestep", 0.02)
+        else:
+            control_timestep = 0.033
         velocity_per_second = velocity / control_timestep if control_timestep > 0 else 0.0
 
         return velocity_per_second
@@ -497,6 +648,9 @@ class NavigationEngine:
         MuJoCo's [w, x, y, z] to the protocol's [x, y, z, w]. Returns an empty
         list when the environment is not initialized.
         """
+        if self._is_guided():
+            return self._guided_render_bodies()
+
         if not self._initialized or self._env is None:
             return []
 
@@ -562,3 +716,24 @@ class NavigationEngine:
         if self._path_points is None:
             return []
         return self._path_points.tolist()
+
+    @property
+    def entry_pose(self) -> dict[str, list[float]]:
+        """Resolved guidewire entry (vascular access) pose for client highlighting.
+
+        Returns ``{"position": [x, y, z], "direction": [x, y, z]}`` in MuJoCo
+        meters, where ``direction`` is the unit feed direction into the vessel
+        (the introduction direction). This is the exact pose the guidewire is
+        spawned at on reset (see ``_resolve_entry``), so a marker drawn here sits
+        at the real entry. Both lists are empty when no entry is configured (e.g.
+        plain low_tort sessions that spawn near the world origin).
+        """
+        point, direction = self._resolve_entry()
+        pose: dict[str, list[float]] = {"position": [], "direction": []}
+        if point is not None:
+            pose["position"] = [float(v) for v in point]
+        if direction is not None:
+            norm = float(np.linalg.norm(direction))
+            if norm > 1e-9:
+                pose["direction"] = [float(v / norm) for v in direction]
+        return pose
