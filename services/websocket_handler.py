@@ -121,6 +121,7 @@ class ConnectionState:
     is_alive: bool = True
     control_rate_limiter: float = 0.0  # Last control timestamp
     batch_mode: bool = False  # Send state_batch (with render data) instead of state_update
+    path_sent: bool = False  # The planned path is constant; send it once, then omit
 
 
 class WebSocketHandler:
@@ -191,6 +192,10 @@ class WebSocketHandler:
             elapsed = time.time() - conn_state.last_pong_time
             if elapsed > self.PONG_TIMEOUT:
                 conn_state.is_alive = False
+                print(
+                    f"[WS] PONG_TIMEOUT: no pong for {elapsed:.1f}s "
+                    f"(session={conn_state.session_id})"
+                )
                 await self._send_error(
                     conn_state, "PONG_TIMEOUT", "Connection timed out"
                 )
@@ -396,12 +401,14 @@ class WebSocketHandler:
 
             if conn_state.batch_mode:
                 engine = self._session_manager.get_session(conn_state.session_id)
+                include_path = not conn_state.path_sent
                 await self._send_message(
                     conn_state,
                     MessageType.STATE_BATCH,
                     session_id=conn_state.session_id,
-                    data=self._state_to_batch(state, engine),
+                    data=self._state_to_batch(state, engine, include_path=include_path),
                 )
+                conn_state.path_sent = True
             else:
                 await self._send_message(
                     conn_state,
@@ -476,9 +483,10 @@ class WebSocketHandler:
             if conn_state.batch_mode:
                 engine = self._session_manager.get_session(conn_state.session_id)
                 payload = {
-                    **self._state_to_batch(state, engine),
+                    **self._state_to_batch(state, engine, include_path=True),
                     "episode_count": info.episode_count,
                 }
+                conn_state.path_sent = True
                 msg_type = MessageType.STATE_BATCH
             else:
                 payload = {
@@ -509,12 +517,23 @@ class WebSocketHandler:
         """
         return state.as_dict()
 
-    def _state_to_batch(self, state: NavigationState, engine: NavigationEngine) -> dict:
+    def _state_to_batch(
+        self,
+        state: NavigationState,
+        engine: NavigationEngine,
+        include_path: bool = True,
+    ) -> dict:
         """Build the state_batch payload with guidewire render data.
 
         Follows the state_batch structure in doc/03-API与通信协议.md §1.4,
         adding per-segment body positions (for tube rendering), the planned path,
         and aggregated safety/episode blocks.
+
+        The planned path is constant for a session and can be large (thousands of
+        points for VPP routes). It is only included when ``include_path`` is True
+        (first batch / reset); subsequent batches omit ``waypoints`` to keep each
+        frame small. The client keeps its existing path drawing when waypoints is
+        empty.
         """
         return {
             "tip": {
@@ -524,7 +543,7 @@ class WebSocketHandler:
             },
             "bodies": engine.get_render_bodies(),
             "path": {
-                "waypoints": engine.planned_path,
+                "waypoints": engine.planned_path if include_path else [],
                 "progress": state.path_progress,
                 "deviation": state.path_deviation,
             },
@@ -558,7 +577,8 @@ class WebSocketHandler:
         }
         try:
             await conn_state.websocket.send_json(message)
-        except Exception:
+        except Exception as e:  # noqa: BLE001 - log why the send failed before closing
+            print(f"[WS] send failed ({msg_type.value}): {type(e).__name__}: {e}")
             conn_state.is_alive = False
 
     async def _send_error(
@@ -574,6 +594,7 @@ class WebSocketHandler:
 
     async def _cleanup_connection(self, conn_state: ConnectionState) -> None:
         """Clean up resources when connection closes."""
+        print(f"[WS] cleanup: closing connection (session={conn_state.session_id})")
         if conn_state.session_id:
             self._session_manager.close_session(conn_state.session_id)
 

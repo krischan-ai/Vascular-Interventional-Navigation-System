@@ -9,12 +9,12 @@ extends Node3D
 # client). For VPP navigation set phantom to "<case>_vpp" and provide start/end
 # endpoint positions in LPS millimeters; the backend plans the route, spawns the
 # guidewire at the vessel entry, and streams the path for visualization.
-@export var phantom: String = "low_tort"
-@export var target: String = "bca"
+@export var phantom: String = "case_001_vpp"
+@export var target: String = "endpoints_1"
 @export var case_id: String = "case_001"
 ## LPS millimeters; leave empty for non-VPP (low_tort) sessions.
-@export var start_position: Array = []
-@export var end_position: Array = []
+@export var start_position: Array = [0.173, -268.24, 291.25]
+@export var end_position: Array = [-975.65, -217.22, 250.32]
 
 var _ws  # WebSocketClient node
 var _input  # InputHandler node

@@ -52,6 +52,12 @@ func _ready() -> void:
 	# Allow project setting override of the endpoint.
 	if ProjectSettings.has_setting("network/config/server_url"):
 		server_url = str(ProjectSettings.get_setting("network/config/server_url"))
+	# VPP state_batch carries the full planned path (thousands of points) on the
+	# first frame, which far exceeds the 64KB default inbound buffer and would
+	# otherwise drop the connection. Size up before connecting.
+	_socket.inbound_buffer_size = 1 << 22  # 4 MB
+	_socket.outbound_buffer_size = 1 << 20  # 1 MB
+	_socket.max_queued_packets = 2048
 	var err := _socket.connect_to_url(server_url)
 	if err != OK:
 		push_error("WebSocket connect_to_url failed: %d" % err)
@@ -87,6 +93,8 @@ func _process(delta: float) -> void:
 		WebSocketPeer.STATE_CLOSED:
 			if _was_open:
 				_was_open = false
+				print("[WS] closed code=%d reason='%s'" % [
+					_socket.get_close_code(), _socket.get_close_reason()])
 				disconnected.emit()
 
 
@@ -139,8 +147,9 @@ func _handle_packet(packet: String) -> void:
 			# SESSION_EXISTS can occur from a benign session_start retry after the
 			# session was already created; ignore it.
 			if str(data.get("code", "")) == "SESSION_EXISTS":
-				pass
+				print("[WS] ignoring benign SESSION_EXISTS")
 			else:
+				print("[WS] SERVER ERROR: %s" % str(data))
 				error_received.emit(data)
 				push_warning("Server error: %s" % str(data))
 		_:

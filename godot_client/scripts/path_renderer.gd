@@ -30,6 +30,10 @@ func _ready() -> void:
 func update_from_batch(batch: Dictionary) -> void:
 	var path: Dictionary = batch.get("path", {})
 	var waypoints: Array = path.get("waypoints", [])
+	# The backend sends the (constant) path only on the first batch / after reset
+	# and omits it afterwards; keep the existing drawing when waypoints is empty.
+	if waypoints.is_empty():
+		return
 	# Redraw only when the route changes to avoid rebuilding the mesh every frame.
 	if waypoints.size() == _drawn_count:
 		return
