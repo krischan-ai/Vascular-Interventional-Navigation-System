@@ -47,6 +47,12 @@ func _ready() -> void:
 	endoscope_cam.near = 0.0005
 	endoscope_cam.far = 50.0
 	endoscope_cam.fov = endoscope_fov
+	# Cull the guidewire render layer so the first-person view never renders the
+	# wire/tip it is embedded in (it sits inside the tube at the tip) -- otherwise
+	# the camera just sees the inside of its own guidewire instead of the lumen.
+	# Keep all other layers (vessel lumen, path, markers). Matches
+	# guidewire_renderer.gd GUIDEWIRE_RENDER_LAYER (render layer 2).
+	endoscope_cam.cull_mask = 0xFFFFF & ~(1 << 1)
 	add_child(endoscope_cam)
 
 

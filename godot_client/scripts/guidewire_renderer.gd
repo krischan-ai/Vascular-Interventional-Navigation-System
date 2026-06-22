@@ -12,11 +12,28 @@ extends Node3D
 ## the vessel GLB exported by tools/export_godot_assets.py, so no coordinate
 ## conversion is required.
 
-@export var tip_radius: float = 0.004      ## meters
-@export var wire_radius: float = 0.0012    ## meters (~guidewire radius)
+# Wire/tip radii differ by camera: thicker in the wide overview so the wire is
+# visible at low magnification, thin in the close-up follow view so it reads as a
+# real (sub-mm) guidewire. The endoscope culls the wire entirely, so its value is
+# irrelevant there. set_close_up() (called by the main controller on camera
+# switch) swaps the active radii below.
+@export var wire_radius_overview: float = 0.0014  ## meters
+@export var wire_radius_closeup: float = 0.0006   ## meters
+@export var tip_radius_overview: float = 0.0018   ## meters
+@export var tip_radius_closeup: float = 0.0009    ## meters
 @export var wire_sides: int = 8            ## tube cross-section segments
 @export var wire_color: Color = Color(0.85, 0.86, 0.9)
 @export var tip_color: Color = Color(1.0, 0.35, 0.2)
+
+# Active radii (default to overview); the tube rebuilds every batch so wire_radius
+# takes effect next frame, while the tip sphere is resized immediately.
+var wire_radius: float = 0.0014
+var tip_radius: float = 0.0018
+
+## Render layer for the guidewire (tip + tube). The first-person endoscope camera
+## culls this layer (see camera_rig.gd) so it never renders the wire it is
+## embedded in; all other cameras keep it visible.
+const GUIDEWIRE_RENDER_LAYER := 1 << 1  ## render layer 2
 
 var _tip: MeshInstance3D
 var _wire: MeshInstance3D
@@ -25,6 +42,8 @@ var _wire_material: StandardMaterial3D
 
 
 func _ready() -> void:
+	wire_radius = wire_radius_overview
+	tip_radius = tip_radius_overview
 	_tip = MeshInstance3D.new()
 	var sphere := SphereMesh.new()
 	sphere.radius = tip_radius
@@ -36,6 +55,7 @@ func _ready() -> void:
 	tip_mat.emission = tip_color
 	tip_mat.emission_energy_multiplier = 0.6
 	_tip.material_override = tip_mat
+	_tip.layers = GUIDEWIRE_RENDER_LAYER
 	add_child(_tip)
 
 	_wire_mesh = ImmediateMesh.new()
@@ -49,6 +69,7 @@ func _ready() -> void:
 	_wire_material.roughness = 0.35
 	_wire_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	_wire.material_override = _wire_material
+	_wire.layers = GUIDEWIRE_RENDER_LAYER
 	add_child(_wire)
 
 
@@ -68,6 +89,17 @@ func update_from_batch(batch: Dictionary) -> void:
 func update_from_state(state: Dictionary) -> void:
 	if state.has("tip_position"):
 		_tip.position = _to_vec3(state["tip_position"])
+
+
+## Swap to thin close-up radii (follow view) or back to the thicker overview
+## radii. The tube picks up wire_radius on the next batch; resize the tip now.
+func set_close_up(close: bool) -> void:
+	wire_radius = wire_radius_closeup if close else wire_radius_overview
+	tip_radius = tip_radius_closeup if close else tip_radius_overview
+	var sphere := _tip.mesh as SphereMesh
+	if sphere:
+		sphere.radius = tip_radius
+		sphere.height = tip_radius * 2.0
 
 
 func _build_tube(points: PackedVector3Array, radius: float) -> void:

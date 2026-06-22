@@ -35,6 +35,7 @@ var _cam_mode: int = CamMode.OVERVIEW
 var _vessel_meshes: Array = []  # MeshInstance3D nodes of the vessel
 var _vessel_mat_overlay: StandardMaterial3D  # translucent (overview/follow)
 var _vessel_mat_interior: StandardMaterial3D  # opaque inner wall (endoscope)
+var _env: Environment  # world environment; endoscope toggles its depth fog
 # Auto-switch to the close-up follow view once the first tip pose streams in, so
 # the guidewire is visible immediately instead of a dot in the overview.
 var _auto_followed: bool = false
@@ -87,6 +88,16 @@ func _setup_environment() -> void:
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	env.ambient_light_color = Color(0.4, 0.4, 0.45)
 	env.ambient_light_energy = 0.6
+	# Depth fog for the endoscope tunnel cue: near wall keeps its red, the far
+	# lumen fades toward the (near-black) fog color, giving depth WITHOUT any
+	# light that could clip a mm-close wall to white. High density because the
+	# lumen is only centimeters across. Enabled only in endoscope view (see
+	# _set_camera_mode) so it does not darken the overview/follow scene.
+	env.fog_enabled = false
+	env.fog_mode = Environment.FOG_MODE_EXPONENTIAL
+	env.fog_light_color = Color(0.06, 0.01, 0.01)
+	env.fog_density = 45.0
+	_env = env
 	world_env.environment = env
 	add_child(world_env)
 
@@ -144,9 +155,10 @@ func _apply_vessel_material(node: Node) -> void:
 
 	# Interior material (endoscope): opaque so the lumen wall is visible from
 	# inside instead of see-through. Double-sided so Godot flips back-face
-	# normals for correct shading. A modest self-illumination (emission) makes
-	# the wall softly visible without a headlight (a close point light blows the
-	# cm-scale lumen out to white).
+	# normals for correct shading. A flat emission keeps every wall an even red
+	# (it cannot clip to white like a close light does); the endoscope's depth
+	# fog supplies the near/far gradient so the tunnel does not read as one solid
+	# field.
 	_vessel_mat_interior = StandardMaterial3D.new()
 	_vessel_mat_interior.albedo_color = Color(0.7, 0.28, 0.26)
 	_vessel_mat_interior.cull_mode = BaseMaterial3D.CULL_DISABLED
@@ -154,7 +166,7 @@ func _apply_vessel_material(node: Node) -> void:
 	_vessel_mat_interior.metallic = 0.0
 	_vessel_mat_interior.emission_enabled = true
 	_vessel_mat_interior.emission = Color(0.45, 0.16, 0.15)
-	_vessel_mat_interior.emission_energy_multiplier = 0.35
+	_vessel_mat_interior.emission_energy_multiplier = 0.3
 
 	_vessel_meshes = node.find_children("*", "MeshInstance3D", true, false)
 	_set_vessel_interior(false)
@@ -313,6 +325,13 @@ func _set_camera_mode(mode: int) -> void:
 	# Opaque inner wall only in endoscope; translucent otherwise so the
 	# guidewire stays visible from outside.
 	_set_vessel_interior(mode == CamMode.ENDOSCOPE)
+	# Depth fog on only in endoscope so the lumen reads with depth (near wall red,
+	# far lumen fades dark) without darkening the overview/follow scene.
+	if _env:
+		_env.fog_enabled = (mode == CamMode.ENDOSCOPE)
+	# Thin guidewire in the close-up views; thicker in the wide overview so it
+	# stays visible at low magnification.
+	_guidewire.set_close_up(mode != CamMode.OVERVIEW)
 	_hud.set_view_mode(CAM_MODE_NAMES.get(mode, "?"))
 	print("[Main] camera mode -> %s" % CAM_MODE_NAMES.get(mode, "?"))
 
