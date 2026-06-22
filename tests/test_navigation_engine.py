@@ -288,17 +288,35 @@ class TestGuidedMode:
         retracted = engine.step(-1.0, 0.0).path_progress
         assert retracted < advanced
 
-    def test_render_bodies_follow_path(self):
-        engine = self._engine(advance_per_step=0.1, wire_length=0.3)
+    def test_render_bodies_span_full_inserted_length(self):
+        engine = self._engine(advance_per_step=0.1)
         engine.reset()
         for _ in range(15):
-            engine.step(1.0, 0.0)
+            engine.step(1.0, 0.0)  # s = 1.5 along the 3 m straight path
         bodies = engine.get_render_bodies()
         assert len(bodies) > 1
-        # Bodies lie on the +x axis (the straight path), tip is the last one.
+        # The wire spans the full inserted length: first body at the entry (x=0),
+        # last at the tip (x=1.5). On a straight path there is no inner-wall lean.
         for body in bodies:
             assert body["pos"][1] == pytest.approx(0.0, abs=1e-9)
-        assert bodies[-1]["pos"][0] > bodies[0]["pos"][0]
+        assert bodies[0]["pos"][0] == pytest.approx(0.0, abs=1e-3)
+        assert bodies[-1]["pos"][0] == pytest.approx(1.5, abs=1e-2)
+
+    def test_inner_wall_lean_offsets_on_bend(self):
+        # An L-shaped path bends at the corner; the lean offset must be nonzero
+        # there and capped at wall_lean.
+        engine = self._engine(
+            planned_path=[[0, 0, 0], [1, 0, 0], [1, 1, 0]],
+            advance_per_step=0.1,
+            wall_lean=0.0025,
+        )
+        engine.reset()
+        import numpy as np
+
+        offset = engine._inner_wall_offset(1.0)  # at the corner
+        mag = float(np.linalg.norm(offset))
+        assert mag > 0.0
+        assert mag <= 0.0025 + 1e-9
 
 
 # ============================================================================

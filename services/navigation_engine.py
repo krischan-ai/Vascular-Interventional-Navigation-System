@@ -140,6 +140,7 @@ class NavigationEngine:
         guided: bool = False,
         advance_per_step: float = 0.01,
         wire_length: float = 0.12,
+        wall_lean: float = 0.0025,
     ):
         """Initialize the navigation engine.
 
@@ -173,8 +174,11 @@ class NavigationEngine:
                     guidewire (~0.08m, 0.2m insertion cap) cannot traverse.
             advance_per_step: Arc-length advanced per unit push in guided mode
                               (meters). delta_push=1.0 advances this much.
-            wire_length: Visible guidewire length trailing the tip in guided
-                         mode (meters), used to render the wire along the path.
+            wire_length: Legacy trailing-length hint for guided rendering; the
+                         render now spans the full inserted length (entry->tip).
+            wall_lean: Max offset (meters) toward the inner side of curves in
+                       guided render, so the wire hugs the inner vessel wall at
+                       bends like a tensioned wire. 0 disables (centerline).
         """
         self.phantom = phantom
         self.target = target
@@ -199,6 +203,8 @@ class NavigationEngine:
         self._guided = bool(guided)
         self._advance_per_step = float(advance_per_step)
         self._wire_length = float(wire_length)
+        self._wall_lean = float(wall_lean)
+        self._wall_lean_gain = 1.5
         self._s = 0.0  # current insertion depth as arc length along the path (m)
 
         self._env = None
@@ -453,17 +459,51 @@ class NavigationEngine:
         return state
 
     def _guided_render_bodies(self) -> list[dict[str, list[float]]]:
-        """Sample the planned path behind the tip as guidewire render segments."""
-        n = 24
+        """Sample the full inserted guidewire (entry -> tip) along the centerline.
+
+        Renders the entire inserted length so the wire visibly curves through
+        every vessel bend (not just a short tip stub), and leans each point
+        toward the inner side of curves (like a tensioned wire pressing on the
+        inner wall) so the shape reads as a real bending guidewire.
+        """
         s_tip = self._s
-        s_back = max(0.0, s_tip - self._wire_length)
+        if s_tip <= 1e-6:
+            pos = self._point_at_arclen(0.0)
+            quat = self._quat_from_direction(self._tangent_at_arclen(0.0))
+            return [{"pos": [float(v) for v in pos], "quat": quat}]
+
+        spacing = 0.004  # ~4mm between render segments
+        n = int(np.clip(int(s_tip / spacing) + 1, 2, 256))
         bodies: list[dict[str, list[float]]] = []
         for i in range(n + 1):
-            s = s_back + (s_tip - s_back) * i / n
+            s = s_tip * i / n
             pos = self._point_at_arclen(s)
+            if self._wall_lean > 0.0:
+                pos = pos + self._inner_wall_offset(s)
             quat = self._quat_from_direction(self._tangent_at_arclen(s))
             bodies.append({"pos": [float(v) for v in pos], "quat": quat})
         return bodies
+
+    def _inner_wall_offset(self, s: float) -> np.ndarray:
+        """Offset toward the inner (concave) side of the local curve.
+
+        Zero on straight sections; grows with curvature, capped at wall_lean.
+        """
+        delta = 0.01
+        p_prev = self._point_at_arclen(s - delta)
+        p = self._point_at_arclen(s)
+        p_next = self._point_at_arclen(s + delta)
+        inward = 0.5 * (p_prev + p_next) - p  # toward the center of curvature
+        # Keep only the lateral component; a one-sided difference at the path
+        # ends (where p_prev/p_next clamp) is purely tangential and must not
+        # shift the wire along its own direction.
+        tangent = self._tangent_at_arclen(s)
+        inward = inward - tangent * float(np.dot(inward, tangent))
+        n = float(np.linalg.norm(inward))
+        if n < 1e-9:
+            return np.zeros(3)
+        mag = min(self._wall_lean, n * self._wall_lean_gain)
+        return (inward / n) * mag
 
     def _extract_state(self) -> NavigationState:
         """Extract normalized state from current time_step."""

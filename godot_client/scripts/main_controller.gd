@@ -32,6 +32,9 @@ var _entry_marker  # EntryMarker node (vessel entry + target highlights)
 var _rig  # CameraRig node (follow + endoscope cameras)
 var _camera: Camera3D  # overview camera
 var _cam_mode: int = CamMode.OVERVIEW
+var _vessel_meshes: Array = []  # MeshInstance3D nodes of the vessel
+var _vessel_mat_overlay: StandardMaterial3D  # translucent (overview/follow)
+var _vessel_mat_interior: StandardMaterial3D  # opaque inner wall (endoscope)
 # Auto-switch to the close-up follow view once the first tip pose streams in, so
 # the guidewire is visible immediately instead of a dot in the overview.
 var _auto_followed: bool = false
@@ -132,12 +135,38 @@ func _setup_vessel() -> Node3D:
 
 
 func _apply_vessel_material(node: Node) -> void:
-	# Make the vessel translucent so the guidewire is visible inside.
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.8, 0.3, 0.3, 0.28)
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	for child in node.find_children("*", "MeshInstance3D", true, false):
+	# Overlay material (overview/follow): translucent so the guidewire shows
+	# through from outside.
+	_vessel_mat_overlay = StandardMaterial3D.new()
+	_vessel_mat_overlay.albedo_color = Color(0.8, 0.3, 0.3, 0.28)
+	_vessel_mat_overlay.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_vessel_mat_overlay.cull_mode = BaseMaterial3D.CULL_DISABLED
+
+	# Interior material (endoscope): opaque so the lumen wall is visible from
+	# inside instead of see-through. Double-sided so Godot flips back-face
+	# normals for correct shading. A modest self-illumination (emission) makes
+	# the wall softly visible without a headlight (a close point light blows the
+	# cm-scale lumen out to white).
+	_vessel_mat_interior = StandardMaterial3D.new()
+	_vessel_mat_interior.albedo_color = Color(0.7, 0.28, 0.26)
+	_vessel_mat_interior.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_vessel_mat_interior.roughness = 0.85
+	_vessel_mat_interior.metallic = 0.0
+	_vessel_mat_interior.emission_enabled = true
+	_vessel_mat_interior.emission = Color(0.45, 0.16, 0.15)
+	_vessel_mat_interior.emission_energy_multiplier = 0.35
+
+	_vessel_meshes = node.find_children("*", "MeshInstance3D", true, false)
+	_set_vessel_interior(false)
+
+
+func _set_vessel_interior(interior: bool) -> void:
+	# Swap the vessel material so the lumen is opaque in endoscope view but
+	# translucent (guidewire visible) in overview/follow.
+	var mat: StandardMaterial3D = _vessel_mat_interior if interior else _vessel_mat_overlay
+	if mat == null:
+		return
+	for child in _vessel_meshes:
 		child.material_override = mat
 
 
@@ -281,6 +310,9 @@ func _set_camera_mode(mode: int) -> void:
 			_rig.follow_cam.make_current()
 		CamMode.ENDOSCOPE:
 			_rig.endoscope_cam.make_current()
+	# Opaque inner wall only in endoscope; translucent otherwise so the
+	# guidewire stays visible from outside.
+	_set_vessel_interior(mode == CamMode.ENDOSCOPE)
 	_hud.set_view_mode(CAM_MODE_NAMES.get(mode, "?"))
 	print("[Main] camera mode -> %s" % CAM_MODE_NAMES.get(mode, "?"))
 

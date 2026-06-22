@@ -1,13 +1,21 @@
 extends Node3D
-## Renders the guidewire: a tip sphere plus a tube/line through the per-segment
+## Renders the guidewire: a tip sphere plus a smooth tube through the per-segment
 ## body positions streamed in state_batch messages.
 ##
-## All positions arrive in the MuJoCo/guidewire meter frame, which is the same
-## frame as the vessel GLB exported by tools/export_godot_assets.py, so no
-## coordinate conversion is required.
+## The wire is built as a real tube (extruded ring along the polyline with
+## parallel-transport frames) so it reads as a smooth, lit, bending guidewire
+## instead of a thin jagged line. In guided mode the backend streams the full
+## inserted length (entry -> tip, leaning on the inner wall at bends), so the
+## whole wire visibly curves through every vessel turn.
+##
+## All positions arrive in the MuJoCo/guidewire meter frame, the same frame as
+## the vessel GLB exported by tools/export_godot_assets.py, so no coordinate
+## conversion is required.
 
 @export var tip_radius: float = 0.004      ## meters
-@export var wire_color: Color = Color(0.9, 0.9, 0.95)
+@export var wire_radius: float = 0.0012    ## meters (~guidewire radius)
+@export var wire_sides: int = 8            ## tube cross-section segments
+@export var wire_color: Color = Color(0.85, 0.86, 0.9)
 @export var tip_color: Color = Color(1.0, 0.35, 0.2)
 
 var _tip: MeshInstance3D
@@ -33,10 +41,13 @@ func _ready() -> void:
 	_wire_mesh = ImmediateMesh.new()
 	_wire = MeshInstance3D.new()
 	_wire.mesh = _wire_mesh
+	# A lit, slightly metallic material so the tube's curvature is visible
+	# through shading (a smooth bending wire, not a flat scribble).
 	_wire_material = StandardMaterial3D.new()
 	_wire_material.albedo_color = wire_color
-	_wire_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	_wire_material.vertex_color_use_as_albedo = false
+	_wire_material.metallic = 0.6
+	_wire_material.roughness = 0.35
+	_wire_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	_wire.material_override = _wire_material
 	add_child(_wire)
 
@@ -47,7 +58,11 @@ func update_from_batch(batch: Dictionary) -> void:
 		_tip.position = _to_vec3(tip_data["position"])
 
 	var bodies: Array = batch.get("bodies", [])
-	_draw_wire(bodies)
+	var points := PackedVector3Array()
+	for body in bodies:
+		if typeof(body) == TYPE_DICTIONARY and body.has("pos"):
+			points.append(_to_vec3(body["pos"]))
+	_build_tube(points, wire_radius)
 
 
 func update_from_state(state: Dictionary) -> void:
@@ -55,15 +70,78 @@ func update_from_state(state: Dictionary) -> void:
 		_tip.position = _to_vec3(state["tip_position"])
 
 
-func _draw_wire(bodies: Array) -> void:
+func _build_tube(points: PackedVector3Array, radius: float) -> void:
 	_wire_mesh.clear_surfaces()
-	if bodies.size() < 2:
+	var count := points.size()
+	if count < 2:
 		return
-	_wire_mesh.surface_begin(Mesh.PRIMITIVE_LINE_STRIP, _wire_material)
-	for body in bodies:
-		if typeof(body) == TYPE_DICTIONARY and body.has("pos"):
-			_wire_mesh.surface_add_vertex(_to_vec3(body["pos"]))
+
+	var sides: int = max(3, wire_sides)
+	# Build ring frames with parallel transport to avoid twisting.
+	var rings: Array = []
+	var ring_normals: Array = []
+	var prev_n := Vector3.ZERO
+	for i in count:
+		var tangent := _tangent_at(points, i)
+		var n: Vector3
+		if i == 0:
+			n = _arbitrary_perp(tangent)
+		else:
+			n = prev_n - tangent * prev_n.dot(tangent)
+			if n.length() < 1e-6:
+				n = _arbitrary_perp(tangent)
+			n = n.normalized()
+		prev_n = n
+		var b := tangent.cross(n).normalized()
+		var ring := PackedVector3Array()
+		var normals := PackedVector3Array()
+		for k in sides:
+			var ang := TAU * float(k) / float(sides)
+			var dir := (n * cos(ang) + b * sin(ang)).normalized()
+			ring.append(points[i] + dir * radius)
+			normals.append(dir)
+		rings.append(ring)
+		ring_normals.append(normals)
+
+	_wire_mesh.surface_begin(Mesh.PRIMITIVE_TRIANGLES, _wire_material)
+	for i in count - 1:
+		var r0: PackedVector3Array = rings[i]
+		var r1: PackedVector3Array = rings[i + 1]
+		var n0: PackedVector3Array = ring_normals[i]
+		var n1: PackedVector3Array = ring_normals[i + 1]
+		for k in sides:
+			var k2 := (k + 1) % sides
+			# Two triangles per quad (a=r0[k], b=r0[k2], c=r1[k], d=r1[k2]).
+			_emit(r0[k], n0[k]);  _emit(r1[k], n1[k]);  _emit(r0[k2], n0[k2])
+			_emit(r0[k2], n0[k2]); _emit(r1[k], n1[k]); _emit(r1[k2], n1[k2])
 	_wire_mesh.surface_end()
+
+
+func _emit(v: Vector3, n: Vector3) -> void:
+	_wire_mesh.surface_set_normal(n)
+	_wire_mesh.surface_add_vertex(v)
+
+
+func _tangent_at(points: PackedVector3Array, i: int) -> Vector3:
+	var a: Vector3
+	var b: Vector3
+	if i == 0:
+		a = points[0]; b = points[1]
+	elif i == points.size() - 1:
+		a = points[i - 1]; b = points[i]
+	else:
+		a = points[i - 1]; b = points[i + 1]
+	var t := b - a
+	if t.length() < 1e-9:
+		return Vector3(0, 0, 1)
+	return t.normalized()
+
+
+func _arbitrary_perp(t: Vector3) -> Vector3:
+	var ref := Vector3.UP
+	if absf(t.dot(ref)) > 0.99:
+		ref = Vector3.RIGHT
+	return (ref - t * ref.dot(t)).normalized()
 
 
 func _to_vec3(arr: Variant) -> Vector3:
