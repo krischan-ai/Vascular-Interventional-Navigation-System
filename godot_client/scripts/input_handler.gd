@@ -13,6 +13,8 @@ extends Node
 signal control(delta_push: float, delta_rotate: float)
 signal input_state(delta_push: float, delta_rotate: float)
 signal reset_requested
+## Emitted on each C keypress to cycle the camera view (overview/follow/endoscope).
+signal view_cycle
 
 @export var send_interval: float = 0.05  ## seconds (~20 Hz)
 
@@ -23,6 +25,8 @@ func _input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		if event.physical_keycode == KEY_R:
 			reset_requested.emit()
+		elif event.physical_keycode == KEY_C:
+			view_cycle.emit()
 
 
 func _process(delta: float) -> void:

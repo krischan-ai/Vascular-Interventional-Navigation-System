@@ -16,12 +16,24 @@ extends Node3D
 @export var start_position: Array = [0.173, -268.24, 291.25]
 @export var end_position: Array = [-975.65, -217.22, 250.32]
 
+enum CamMode { OVERVIEW, FOLLOW, ENDOSCOPE }
+const CAM_MODE_NAMES := {
+	CamMode.OVERVIEW: "概览 Overview",
+	CamMode.FOLLOW: "跟随 Follow",
+	CamMode.ENDOSCOPE: "内窥镜 Endoscope",
+}
+
 var _ws  # WebSocketClient node
 var _input  # InputHandler node
 var _hud  # HUD CanvasLayer
 var _guidewire  # GuidewireRenderer node
 var _path  # PathRenderer node
-var _camera: Camera3D
+var _rig  # CameraRig node (follow + endoscope cameras)
+var _camera: Camera3D  # overview camera
+var _cam_mode: int = CamMode.OVERVIEW
+# Auto-switch to the close-up follow view once the first tip pose streams in, so
+# the guidewire is visible immediately instead of a dot in the overview.
+var _auto_followed: bool = false
 
 # On-screen diagnostics.
 var _session_id: String = "none"
@@ -47,6 +59,7 @@ func _ready() -> void:
 	var frame: Node = vessel if vessel != null else self
 	_setup_guidewire(frame)
 	_setup_path(frame)
+	_setup_rig(frame)
 	_setup_hud()
 	_setup_network_and_input()
 	if vessel != null:
@@ -136,6 +149,12 @@ func _setup_path(parent: Node) -> void:
 	parent.add_child(_path)
 
 
+func _setup_rig(parent: Node) -> void:
+	# Parent under the vessel frame so tip coordinates need no conversion.
+	_rig = preload("res://scripts/camera_rig.gd").new()
+	parent.add_child(_rig)
+
+
 func _setup_hud() -> void:
 	_hud = preload("res://scripts/hud_controller.gd").new()
 	add_child(_hud)
@@ -163,6 +182,7 @@ func _setup_network_and_input() -> void:
 	_input.control.connect(_ws.send_control)
 	_input.input_state.connect(_hud.update_input)
 	_input.reset_requested.connect(_ws.send_reset)
+	_input.view_cycle.connect(_cycle_camera_mode)
 
 
 func _on_connected() -> void:
@@ -199,6 +219,7 @@ func _on_session_started(sid: String, state: Dictionary) -> void:
 func _on_batch(batch: Dictionary) -> void:
 	_guidewire.update_from_batch(batch)
 	_path.update_from_batch(batch)
+	_feed_rig(batch.get("tip", {}))
 	var safety: Dictionary = batch.get("safety", {})
 	var episode: Dictionary = batch.get("episode", {})
 	_hud.update_safety(str(safety.get("status", "STANDBY")))
@@ -222,6 +243,49 @@ func _on_state(state: Dictionary) -> void:
 	_msg_count += 1
 	_last_msg = "state_update"
 	_update_debug()
+
+
+func _feed_rig(tip: Dictionary) -> void:
+	if tip.is_empty():
+		return
+	var pos := _to_vec3(tip.get("position", []))
+	var dir := _to_vec3(tip.get("direction", []))
+	var quat := _to_quat(tip.get("quaternion", []))
+	_rig.update_tip(pos, dir, quat)
+	# First real pose: drop the operator into the close-up follow view.
+	if not _auto_followed:
+		_auto_followed = true
+		_set_camera_mode(CamMode.FOLLOW)
+
+
+func _cycle_camera_mode() -> void:
+	_set_camera_mode((_cam_mode + 1) % CamMode.size())
+
+
+func _set_camera_mode(mode: int) -> void:
+	_cam_mode = mode
+	match mode:
+		CamMode.OVERVIEW:
+			_camera.make_current()
+		CamMode.FOLLOW:
+			_rig.follow_cam.make_current()
+		CamMode.ENDOSCOPE:
+			_rig.endoscope_cam.make_current()
+	_hud.set_view_mode(CAM_MODE_NAMES.get(mode, "?"))
+	print("[Main] camera mode -> %s" % CAM_MODE_NAMES.get(mode, "?"))
+
+
+func _to_vec3(arr: Variant) -> Vector3:
+	if typeof(arr) == TYPE_ARRAY and arr.size() >= 3:
+		return Vector3(float(arr[0]), float(arr[1]), float(arr[2]))
+	return Vector3.ZERO
+
+
+# tip.quaternion follows the protocol order [x, y, z, w].
+func _to_quat(arr: Variant) -> Quaternion:
+	if typeof(arr) == TYPE_ARRAY and arr.size() >= 4:
+		return Quaternion(float(arr[0]), float(arr[1]), float(arr[2]), float(arr[3]))
+	return Quaternion.IDENTITY
 
 
 func _scene_aabb(node: Node) -> AABB:

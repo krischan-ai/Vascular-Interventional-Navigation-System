@@ -14,6 +14,7 @@ var _status_label: Label
 var _connection_label: Label
 var _metrics_label: Label
 var _input_label: Label
+var _view_label: Label
 var _debug_label: Label
 
 
@@ -74,8 +75,14 @@ func _ready() -> void:
 	_input_label.text = "Input  push=+0.0  rot=+0.0"
 	vbox.add_child(_input_label)
 
+	_view_label = Label.new()
+	_view_label.add_theme_font_size_override("font_size", 15)
+	_view_label.add_theme_color_override("font_color", Color(0.85, 0.8, 1.0))
+	_view_label.text = "视角 View   概览 Overview"
+	vbox.add_child(_view_label)
+
 	var hint := Label.new()
-	hint.text = "W/S 推进·后退   A/D 旋转   R 重置"
+	hint.text = "W/S 推进·后退   A/D 旋转   C 切换视角   R 重置"
 	hint.add_theme_font_size_override("font_size", 13)
 	hint.add_theme_color_override("font_color", Color(0.65, 0.65, 0.7))
 	vbox.add_child(hint)
@@ -115,6 +122,10 @@ func update_metrics(metrics: Dictionary) -> void:
 
 func update_input(push: float, rotate: float) -> void:
 	_input_label.text = "Input  push=%+0.1f  rot=%+0.1f" % [push, rotate]
+
+
+func set_view_mode(mode_name: String) -> void:
+	_view_label.text = "视角 View   %s" % mode_name
 
 
 func set_debug(text: String) -> void:

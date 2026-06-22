@@ -1,0 +1,101 @@
+extends Node3D
+## Guidewire-tracking camera rig.
+##
+## Parented under the vessel GLB root (the same frame as the guidewire and path
+## renderers) so the streamed tip position/direction/quaternion are used directly
+## as frame-local coordinates -- no world-transform conversion, and the glTF axis
+## conversion applies equally to vessel, guidewire and cameras.
+##
+## Owns two close-range cameras; the overview camera stays owned by the main
+## controller. The controller decides which camera is current.
+##   - FOLLOW    : third-person close-up trailing the tip (smoothed).
+##   - ENDOSCOPE : first-person view from the tip looking down the guidewire.
+
+## Third-person follow tuning (meters).
+@export var follow_back: float = 0.025    ## distance behind the tip along travel
+@export var follow_height: float = 0.012  ## height above the tip
+@export var follow_smooth: float = 12.0   ## position/look lerp speed (1/s)
+@export var follow_fov: float = 55.0
+## First-person endoscope tuning.
+@export var endoscope_back: float = 0.002  ## pull back from the tip to avoid clipping
+@export var endoscope_fov: float = 85.0
+
+var follow_cam: Camera3D
+var endoscope_cam: Camera3D
+
+# Latest tip pose (frame-local). Direction defaults to the guidewire feed axis
+# (+y, see src/cathsim/dm/env.py GUIDEWIRE_FEED_AXIS) until real data arrives.
+var _tip := Vector3.ZERO
+var _dir := Vector3(0.0, 1.0, 0.0)
+var _quat := Quaternion.IDENTITY
+var _has_tip := false
+
+# Smoothed follow-cam state.
+var _follow_pos := Vector3.ZERO
+var _follow_look := Vector3.ZERO
+var _follow_init := false
+
+
+func _ready() -> void:
+	follow_cam = Camera3D.new()
+	follow_cam.near = 0.001
+	follow_cam.far = 50.0
+	follow_cam.fov = follow_fov
+	add_child(follow_cam)
+
+	endoscope_cam = Camera3D.new()
+	endoscope_cam.near = 0.0005
+	endoscope_cam.far = 50.0
+	endoscope_cam.fov = endoscope_fov
+	add_child(endoscope_cam)
+
+
+## Feed the latest tip pose. Degenerate direction/quaternion are ignored so the
+## last good orientation is kept (e.g. during STANDBY when direction is zero).
+func update_tip(pos: Vector3, dir: Vector3, quat: Quaternion) -> void:
+	_tip = pos
+	if dir.length() > 1e-6:
+		_dir = dir.normalized()
+	if quat.length_squared() > 1e-6:
+		_quat = quat.normalized()
+	_has_tip = true
+
+
+func _process(delta: float) -> void:
+	if not _has_tip:
+		return
+	_update_follow(delta)
+	_update_endoscope()
+
+
+func _update_follow(delta: float) -> void:
+	var desired_pos := _tip - _dir * follow_back + Vector3.UP * follow_height
+	var desired_look := _tip
+	if not _follow_init:
+		_follow_pos = desired_pos
+		_follow_look = desired_look
+		_follow_init = true
+	else:
+		var t := clampf(follow_smooth * delta, 0.0, 1.0)
+		_follow_pos = _follow_pos.lerp(desired_pos, t)
+		_follow_look = _follow_look.lerp(desired_look, t)
+	follow_cam.position = _follow_pos
+	if (_follow_look - _follow_pos).length() > 1e-5:
+		follow_cam.look_at(_follow_look, _safe_up(_follow_look - _follow_pos, Vector3.UP))
+
+
+func _update_endoscope() -> void:
+	endoscope_cam.position = _tip - _dir * endoscope_back
+	var target := _tip + _dir
+	# Roll the up vector with the tip quaternion for a natural in-vessel feel.
+	var up := (_quat * Vector3.UP)
+	endoscope_cam.look_at(target, _safe_up(_dir, up))
+
+
+# Returns an up vector guaranteed non-parallel to forward (look_at requires it).
+func _safe_up(forward: Vector3, preferred: Vector3) -> Vector3:
+	var f := forward.normalized()
+	var u := preferred.normalized() if preferred.length() > 1e-6 else Vector3.UP
+	if absf(f.dot(u)) > 0.999:
+		u = Vector3.RIGHT if absf(f.dot(Vector3.RIGHT)) < 0.999 else Vector3.FORWARD
+	return u
