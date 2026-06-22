@@ -37,6 +37,10 @@ class PlanPathRequest(BaseModel):
     end: Vector3 = Field(..., description="End position in LPS millimeters.")
     algorithm: Literal["astar"] = "astar"
     smooth: bool = False
+    # B-spline smoothing strength; only applied when smooth is True. 0.0 is an
+    # interpolating spline (keeps a jagged centerline jagged); > 0 de-jags it at
+    # the cost of ~sqrt(smooth_factor) mm deviation from the original nodes.
+    smooth_factor: float = 0.5
 
     @field_validator("start", "end")
     @classmethod

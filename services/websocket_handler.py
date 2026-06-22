@@ -82,6 +82,11 @@ class SessionStartData(BaseModel):
     start_position: list[float] | None = None
     end_position: list[float] | None = None
     smooth: bool = True
+    # B-spline smoothing strength. 0.0 = interpolating spline (threads through
+    # every A* node, so a jagged centerline stays jagged); > 0 lets the curve
+    # deviate from the noisy nodes to actually de-jag it. Residual RMS deviation
+    # is ~sqrt(smooth_factor) mm, so keep it modest to stay inside thin vessels.
+    smooth_factor: float = 0.5
     planned_path: list[list[float]] | None = None
     # Kinematic centerline-follow mode: drive the guidewire along the planned
     # path so it reliably reaches the target on full-length VPP vessels that the
@@ -103,6 +108,8 @@ class PathRequestData(BaseModel):
     end_position: list[float] = Field(min_length=3, max_length=3)
     algorithm: str = "astar"
     smooth: bool = False
+    # See SessionStartData.smooth_factor. Only applied when smooth is True.
+    smooth_factor: float = 0.5
 
 
 class WebSocketMessage(BaseModel):
@@ -354,6 +361,7 @@ class WebSocketHandler:
             params.start_position,
             params.end_position,
             smooth=params.smooth,
+            smooth_factor=params.smooth_factor,
         )
         waypoints = result.smooth_waypoints or result.waypoints
         # Graph/planner coordinates are LPS millimeters; the MuJoCo phantom frame
@@ -463,6 +471,7 @@ class WebSocketHandler:
                 req.end_position,
                 algorithm=req.algorithm,
                 smooth=req.smooth,
+                smooth_factor=req.smooth_factor,
             )
         except ValueError as e:
             await self._send_error(conn_state, "PATH_NOT_FOUND", str(e))

@@ -118,6 +118,7 @@ def plan_path(request: PlanPathRequest) -> PlanPathResponse:
             end=request.end,
             algorithm=request.algorithm,
             smooth=request.smooth,
+            smooth_factor=request.smooth_factor,
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
