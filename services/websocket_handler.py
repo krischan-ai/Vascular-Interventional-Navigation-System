@@ -25,6 +25,23 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _DATA_ROOT = _PROJECT_ROOT / "data" / "vpp_assets"
 
 
+def _builtin_phantom_centerline(phantom: str) -> Path | None:
+    """Path to a built-in phantom's shipped centerline.json, if it exists.
+
+    Built-in phantoms (e.g. segment_part) may ship a precomputed entry->target
+    centerline. Their vessels are long/thin/off-origin like VPP cases, so the
+    physical guidewire cannot traverse them; presence of this file is the signal
+    to default to kinematic centerline-follow.
+    """
+    centerline = (
+        _PROJECT_ROOT
+        / "src/cathsim/dm/components/phantom_assets/meshes"
+        / phantom
+        / "centerline.json"
+    )
+    return centerline if centerline.is_file() else None
+
+
 @lru_cache(maxsize=8)
 def _get_path_planner(case_id: str) -> PathPlanner:
     """Load (and cache) a PathPlanner for the given case's VPP graph."""
@@ -302,10 +319,14 @@ class WebSocketHandler:
             await self._send_error(conn_state, "PATH_NOT_FOUND", str(e))
             return
 
-        # Full-length VPP vessels cannot be traversed by the physical guidewire,
-        # so default to kinematic centerline-follow when a VPP route is planned.
-        guided = params.guided or (
-            planned_path is not None and params.phantom.endswith("_vpp")
+        # Full-length vessels the physical guidewire cannot traverse default to
+        # kinematic centerline-follow: VPP routes, and built-in phantoms that ship
+        # a centerline (e.g. segment_part). Guided mode spawns the wire at the
+        # entry and advances it along the path, so it actually reaches the target.
+        guided = (
+            params.guided
+            or (planned_path is not None and params.phantom.endswith("_vpp"))
+            or _builtin_phantom_centerline(params.phantom) is not None
         )
 
         try:

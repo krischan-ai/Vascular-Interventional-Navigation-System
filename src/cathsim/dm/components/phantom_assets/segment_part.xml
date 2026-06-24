@@ -1,0 +1,268 @@
+<mujoco model="segment_part">
+  <compiler meshdir="meshes" />
+  <default>
+    <geom type="mesh" />
+  </default>
+  <asset>
+    <mesh name="visual" file="segment_part/visual.stl" />
+    <mesh name="hull_0" file="segment_part/hull_0.stl" />
+    <mesh name="hull_1" file="segment_part/hull_1.stl" />
+    <mesh name="hull_2" file="segment_part/hull_2.stl" />
+    <mesh name="hull_3" file="segment_part/hull_3.stl" />
+    <mesh name="hull_4" file="segment_part/hull_4.stl" />
+    <mesh name="hull_5" file="segment_part/hull_5.stl" />
+    <mesh name="hull_6" file="segment_part/hull_6.stl" />
+    <mesh name="hull_7" file="segment_part/hull_7.stl" />
+    <mesh name="hull_8" file="segment_part/hull_8.stl" />
+    <mesh name="hull_9" file="segment_part/hull_9.stl" />
+    <mesh name="hull_10" file="segment_part/hull_10.stl" />
+    <mesh name="hull_11" file="segment_part/hull_11.stl" />
+    <mesh name="hull_12" file="segment_part/hull_12.stl" />
+    <mesh name="hull_13" file="segment_part/hull_13.stl" />
+    <mesh name="hull_14" file="segment_part/hull_14.stl" />
+    <mesh name="hull_15" file="segment_part/hull_15.stl" />
+    <mesh name="hull_16" file="segment_part/hull_16.stl" />
+    <mesh name="hull_17" file="segment_part/hull_17.stl" />
+    <mesh name="hull_18" file="segment_part/hull_18.stl" />
+    <mesh name="hull_19" file="segment_part/hull_19.stl" />
+    <mesh name="hull_20" file="segment_part/hull_20.stl" />
+    <mesh name="hull_21" file="segment_part/hull_21.stl" />
+    <mesh name="hull_22" file="segment_part/hull_22.stl" />
+    <mesh name="hull_23" file="segment_part/hull_23.stl" />
+    <mesh name="hull_24" file="segment_part/hull_24.stl" />
+    <mesh name="hull_25" file="segment_part/hull_25.stl" />
+    <mesh name="hull_26" file="segment_part/hull_26.stl" />
+    <mesh name="hull_27" file="segment_part/hull_27.stl" />
+    <mesh name="hull_28" file="segment_part/hull_28.stl" />
+    <mesh name="hull_29" file="segment_part/hull_29.stl" />
+    <mesh name="hull_30" file="segment_part/hull_30.stl" />
+    <mesh name="hull_31" file="segment_part/hull_31.stl" />
+    <mesh name="hull_32" file="segment_part/hull_32.stl" />
+    <mesh name="hull_33" file="segment_part/hull_33.stl" />
+    <mesh name="hull_34" file="segment_part/hull_34.stl" />
+    <mesh name="hull_35" file="segment_part/hull_35.stl" />
+    <mesh name="hull_36" file="segment_part/hull_36.stl" />
+    <mesh name="hull_37" file="segment_part/hull_37.stl" />
+    <mesh name="hull_38" file="segment_part/hull_38.stl" />
+    <mesh name="hull_39" file="segment_part/hull_39.stl" />
+    <mesh name="hull_40" file="segment_part/hull_40.stl" />
+    <mesh name="hull_41" file="segment_part/hull_41.stl" />
+    <mesh name="hull_42" file="segment_part/hull_42.stl" />
+    <mesh name="hull_43" file="segment_part/hull_43.stl" />
+    <mesh name="hull_44" file="segment_part/hull_44.stl" />
+    <mesh name="hull_45" file="segment_part/hull_45.stl" />
+    <mesh name="hull_46" file="segment_part/hull_46.stl" />
+    <mesh name="hull_47" file="segment_part/hull_47.stl" />
+    <mesh name="hull_48" file="segment_part/hull_48.stl" />
+    <mesh name="hull_49" file="segment_part/hull_49.stl" />
+    <mesh name="hull_50" file="segment_part/hull_50.stl" />
+    <mesh name="hull_51" file="segment_part/hull_51.stl" />
+    <mesh name="hull_52" file="segment_part/hull_52.stl" />
+    <mesh name="hull_53" file="segment_part/hull_53.stl" />
+    <mesh name="hull_54" file="segment_part/hull_54.stl" />
+    <mesh name="hull_55" file="segment_part/hull_55.stl" />
+    <mesh name="hull_56" file="segment_part/hull_56.stl" />
+    <mesh name="hull_57" file="segment_part/hull_57.stl" />
+    <mesh name="hull_58" file="segment_part/hull_58.stl" />
+    <mesh name="hull_59" file="segment_part/hull_59.stl" />
+    <mesh name="hull_60" file="segment_part/hull_60.stl" />
+    <mesh name="hull_61" file="segment_part/hull_61.stl" />
+    <mesh name="hull_62" file="segment_part/hull_62.stl" />
+    <mesh name="hull_63" file="segment_part/hull_63.stl" />
+    <mesh name="hull_64" file="segment_part/hull_64.stl" />
+    <mesh name="hull_65" file="segment_part/hull_65.stl" />
+    <mesh name="hull_66" file="segment_part/hull_66.stl" />
+    <mesh name="hull_67" file="segment_part/hull_67.stl" />
+    <mesh name="hull_68" file="segment_part/hull_68.stl" />
+    <mesh name="hull_69" file="segment_part/hull_69.stl" />
+    <mesh name="hull_70" file="segment_part/hull_70.stl" />
+    <mesh name="hull_71" file="segment_part/hull_71.stl" />
+    <mesh name="hull_72" file="segment_part/hull_72.stl" />
+    <mesh name="hull_73" file="segment_part/hull_73.stl" />
+    <mesh name="hull_74" file="segment_part/hull_74.stl" />
+    <mesh name="hull_75" file="segment_part/hull_75.stl" />
+    <mesh name="hull_76" file="segment_part/hull_76.stl" />
+    <mesh name="hull_77" file="segment_part/hull_77.stl" />
+    <mesh name="hull_78" file="segment_part/hull_78.stl" />
+    <mesh name="hull_79" file="segment_part/hull_79.stl" />
+    <mesh name="hull_80" file="segment_part/hull_80.stl" />
+    <mesh name="hull_81" file="segment_part/hull_81.stl" />
+    <mesh name="hull_82" file="segment_part/hull_82.stl" />
+    <mesh name="hull_83" file="segment_part/hull_83.stl" />
+    <mesh name="hull_84" file="segment_part/hull_84.stl" />
+    <mesh name="hull_85" file="segment_part/hull_85.stl" />
+    <mesh name="hull_86" file="segment_part/hull_86.stl" />
+    <mesh name="hull_87" file="segment_part/hull_87.stl" />
+    <mesh name="hull_88" file="segment_part/hull_88.stl" />
+    <mesh name="hull_89" file="segment_part/hull_89.stl" />
+    <mesh name="hull_90" file="segment_part/hull_90.stl" />
+    <mesh name="hull_91" file="segment_part/hull_91.stl" />
+    <mesh name="hull_92" file="segment_part/hull_92.stl" />
+    <mesh name="hull_93" file="segment_part/hull_93.stl" />
+    <mesh name="hull_94" file="segment_part/hull_94.stl" />
+    <mesh name="hull_95" file="segment_part/hull_95.stl" />
+    <mesh name="hull_96" file="segment_part/hull_96.stl" />
+    <mesh name="hull_97" file="segment_part/hull_97.stl" />
+    <mesh name="hull_98" file="segment_part/hull_98.stl" />
+    <mesh name="hull_99" file="segment_part/hull_99.stl" />
+    <mesh name="hull_100" file="segment_part/hull_100.stl" />
+    <mesh name="hull_101" file="segment_part/hull_101.stl" />
+    <mesh name="hull_102" file="segment_part/hull_102.stl" />
+    <mesh name="hull_103" file="segment_part/hull_103.stl" />
+    <mesh name="hull_104" file="segment_part/hull_104.stl" />
+    <mesh name="hull_105" file="segment_part/hull_105.stl" />
+    <mesh name="hull_106" file="segment_part/hull_106.stl" />
+    <mesh name="hull_107" file="segment_part/hull_107.stl" />
+    <mesh name="hull_108" file="segment_part/hull_108.stl" />
+    <mesh name="hull_109" file="segment_part/hull_109.stl" />
+    <mesh name="hull_110" file="segment_part/hull_110.stl" />
+    <mesh name="hull_111" file="segment_part/hull_111.stl" />
+    <mesh name="hull_112" file="segment_part/hull_112.stl" />
+    <mesh name="hull_113" file="segment_part/hull_113.stl" />
+    <mesh name="hull_114" file="segment_part/hull_114.stl" />
+    <mesh name="hull_115" file="segment_part/hull_115.stl" />
+    <mesh name="hull_116" file="segment_part/hull_116.stl" />
+    <mesh name="hull_117" file="segment_part/hull_117.stl" />
+    <mesh name="hull_118" file="segment_part/hull_118.stl" />
+    <mesh name="hull_119" file="segment_part/hull_119.stl" />
+    <mesh name="hull_120" file="segment_part/hull_120.stl" />
+    <mesh name="hull_121" file="segment_part/hull_121.stl" />
+    <mesh name="hull_122" file="segment_part/hull_122.stl" />
+    <mesh name="hull_123" file="segment_part/hull_123.stl" />
+  </asset>
+  <worldbody>
+    <geom type="mesh" mesh="visual" rgba=".8 .5 .3 .3" group="0" />
+    <geom type="mesh" mesh="hull_0" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_1" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_2" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_3" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_4" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_5" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_6" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_7" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_8" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_9" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_10" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_11" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_12" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_13" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_14" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_15" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_16" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_17" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_18" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_19" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_20" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_21" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_22" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_23" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_24" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_25" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_26" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_27" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_28" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_29" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_30" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_31" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_32" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_33" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_34" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_35" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_36" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_37" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_38" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_39" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_40" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_41" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_42" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_43" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_44" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_45" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_46" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_47" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_48" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_49" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_50" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_51" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_52" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_53" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_54" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_55" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_56" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_57" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_58" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_59" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_60" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_61" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_62" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_63" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_64" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_65" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_66" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_67" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_68" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_69" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_70" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_71" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_72" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_73" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_74" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_75" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_76" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_77" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_78" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_79" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_80" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_81" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_82" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_83" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_84" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_85" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_86" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_87" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_88" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_89" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_90" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_91" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_92" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_93" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_94" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_95" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_96" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_97" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_98" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_99" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_100" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_101" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_102" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_103" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_104" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_105" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_106" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_107" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_108" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_109" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_110" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_111" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_112" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_113" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_114" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_115" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_116" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_117" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_118" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_119" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_120" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_121" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_122" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <geom type="mesh" mesh="hull_123" rgba=".8 .5 .3 .0" group="1" condim="1" friction="1." />
+    <!-- Guidewire entry landmark recovered from the source STL (8 degenerate
+         marker faces at this point). Reserved name "entry": it is the vessel
+         entry port, not a navigation target. -->
+    <site name="entry" pos="-0.824 -0.223 0.263" />
+    <!-- Navigation target: aortic root (主动脉进入心脏的末端), the distal vessel
+         tip reached by the planned centerline from "entry" (see
+         meshes/segment_part/centerline.json). -->
+    <site name="root" pos="-1.028 -0.260 0.138" />
+  </worldbody>
+</mujoco>

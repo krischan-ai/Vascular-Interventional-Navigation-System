@@ -9,12 +9,15 @@ extends Node3D
 # client). For VPP navigation set phantom to "<case>_vpp" and provide start/end
 # endpoint positions in LPS millimeters; the backend plans the route, spawns the
 # guidewire at the vessel entry, and streams the path for visualization.
-@export var phantom: String = "case_001_vpp"
-@export var target: String = "endpoints_1"
+# For a built-in phantom that ships its own entry + centerline (e.g.
+# segment_part), set phantom/target and leave start/end empty: the backend reads
+# the entry landmark and centerline.json from the phantom assets.
+@export var phantom: String = "segment_part"
+@export var target: String = "root"
 @export var case_id: String = "case_001"
-## LPS millimeters; leave empty for non-VPP (low_tort) sessions.
-@export var start_position: Array = [0.173, -268.24, 291.25]
-@export var end_position: Array = [-975.65, -217.22, 250.32]
+## LPS millimeters; leave empty for non-VPP (low_tort / segment_part) sessions.
+@export var start_position: Array = []
+@export var end_position: Array = []
 
 enum CamMode { OVERVIEW, FOLLOW, ENDOSCOPE }
 const CAM_MODE_NAMES := {
@@ -118,14 +121,15 @@ func _setup_camera_and_light() -> void:
 
 
 func _resolve_vessel_glb() -> String:
-	# Prefer a phantom-named GLB (e.g. case_001_vpp.glb); fall back to the VPP
-	# vessel export for any *_vpp phantom, else the low_tort phantom mesh.
-	var direct := "res://assets/models/%s.glb" % phantom
-	if ResourceLoader.exists(direct):
-		return direct
+	# Prefer the phantom-named GLB (e.g. segment_part.glb); all VPP cases share the
+	# blood_vessels export. Do NOT silently substitute a different anatomy: the
+	# guidewire/path stream in this phantom's frame, so drawing another vessel
+	# leaves the wire floating far from it (e.g. segment_part is ~0.8 m off-origin).
+	# When the named GLB is missing (not yet imported in the Godot editor),
+	# _setup_vessel warns and renders no vessel rather than the wrong one.
 	if phantom.ends_with("_vpp"):
 		return "res://assets/models/blood_vessels.glb"
-	return "res://assets/models/low_tort.glb"
+	return "res://assets/models/%s.glb" % phantom
 
 
 func _setup_vessel() -> Node3D:

@@ -656,8 +656,11 @@ class Navigate(composer.Task):
         # If targets are fetched from predefined sites
         if self.target_from_sites:
             sites = self._phantom.sites
-            site = np.random.choice(list(sites.keys()))
-            return sites[site]
+            # "entry" is a reserved guidewire-entry landmark, not a target.
+            target_keys = [k for k in sites if k != "entry"]
+            if target_keys:
+                site = np.random.choice(target_keys)
+                return sites[site]
 
         # Else, get targets from a mesh
         mesh = trimesh.load_mesh(self._phantom.simplified, scale=0.9)

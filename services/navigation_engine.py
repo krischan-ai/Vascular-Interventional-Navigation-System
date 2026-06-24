@@ -6,6 +6,7 @@ guidewire simulation through the NavigationEngine class.
 
 from __future__ import annotations
 
+import json
 import sys
 from collections import deque
 from dataclasses import dataclass, field
@@ -22,6 +23,15 @@ if _SRC_DIR.is_dir() and str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
 _VPP_DATA_ROOT = Path(__file__).resolve().parents[1] / "data" / "vpp_assets"
+
+# Built-in phantoms whose vessel is offset from the world origin and therefore
+# need a fixed guidewire entry pose when no planned path or explicit entry is
+# given. The entry POINT is read from the phantom's <site name="entry"> landmark
+# (single source of truth in the XML); only the inward feed DIRECTION at that
+# wall location -- which a point site cannot carry -- lives here.
+_ENTRY_DIRECTIONS: dict[str, tuple[float, float, float]] = {
+    "segment_part": (-0.334, 0.921, -0.200),
+}
 
 
 def resolve_vpp_assets_dir(phantom: str) -> str | None:
@@ -114,8 +124,8 @@ class NavigationEngine:
         )
     """
 
-    VALID_PHANTOMS = ("low_tort", "phantom2", "phantom3", "phantom4")
-    VALID_TARGETS = ("bca", "lcca")
+    VALID_PHANTOMS = ("low_tort", "phantom2", "phantom3", "phantom4", "segment_part")
+    VALID_TARGETS = ("bca", "lcca", "root")
 
     # Distance reported when the guidewire is not in contact with any wall (m).
     MAX_WALL_DISTANCE = 0.05
@@ -229,6 +239,37 @@ class NavigationEngine:
         self._path_kdtree = None
         if planned_path is not None:
             self.set_planned_path(planned_path)
+        else:
+            default_path = self._default_centerline_points()
+            if default_path is not None:
+                self.set_planned_path(default_path)
+
+    def _default_centerline_points(self) -> list[list[float]] | None:
+        """Load a built-in phantom's shipped B-spline centerline, if present.
+
+        Built-in phantoms (assets_dir is None) may carry a precomputed centerline
+        at ``meshes/<phantom>/centerline.json`` (entry -> target_root, smoothed
+        with the same scipy B-spline as PathPlanner). VPP phantoms instead plan
+        on their graph.json at runtime, so they are skipped here.
+        """
+        if self.assets_dir is not None:
+            return None
+        centerline = (
+            _SRC_DIR
+            / "cathsim/dm/components/phantom_assets/meshes"
+            / self.phantom
+            / "centerline.json"
+        )
+        if not centerline.is_file():
+            return None
+        try:
+            data = json.loads(centerline.read_text(encoding="utf-8"))
+            waypoints = data.get("waypoints")
+        except Exception:
+            return None
+        if isinstance(waypoints, list) and len(waypoints) >= 2:
+            return waypoints
+        return None
 
     def set_planned_path(self, planned_path: Sequence[Sequence[float]] | None) -> None:
         """Set or clear the planned path used for progress/deviation tracking.
@@ -280,7 +321,29 @@ class NavigationEngine:
                     entry_direction = seg
                     break
 
+        # Fall back to the phantom's reserved <site name="entry"> landmark for
+        # built-in phantoms whose vessel is offset from the origin (segment_part).
+        if entry_point is None:
+            site_point = self._entry_site_point()
+            if site_point is not None:
+                entry_point = site_point
+                if entry_direction is None:
+                    direction = _ENTRY_DIRECTIONS.get(self.phantom)
+                    if direction is not None:
+                        entry_direction = np.asarray(direction, dtype=np.float64)
+
         return entry_point, entry_direction
+
+    def _entry_site_point(self) -> np.ndarray | None:
+        """Read the ``entry`` landmark position from the phantom XML, if present."""
+        try:
+            from cathsim.dm.components.phantom import Phantom
+
+            phantom = Phantom(self.phantom + ".xml", assets_dir=self.assets_dir)
+            entry = phantom.sites.get("entry")
+        except Exception:
+            return None
+        return np.asarray(entry, dtype=np.float64) if entry is not None else None
 
     def _ensure_initialized(self) -> None:
         """Lazy initialization of CathSim environment."""
