@@ -271,6 +271,27 @@ class NavigationEngine:
             return waypoints
         return None
 
+    def _load_phantom_graph(self) -> dict | None:
+        """Load a built-in phantom's centerline graph for A* planning.
+
+        Built-in phantoms may ship a graph.json (adjacency map format compatible
+        with PathPlanner). Returns None if graph not found or load fails.
+        """
+        if self.assets_dir is not None:
+            return None
+        graph_path = (
+            _SRC_DIR
+            / "cathsim/dm/components/phantom_assets/meshes"
+            / self.phantom
+            / "graph.json"
+        )
+        if not graph_path.is_file():
+            return None
+        try:
+            return json.loads(graph_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
     def set_planned_path(self, planned_path: Sequence[Sequence[float]] | None) -> None:
         """Set or clear the planned path used for progress/deviation tracking.
 
@@ -344,6 +365,50 @@ class NavigationEngine:
         except Exception:
             return None
         return np.asarray(entry, dtype=np.float64) if entry is not None else None
+
+    def plan_to_target(
+        self, start_pos: Sequence[float], end_pos: Sequence[float]
+    ) -> tuple[list[list[float]], float] | None:
+        """Plan path using the phantom's centerline graph via A* algorithm.
+
+        Only works for phantoms that ship a graph.json (e.g. segment_part).
+
+        Args:
+            start_pos: [x, y, z] in MuJoCo meters
+            end_pos: [x, y, z] in MuJoCo meters
+
+        Returns:
+            (smooth_waypoints, total_length_m) or None if no graph available
+        """
+        graph = self._load_phantom_graph()
+        if graph is None:
+            return None
+
+        try:
+            from services.path_planner import PathPlanner
+
+            planner = PathPlanner()
+            planner._graph = graph
+            planner._nodes = [
+                tuple(map(float, key.split(","))) for key in graph.keys()
+            ]
+
+            result = planner.plan(
+                start=start_pos,
+                end=end_pos,
+                algorithm="astar",
+                smooth=True,
+                smooth_factor=0.25e-6,
+            )
+
+            waypoints = result.smooth_waypoints or result.waypoints
+            if waypoints:
+                self.set_planned_path(waypoints)
+                return (waypoints, result.smooth_length_mm / 1000.0)
+        except Exception as e:
+            return None
+
+        return None
 
     def _ensure_initialized(self) -> None:
         """Lazy initialization of CathSim environment."""
