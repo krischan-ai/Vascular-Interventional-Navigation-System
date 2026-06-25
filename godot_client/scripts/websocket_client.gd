@@ -16,7 +16,7 @@ signal batch_received(batch: Dictionary)        ## state_batch payload
 signal path_received(path: Dictionary)          ## path_response payload
 signal error_received(error: Dictionary)        ## error payload
 
-@export var server_url: String = "ws://localhost:8000/ws/session"
+@export var server_url: String = "ws://localhost:9000/ws/session"
 @export var phantom: String = "low_tort"
 @export var target: String = "bca"
 @export var batch_mode: bool = true
@@ -141,9 +141,18 @@ func _handle_packet(packet: String) -> void:
 			session_id = str(msg.get("session_id", ""))
 			session_started.emit(session_id, data.get("state", {}))
 		"state_update":
+			# Drop frames that arrive while no session is active: during a model
+			# switch (restart_session clears session_id until the new
+			# session_started) the old session's in-flight frames carry the
+			# previous phantom's coordinates and would render the guidewire far
+			# outside the newly loaded vessel.
+			if session_id == "":
+				return
 			_awaiting = false
 			state_received.emit(data)
 		"state_batch":
+			if session_id == "":
+				return
 			_awaiting = false
 			batch_received.emit(data)
 		"path_response":
@@ -186,6 +195,27 @@ func send_control(delta_push: float, delta_rotate: float) -> void:
 func send_reset() -> void:
 	if _was_open:
 		_send("reset", {})
+
+
+## Switch to a different phantom model on the live connection: stop the current
+## session, swap the navigation configuration, and let _process re-handshake a
+## fresh session_start (it auto-sends whenever session_id is empty). The backend
+## handles session_stop before session_start in message order on the same socket.
+func restart_session(new_phantom: String, new_target: String, new_case_id: String,
+		new_start: Array, new_end: Array) -> void:
+	if session_id != "":
+		_send("session_stop", {})
+	phantom = new_phantom
+	target = new_target
+	case_id = new_case_id
+	start_position = new_start
+	end_position = new_end
+	# Reset handshake + lock-step state so _process resends session_start.
+	session_id = ""
+	_session_attempts = 0
+	_session_accum = 0.0
+	_control_sent = false
+	_awaiting = false
 
 
 func send_path_request(start_position: Array, end_position: Array,

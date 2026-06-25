@@ -287,9 +287,16 @@ async def websocket_session(websocket: WebSocket) -> None:
 
 
 def main() -> None:
+    import os
+
     import uvicorn
 
-    uvicorn.run("services.main:app", host="0.0.0.0", port=8000, reload=False)
+    # Default 9000, not 8000: Windows (Hyper-V/winnat) reserves the dynamic TCP
+    # range 7966-8065, so binding 8000 fails with WSAEACCES (Errno 13). Override
+    # with CATHSIM_PORT if 9000 is ever taken. Keep the Godot client's
+    # network/config/server_url in sync.
+    port = int(os.environ.get("CATHSIM_PORT", "9000"))
+    uvicorn.run("services.main:app", host="0.0.0.0", port=port, reload=False)
 
 
 if __name__ == "__main__":

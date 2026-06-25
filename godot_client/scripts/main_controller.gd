@@ -19,6 +19,41 @@ extends Node3D
 @export var start_position: Array = []
 @export var end_position: Array = []
 
+# Switchable phantom models, cycled at runtime with the M key. The exported
+# phantom above selects which entry is active on launch (matched by phantom
+# name); each entry is the single source of truth for that model's navigation
+# config, so switching just reapplies one row and re-handshakes the session.
+#   - 项目初始模型: the original CathSim low-tort aorta near the origin.
+#   - 全身体膜: the segment_part cavity phantom (ships its own entry + centerline).
+#   - 局部血管空腔: the VPP real-vessel case; backend plans the route from the
+#     start/end endpoints (LPS millimeters) documented in godot_client/README.md.
+const MODELS: Array = [
+	{
+		"name": "项目初始模型 Low-Tort",
+		"phantom": "low_tort",
+		"target": "bca",
+		"case_id": "case_001",
+		"start": [],
+		"end": [],
+	},
+	{
+		"name": "全身体膜 Segment-Part",
+		"phantom": "segment_part",
+		"target": "root",
+		"case_id": "case_001",
+		"start": [],
+		"end": [],
+	},
+	{
+		"name": "局部血管空腔 VPP",
+		"phantom": "case_001_vpp",
+		"target": "endpoints_1",
+		"case_id": "case_001",
+		"start": [0.173, -268.24, 291.25],
+		"end": [-975.65, -217.22, 250.32],
+	},
+]
+
 enum CamMode { OVERVIEW, FOLLOW, ENDOSCOPE }
 const CAM_MODE_NAMES := {
 	CamMode.OVERVIEW: "概览 Overview",
@@ -39,6 +74,8 @@ var _vessel_meshes: Array = []  # MeshInstance3D nodes of the vessel
 var _vessel_mat_overlay: StandardMaterial3D  # translucent (overview/follow)
 var _vessel_mat_interior: StandardMaterial3D  # opaque inner wall (endoscope)
 var _env: Environment  # world environment; endoscope toggles its depth fog
+var _vessel: Node3D  # current vessel scene root (freed/rebuilt on model switch)
+var _model_index: int = 0  # index into MODELS of the active phantom
 # Auto-switch to the close-up follow view once the first tip pose streams in, so
 # the guidewire is visible immediately instead of a dot in the overview.
 var _auto_followed: bool = false
@@ -57,9 +94,42 @@ func _update_debug() -> void:
 
 func _ready() -> void:
 	print("[Main] _ready: building scene")
+	# Pick the launch model from the exported phantom name and pull its full
+	# config from MODELS so the table stays the single source of truth.
+	_model_index = _resolve_model_index(phantom)
+	_apply_model_config(MODELS[_model_index])
 	_setup_environment()
 	_setup_camera_and_light()
+	_setup_hud()
+	_load_model_scene()
+	_setup_network_and_input()
+	_hud.set_model(str(MODELS[_model_index].name))
+	print("[Main] camera pos=%s current=%s" % [_camera.position, _camera.current])
+
+
+func _resolve_model_index(phantom_name: String) -> int:
+	for i in MODELS.size():
+		if str(MODELS[i].phantom) == phantom_name:
+			return i
+	return 0
+
+
+func _apply_model_config(cfg: Dictionary) -> void:
+	phantom = str(cfg.phantom)
+	target = str(cfg.target)
+	case_id = str(cfg.case_id)
+	start_position = (cfg.start as Array).duplicate()
+	end_position = (cfg.end as Array).duplicate()
+
+
+# Build the vessel mesh plus the renderers that share its coordinate frame
+# (guidewire / path / entry marker / camera rig). Reusable on model switch:
+# tears down the previous model's scene first, then frames the camera. Network,
+# HUD, environment and light persist across switches and are set up once.
+func _load_model_scene() -> void:
+	_teardown_model_scene()
 	var vessel := _setup_vessel()
+	_vessel = vessel
 	# Parent the guidewire and planned-path renderers under the vessel scene root
 	# so all three share the same coordinate space (the glTF/trimesh axis-
 	# conversion transform applies equally to the mesh and the streamed
@@ -69,8 +139,13 @@ func _ready() -> void:
 	_setup_path(frame)
 	_setup_entry_marker(frame)
 	_setup_rig(frame)
-	_setup_hud()
-	_setup_network_and_input()
+	# Reset view state so the new model starts in overview (translucent wall, no
+	# fog) and auto-follows again once its first tip pose streams in.
+	_auto_followed = false
+	_cam_mode = CamMode.OVERVIEW
+	_set_vessel_interior(false)
+	if _env:
+		_env.fog_enabled = false
 	if vessel != null:
 		var aabb := _scene_aabb(vessel)
 		print("[Main] vessel AABB pos=%s size=%s" % [aabb.position, aabb.size])
@@ -80,7 +155,23 @@ func _ready() -> void:
 		# guidewire tip are visible.
 		_camera.position = Vector3(0, 0, 1.5)
 		_camera.look_at(Vector3.ZERO, Vector3.UP)
-	print("[Main] camera pos=%s current=%s" % [_camera.position, _camera.current])
+	_camera.make_current()
+
+
+func _teardown_model_scene() -> void:
+	# Free the per-model renderers first (they may be children of the vessel),
+	# then the vessel itself. Guarded so an initial build (nothing yet) is a no-op.
+	for node in [_guidewire, _path, _entry_marker, _rig]:
+		if node != null and is_instance_valid(node):
+			node.queue_free()
+	_guidewire = null
+	_path = null
+	_entry_marker = null
+	_rig = null
+	if _vessel != null and is_instance_valid(_vessel):
+		_vessel.queue_free()
+	_vessel = null
+	_vessel_meshes = []
 
 
 func _setup_environment() -> void:
@@ -237,6 +328,7 @@ func _setup_network_and_input() -> void:
 	_input.input_state.connect(_hud.update_input)
 	_input.reset_requested.connect(_ws.send_reset)
 	_input.view_cycle.connect(_cycle_camera_mode)
+	_input.model_cycle.connect(_cycle_model)
 
 
 func _on_connected() -> void:
@@ -315,6 +407,24 @@ func _feed_rig(tip: Dictionary) -> void:
 
 func _cycle_camera_mode() -> void:
 	_set_camera_mode((_cam_mode + 1) % CamMode.size())
+
+
+# Cycle to the next phantom model (M key): reapply its config, rebuild the
+# vessel scene, and re-handshake the WebSocket session with the new phantom.
+func _cycle_model() -> void:
+	_model_index = (_model_index + 1) % MODELS.size()
+	var cfg: Dictionary = MODELS[_model_index]
+	_apply_model_config(cfg)
+	print("[Main] switching model -> %s (phantom=%s)" % [cfg.name, phantom])
+	_load_model_scene()
+	_ws.restart_session(phantom, target, case_id, start_position, end_position)
+	_session_id = "none"
+	_msg_count = 0
+	_last_msg = "model switch"
+	_hud.set_model(str(cfg.name))
+	_hud.set_view_mode(CAM_MODE_NAMES.get(CamMode.OVERVIEW, "?"))
+	_hud.update_safety("STANDBY")
+	_update_debug()
 
 
 func _set_camera_mode(mode: int) -> void:

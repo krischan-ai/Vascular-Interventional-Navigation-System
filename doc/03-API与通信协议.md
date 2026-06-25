@@ -10,7 +10,7 @@
 ### 1.1 连接管理
 
 ```
-端点:  ws://localhost:8000/ws/session
+端点:  ws://localhost:9000/ws/session
 心跳:  服务端每 5s 发送 {"type": "ping"}
        客户端需在 5s 内回复 {"type": "pong"}
 超时:  15s 无响应断开连接
@@ -232,7 +232,7 @@
 **GET /api/v1/path/plan**
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/path/plan \
+curl -X POST http://localhost:9000/api/v1/path/plan \
   -H "Content-Type: application/json" \
   -d '{
     "centerline_id": "vpp_001",

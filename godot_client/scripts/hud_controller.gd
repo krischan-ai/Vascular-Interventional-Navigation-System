@@ -15,6 +15,7 @@ var _connection_label: Label
 var _metrics_label: Label
 var _input_label: Label
 var _view_label: Label
+var _model_label: Label
 var _debug_label: Label
 
 
@@ -81,8 +82,14 @@ func _ready() -> void:
 	_view_label.text = "视角 View   概览 Overview"
 	vbox.add_child(_view_label)
 
+	_model_label = Label.new()
+	_model_label.add_theme_font_size_override("font_size", 15)
+	_model_label.add_theme_color_override("font_color", Color(0.8, 0.95, 0.85))
+	_model_label.text = "模型 Model  —"
+	vbox.add_child(_model_label)
+
 	var hint := Label.new()
-	hint.text = "W/S 推进·后退   A/D 旋转   C 切换视角   R 重置"
+	hint.text = "W/S 推进·后退   A/D 旋转   C 切换视角   M 切换模型   R 重置"
 	hint.add_theme_font_size_override("font_size", 13)
 	hint.add_theme_color_override("font_color", Color(0.65, 0.65, 0.7))
 	vbox.add_child(hint)
@@ -141,6 +148,10 @@ func update_input(push: float, rotate: float) -> void:
 
 func set_view_mode(mode_name: String) -> void:
 	_view_label.text = "视角 View   %s" % mode_name
+
+
+func set_model(model_name: String) -> void:
+	_model_label.text = "模型 Model  %s" % model_name
 
 
 func set_debug(text: String) -> void:

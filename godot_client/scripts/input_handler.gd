@@ -15,6 +15,9 @@ signal input_state(delta_push: float, delta_rotate: float)
 signal reset_requested
 ## Emitted on each C keypress to cycle the camera view (overview/follow/endoscope).
 signal view_cycle
+## Emitted on each M keypress to cycle the phantom model
+## (初始模型 low_tort / 全身体膜 segment_part / 局部血管空腔 VPP).
+signal model_cycle
 
 @export var send_interval: float = 0.05  ## seconds (~20 Hz)
 
@@ -27,6 +30,8 @@ func _input(event: InputEvent) -> void:
 			reset_requested.emit()
 		elif event.physical_keycode == KEY_C:
 			view_cycle.emit()
+		elif event.physical_keycode == KEY_M:
+			model_cycle.emit()
 
 
 func _process(delta: float) -> void:

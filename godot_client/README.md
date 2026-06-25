@@ -71,19 +71,21 @@ python tools/export_godot_assets.py
    `ModuleNotFoundError: No module named 'cathsim'`）：
 
    ```powershell
-   # 推荐：直接用 venv 的 python 启动
-   .\.venv\Scripts\python.exe -m uvicorn services.main:app --host 0.0.0.0 --port 8000
+   # 推荐：直接用 venv 的 python 启动（默认端口 9000）
+   .\.venv\Scripts\python.exe -m services.main
 
-   # 或先激活 venv 再启动
-   .\.venv\Scripts\Activate.ps1
-   uvicorn services.main:app --host 0.0.0.0 --port 8000
+   # 或用 uvicorn 显式指定端口
+   .\.venv\Scripts\python.exe -m uvicorn services.main:app --host 0.0.0.0 --port 9000
    ```
 
+   > 默认端口为 **9000**，而非 8000：Windows（Hyper-V/winnat）保留了动态 TCP
+   > 端口段 7966–8065，绑定 8000 会报 `[Errno 13]` 访问权限错误。可用环境变量
+   > `CATHSIM_PORT` 覆盖（用 `python -m services.main` 启动时生效）。
    > 仿真不渲染像素（`use_pixels=False`），无需设置 `MUJOCO_GL`。
 
 2. 用 Godot 4.4 打开 `godot_client/`（首次打开会自动导入 GLB 并生成 `.godot/` 缓存）。
 
-3. 按 F5 运行。客户端会自动连接 `ws://localhost:8000/ws/session`，
+3. 按 F5 运行。客户端会自动连接 `ws://localhost:9000/ws/session`，
    以 `batch_mode=true` 开启会话（获取导丝 body 渲染数据）。
 
    后端 URL 可在 `project.godot` 的 `[network] config/server_url` 修改。

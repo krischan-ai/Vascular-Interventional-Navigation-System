@@ -39,6 +39,11 @@ var _tip: MeshInstance3D
 var _wire: MeshInstance3D
 var _wire_mesh: ImmediateMesh
 var _wire_material: StandardMaterial3D
+# Hidden until the first real frame arrives. A freshly created renderer (initial
+# load or model switch) has its tip at the origin, which is far outside the
+# off-origin VPP / segment_part vessels; showing it only once a position streams
+# in avoids a stray sphere appearing outside the vessel during a switch.
+var _has_data: bool = false
 
 
 func _ready() -> void:
@@ -72,11 +77,15 @@ func _ready() -> void:
 	_wire.layers = GUIDEWIRE_RENDER_LAYER
 	add_child(_wire)
 
+	# Stay hidden until the first streamed position (see _has_data).
+	visible = false
+
 
 func update_from_batch(batch: Dictionary) -> void:
 	var tip_data: Dictionary = batch.get("tip", {})
 	if tip_data.has("position"):
 		_tip.position = _to_vec3(tip_data["position"])
+		_mark_data()
 
 	var bodies: Array = batch.get("bodies", [])
 	var points := PackedVector3Array()
@@ -89,6 +98,15 @@ func update_from_batch(batch: Dictionary) -> void:
 func update_from_state(state: Dictionary) -> void:
 	if state.has("tip_position"):
 		_tip.position = _to_vec3(state["tip_position"])
+		_mark_data()
+
+
+## Reveal the guidewire once the first real position has been applied, so its
+## origin-default pose never flashes outside an off-origin vessel.
+func _mark_data() -> void:
+	if not _has_data:
+		_has_data = true
+		visible = true
 
 
 ## Swap to thin close-up radii (follow view) or back to the thicker overview
