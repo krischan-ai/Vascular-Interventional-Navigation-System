@@ -58,16 +58,32 @@ def add_body(n, parent, stiffness=None, name=None, OFFSET=0.1):
 class Guidewire(BaseGuidewire):
     """Guidewire class"""
 
-    def _build(self, n_bodies: int = 80):
+    def _build(
+        self,
+        n_bodies: int = 80,
+        insertion_max: float = 0.2,
+        stiffness_scale: float = 1.0,
+    ):
         """Build the guidewire.
 
         Set the default values, add bodies and joints, and add actuators.
 
         Args:
             n_bodies (int): Number of bodies to add to the guidewire
+            insertion_max (float): Upper bound of the slider (insertion) joint
+                travel in meters. The default 0.2 matches the original CathSim
+                guidewire; offset long vessels (e.g. segment_part ~0.58m,
+                VPP ~1.1m) need a larger value so the physical tip can be fed
+                deep enough to reach distal targets.
+            stiffness_scale (float): Multiplier on the per-body joint stiffness.
+                1.0 keeps the original (stiff) wire; values < 1 make the wire
+                more flexible so it can bend to follow tortuous lumens instead
+                of buckling into the wall at the entry bend.
         """
         self._length = CYLINDER_HEIGHT * 2 + SPHERE_RADIUS * 2 + OFFSET * n_bodies
         self._n_bodies = n_bodies
+        self._insertion_max = float(insertion_max)
+        self._stiffness_scale = float(stiffness_scale)
 
         self._mjcf_root = mjcf.RootElement(model="guidewire")
 
@@ -116,7 +132,7 @@ class Guidewire(BaseGuidewire):
             "joint",
             type="slide",
             name="slider",
-            range=[-0, 0.2],
+            range=[-0, self._insertion_max],
             stiffness=0,
             damping=2,
         )
@@ -128,7 +144,7 @@ class Guidewire(BaseGuidewire):
             damping=2,
         )
 
-        stiffness = self._mjcf_root.default.joint.stiffness
+        stiffness = self._mjcf_root.default.joint.stiffness * self._stiffness_scale
         for n in range(1, self._n_bodies):
             parent = add_body(n, parent, stiffness=stiffness, name="guidewire", OFFSET=OFFSET)
             stiffness *= 0.995

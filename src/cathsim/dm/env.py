@@ -681,6 +681,8 @@ def make_dm_env(
     n_substeps: int = None,
     entry_point: np.ndarray = None,
     entry_direction: np.ndarray = None,
+    insertion_max: float = 0.2,
+    stiffness_scale: float = 1.0,
     **kwargs,
 ) -> composer.Environment:
     """Makes a dm_control environment given a configuration.
@@ -694,6 +696,9 @@ def make_dm_env(
                    (e.g. a VPP vessel entry). Defaults to near the world origin.
       entry_direction: Optional [x, y, z] direction the guidewire feeds toward at
                        spawn; aligns the tip with the vessel at the entry point.
+      insertion_max: Upper bound (meters) of the guidewire slider travel. Default
+                     0.2 keeps the original CathSim reach; raise it for offset
+                     long vessels so the physical tip can be fed deep enough.
       **kwargs: Additional arguments for the environment
 
     Returns:
@@ -703,7 +708,11 @@ def make_dm_env(
 
     phantom_obj = Phantom(phantom + ".xml", assets_dir=assets_dir)
     tip = Tip(n_bodies=4)
-    guidewire = Guidewire(n_bodies=n_bodies)
+    guidewire = Guidewire(
+        n_bodies=n_bodies,
+        insertion_max=insertion_max,
+        stiffness_scale=stiffness_scale,
+    )
     task = Navigate(
         phantom=phantom_obj,
         guidewire=guidewire,

@@ -50,6 +50,18 @@ def resolve_vpp_assets_dir(phantom: str) -> str | None:
     return str(mujoco_dir) if mujoco_dir.is_dir() else None
 
 
+def _rot_x(a: float) -> np.ndarray:
+    """Rotation matrix about the x axis by angle ``a`` (radians)."""
+    c, s = np.cos(a), np.sin(a)
+    return np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]])
+
+
+def _rot_y(b: float) -> np.ndarray:
+    """Rotation matrix about the y axis by angle ``b`` (radians)."""
+    c, s = np.cos(b), np.sin(b)
+    return np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]])
+
+
 @dataclass
 class NavigationState:
     """Normalized state representation from CathSim environment.
@@ -145,6 +157,9 @@ class NavigationEngine:
         planned_path: Sequence[Sequence[float]] | None = None,
         n_bodies: int = 80,
         n_substeps: int | None = None,
+        insertion_max: float = 0.2,
+        stiffness_scale: float = 1.0,
+        prethread: bool = False,
         entry_point: Sequence[float] | None = None,
         entry_direction: Sequence[float] | None = None,
         guided: bool = False,
@@ -168,6 +183,11 @@ class NavigationEngine:
                       per-step cost (fewer contacts/DOFs) for interactive use.
             n_substeps: Physics substeps per control step. Fewer is faster; None
                         uses the model default (3).
+            insertion_max: Upper bound (meters) of the physical guidewire slider
+                        travel. Default 0.2 matches original CathSim; raise it
+                        for offset long vessels (segment_part ~0.58m, VPP ~1.1m)
+                        so the tip can be fed deep enough toward distal targets.
+                        Only affects physical (non-guided) mode.
             entry_point: Optional [x, y, z] in MuJoCo meters where the guidewire
                          spawns. Required for VPP phantoms whose vessels are
                          offset from the origin. When None and planned_path is
@@ -200,6 +220,9 @@ class NavigationEngine:
         self.assets_dir = assets_dir or resolve_vpp_assets_dir(phantom)
         self.n_bodies = n_bodies
         self.n_substeps = n_substeps
+        self.insertion_max = float(insertion_max)
+        self.stiffness_scale = float(stiffness_scale)
+        self.prethread = bool(prethread)
         self._entry_point = (
             np.asarray(entry_point, dtype=np.float64) if entry_point is not None else None
         )
@@ -430,6 +453,8 @@ class NavigationEngine:
             assets_dir=self.assets_dir,
             n_bodies=self.n_bodies,
             n_substeps=self.n_substeps,
+            insertion_max=self.insertion_max,
+            stiffness_scale=self.stiffness_scale,
             entry_point=entry_point,
             entry_direction=entry_direction,
         )
@@ -451,11 +476,111 @@ class NavigationEngine:
         self._ensure_initialized()
 
         self._time_step = self._env.reset()
+        if self.prethread and self._path_points is not None:
+            self._thread_physics_along_path()
         self._episode_length = 0
         self._previous_tip_pos = None
         self._tip_history.clear()
 
         return self._extract_state()
+
+    def _thread_physics_along_path(self) -> None:
+        """Bend the physical guidewire onto the planned centerline at spawn.
+
+        A straight wire pushed by the straight base slider jams against the
+        vessel wall as soon as the lumen curves. Instead we set the guidewire's
+        steering-hinge angles so the body chain lies along the planned centerline
+        from the entry inward, so the wire spawns *inside* the lumen with a
+        physically plausible shape. Physics then holds it there via wall contacts
+        (the wire presses on the bends, as a real guidewire does).
+
+        The chain is a sequence of 2-DOF universal joints (J0 about local x, J1
+        about local y); each body's segment direction is its local +z. Marching
+        base->tip, for body i we solve the two hinge angles so its +z matches the
+        centerline tangent T at that arc length::
+
+            t_local = parent_rot^T @ T
+            J1 = asin(t_local.x);  J0 = atan2(-t_local.y, t_local.z)
+            child_rot = parent_rot @ Rx(J0) @ Ry(J1)
+        """
+        physics = self._env.physics
+        model = physics.model
+
+        chain = self._guidewire_chain_bodies(model)
+        if not chain:
+            return
+
+        # Base segment orientation is fixed by the spawn pose; start the march
+        # from the first base body and walk the centerline from the entry.
+        base_id = chain[0][0]
+        parent_rot = np.asarray(physics.data.xmat[base_id], dtype=np.float64).reshape(3, 3)
+        qpos = physics.data.qpos
+
+        # The proximal base body spawns ~one wire-length back from the entry along
+        # the straight feed axis, so anchoring the centerline shape at it would
+        # translate the whole wire out of the lumen. Advance the slider so the
+        # base sits at the entry; then the bends below place the wire inside the
+        # vessel from the entry inward.
+        feed_axis = parent_rot @ np.array([0.0, 0.0, 1.0])
+        entry = self._path_points[0]
+        base_pos = np.asarray(physics.data.xpos[base_id], dtype=np.float64)
+        slide = float(np.dot(entry - base_pos, feed_axis))
+        slide = float(np.clip(slide, 0.0, self.insertion_max))
+        slider_adr = self._slider_qposadr(model)
+        if slider_adr is not None:
+            qpos[slider_adr] = slide
+
+        s = 0.0
+        for _body_id, seg_len, j0_adr, j1_adr in chain[1:]:
+            s = min(s + seg_len, self._path_total_len)
+            tangent = self._tangent_at_arclen(s)
+            t_local = parent_rot.T @ tangent
+            tx = float(np.clip(t_local[0], -1.0, 1.0))
+            j1 = float(np.arcsin(tx))
+            cos_j1 = float(np.sqrt(max(1.0 - tx * tx, 1e-12)))
+            j0 = float(np.arctan2(-t_local[1] / cos_j1, t_local[2] / cos_j1))
+            if j0_adr is not None and j1_adr is not None:
+                qpos[j0_adr] = j0
+                qpos[j1_adr] = j1
+            parent_rot = parent_rot @ _rot_x(j0) @ _rot_y(j1)
+
+        physics.forward()
+
+    @staticmethod
+    def _slider_qposadr(model) -> int | None:
+        """qpos address of the guidewire insertion (slider) joint, if present."""
+        for j in range(model.njnt):
+            if (model.id2name(j, "joint") or "").endswith("slider"):
+                return int(model.jnt_qposadr[j])
+        return None
+
+    @staticmethod
+    def _guidewire_chain_bodies(model) -> list[tuple[int, float, int | None, int | None]]:
+        """Ordered guidewire/tip chain as (body_id, seg_len, j0_qposadr, j1_qposadr).
+
+        The first entry is the base body (its orientation is fixed by the spawn
+        pose, so its joint addresses are None). Subsequent entries carry the two
+        steering-hinge qpos addresses used to bend the chain onto the centerline.
+        """
+        chain: list[tuple[int, float, int | None, int | None]] = []
+        for body_id in range(model.nbody):
+            name = model.id2name(body_id, "body") or ""
+            is_gw = "guidewire_body_" in name
+            is_tip = "tip_body_" in name
+            if not (is_gw or is_tip):
+                continue
+            seg_len = float(model.body_pos[body_id][2])
+            joints = [j for j in range(model.njnt) if int(model.jnt_bodyid[j]) == body_id]
+            hinge_adrs = [int(model.jnt_qposadr[j]) for j in joints if int(model.jnt_type[j]) == 3]
+            j0 = hinge_adrs[0] if len(hinge_adrs) >= 1 else None
+            j1 = hinge_adrs[1] if len(hinge_adrs) >= 2 else None
+            # Base body_0 carries the slider/rotator (its hinge is the rotator,
+            # not a steering pair) -- mark it as the fixed root of the march.
+            if name.endswith("guidewire_body_0"):
+                chain.append((body_id, seg_len, None, None))
+            else:
+                chain.append((body_id, seg_len, j0, j1))
+        return chain
 
     def step(self, delta_push: float, delta_rotate: float) -> NavigationState:
         """Execute one simulation step.
