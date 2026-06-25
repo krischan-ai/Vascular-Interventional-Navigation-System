@@ -52,6 +52,18 @@ const MODELS: Array = [
 		"start": [0.173, -268.24, 291.25],
 		"end": [-975.65, -217.22, 250.32],
 	},
+	{
+		# Sealed-lumen aortic trunk built from the radius-bearing aorta centerline
+		# (tools/build_tube_phantom.py). Ships its own entry + B-spline-smoothed
+		# centerline.json, so leave start/end empty like segment_part: the backend
+		# reads the entry landmark and streams the smooth path for rendering.
+		"name": "主动脉本干 Aorta-Trunk",
+		"phantom": "aorta_trunk",
+		"target": "root",
+		"case_id": "case_001",
+		"start": [],
+		"end": [],
+	},
 ]
 
 enum CamMode { OVERVIEW, FOLLOW, ENDOSCOPE }

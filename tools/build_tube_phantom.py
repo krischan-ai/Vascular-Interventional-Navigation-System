@@ -163,6 +163,45 @@ def build_wall_bricks(
     return bricks
 
 
+def smooth_render_path(
+    pts: np.ndarray, rad: np.ndarray, smooth_factor: float, num_points: int | None
+) -> tuple[np.ndarray, np.ndarray]:
+    """B-spline smooth the centerline for the render / planned path.
+
+    Reuses the same scipy B-spline as ``services.path_planner.PathPlanner`` (the
+    server's single source of smoothing truth) so the frontend render path is a
+    smooth curve, not the raw 4mm resample polyline. The per-point radius is
+    re-interpolated by arc length onto the denser smooth path so it stays aligned
+    with ``waypoints``.
+
+    ``smooth_factor=0`` -> interpolating spline: the curve passes through every
+    resampled point, so it stays inside the wall bricks built from those points
+    (safe for pre-threading). ``>0`` trades fidelity for smoothness.
+    """
+    from services.path_planner import PathPlanner
+
+    if len(pts) < 4:
+        return pts, rad
+    result = PathPlanner().smooth_path(
+        [tuple(p) for p in pts],
+        smoothing_factor=smooth_factor,
+        num_points=num_points,
+    )
+    s_pts = np.asarray(result["waypoints"], dtype=np.float64)
+    # Re-interpolate radius by arc length onto the smooth path.
+    src_cum = np.concatenate(
+        [[0.0], np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))]
+    )
+    dst_cum = np.concatenate(
+        [[0.0], np.cumsum(np.linalg.norm(np.diff(s_pts, axis=0), axis=1))]
+    )
+    if src_cum[-1] > 0 and dst_cum[-1] > 0:
+        s_rad = np.interp(dst_cum / dst_cum[-1], src_cum / src_cum[-1], rad)
+    else:
+        s_rad = np.full(len(s_pts), float(np.median(rad)))
+    return s_pts, s_rad
+
+
 def build_inner_surface(pts, rad, normal, binormal, sectors) -> trimesh.Trimesh:
     """Inner lumen surface mesh (for transparent visual)."""
     n = len(pts)
@@ -220,13 +259,27 @@ def write_xml(name: str, n_hulls: int, entry: np.ndarray, target: np.ndarray) ->
     return out
 
 
-def write_centerline_json(name: str, mesh_dir: Path, pts: np.ndarray, rad: np.ndarray) -> None:
+def write_centerline_json(
+    name: str,
+    mesh_dir: Path,
+    pts: np.ndarray,
+    rad: np.ndarray,
+    smooth_factor: float,
+) -> None:
+    """Write centerline.json whose ``waypoints`` are the B-spline render path.
+
+    ``waypoints`` (the planned + frontend render path) is the smoothed curve;
+    ``radius_m`` is aligned to it. ``smooth`` / ``smooth_factor`` record how it
+    was produced so the asset is self-describing.
+    """
     length = float(np.linalg.norm(np.diff(pts, axis=0), axis=1).sum())
     payload = {
         "phantom": name,
         "coordinate_system": "mujoco",
         "unit": "m",
         "source": "data/aorta_centerline (3D Slicer VMTK, LPS mm /1000)",
+        "smooth": True,
+        "smooth_factor": smooth_factor,
         "entry": [round(float(v), 6) for v in pts[0]],
         "target_root": [round(float(v), 6) for v in pts[-1]],
         "length_m": round(length, 5),
@@ -248,6 +301,15 @@ def main() -> int:
     ap.add_argument("--radius-scale", type=float, default=1.0, help="scale lumen radius")
     ap.add_argument("--radius-min", type=float, default=0.0, help="floor on lumen radius (m)")
     ap.add_argument("--reverse", action="store_true", help="swap entry/target ends")
+    ap.add_argument(
+        "--smooth-factor", type=float, default=0.0,
+        help="B-spline smoothing for the render/planned path "
+             "(0=interpolating: passes through points, stays in lumen; >0 smoother)",
+    )
+    ap.add_argument(
+        "--render-points", type=int, default=None,
+        help="number of points in the smoothed render path (default 2x rings)",
+    )
     args = ap.parse_args()
 
     curve_path = Path(args.curve)
@@ -274,6 +336,13 @@ def main() -> int:
     visual = build_inner_surface(pts, rad, normal, binormal, args.sectors)
     print(f"  visual watertight={visual.is_watertight}")
 
+    # B-spline smooth the centerline for the render / planned path (frontend
+    # renders engine.planned_path; this makes it a smooth curve, not the raw
+    # 4mm resample). Walls + pre-thread still use the raw resampled points.
+    s_pts, s_rad = smooth_render_path(pts, rad, args.smooth_factor, args.render_points)
+    print(f"[render path] B-spline smooth: {len(pts)} -> {len(s_pts)} pts "
+          f"(smooth_factor={args.smooth_factor})")
+
     mesh_dir = PHANTOM_ASSETS / "meshes" / args.name
     mesh_dir.mkdir(parents=True, exist_ok=True)
     for f in mesh_dir.glob("hull_*.stl"):
@@ -281,11 +350,11 @@ def main() -> int:
     visual.export(str(mesh_dir / "visual.stl"), file_type="stl")
     for i, b in enumerate(bricks):
         b.export(str(mesh_dir / f"hull_{i}.stl"), file_type="stl")
-    write_centerline_json(args.name, mesh_dir, pts, rad)
-    xml = write_xml(args.name, len(bricks), pts[0], pts[-1])
+    write_centerline_json(args.name, mesh_dir, s_pts, s_rad, args.smooth_factor)
+    xml = write_xml(args.name, len(bricks), s_pts[0], s_pts[-1])
 
     print(f"[done] phantom '{args.name}': {len(bricks)} hulls -> {xml}")
-    print(f"  entry={np.round(pts[0],3)}  target={np.round(pts[-1],3)}")
+    print(f"  entry={np.round(s_pts[0],3)}  target={np.round(s_pts[-1],3)}")
     print(f"  NOTE: register '{args.name}' in NavigationEngine.VALID_PHANTOMS to use it.")
     return 0
 
