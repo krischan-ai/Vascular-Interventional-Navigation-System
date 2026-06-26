@@ -24,6 +24,7 @@ extends Node3D
 # the wire pre-bent along the centerline (sealed-lumen phantoms like aorta_trunk).
 var guided: bool = false
 var n_bodies: int = 40
+var n_substeps: int = 2  # physics substeps per control step; lower = faster
 var prethread: bool = false
 var insertion_max: float = 0.0  # 0 = use server default
 
@@ -66,6 +67,9 @@ const MODELS: Array = [
 		# wire is pre-threaded along the B-spline centerline (prethread=true) with a
 		# long enough body chain (n_bodies) + slider range (insertion_max) to span
 		# the trunk, so it spawns inside the sealed lumen and the wall holds it.
+		# n_substeps=1 (vs the default 2) halves the per-step physics cost for a
+		# free ~1.5Hz -> ~3Hz with negligible fidelity loss (measured reach
+		# unchanged), since the sealed-lumen contacts stay stable at one substep.
 		"name": "主动脉本干 Aorta-Trunk",
 		"phantom": "aorta_trunk",
 		"target": "root",
@@ -74,6 +78,7 @@ const MODELS: Array = [
 		"end": [],
 		"guided": false,
 		"n_bodies": 130,
+		"n_substeps": 1,
 		"prethread": true,
 		"insertion_max": 0.5,
 	},
@@ -148,6 +153,7 @@ func _apply_model_config(cfg: Dictionary) -> void:
 	# Per-model physics config (defaults keep existing models unchanged).
 	guided = bool(cfg.get("guided", false))
 	n_bodies = int(cfg.get("n_bodies", 40))
+	n_substeps = int(cfg.get("n_substeps", 2))
 	prethread = bool(cfg.get("prethread", false))
 	insertion_max = float(cfg.get("insertion_max", 0.0))
 
@@ -159,6 +165,7 @@ func _push_nav_config() -> void:
 		return
 	_ws.guided = guided
 	_ws.n_bodies = n_bodies
+	_ws.n_substeps = n_substeps
 	_ws.prethread = prethread
 	_ws.insertion_max = insertion_max
 
