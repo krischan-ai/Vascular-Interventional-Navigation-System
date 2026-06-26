@@ -30,6 +30,11 @@ signal error_received(error: Dictionary)        ## error payload
 # reliably reaches the target on full-length VPP vessels. Only takes effect when
 # a path is planned (low_tort sessions stay physics-driven regardless).
 @export var guided: bool = true
+# Physical-mode placement for sealed-lumen phantoms (e.g. aorta_trunk): pre-thread
+# the wire along the centerline at reset; insertion_max widens the slider range so
+# a long body chain can span the vessel. insertion_max <= 0 omits the override.
+@export var prethread: bool = false
+@export var insertion_max: float = 0.0
 # Interactive performance profile: a lighter guidewire and fewer physics
 # substeps cut per-step cost ~10-15x for responsive control (full fidelity is
 # n_bodies=80, n_substeps=3).
@@ -110,14 +115,20 @@ func _build_session_start() -> Dictionary:
 		"n_bodies": n_bodies,
 		"n_substeps": n_substeps,
 		"case_id": case_id,
+		# Always sent: the server decides physics vs guided per phantom (it still
+		# force-guides phantoms that cannot be traversed physically). prethread is
+		# honoured by sealed-lumen phantoms in physics mode.
+		"guided": guided,
+		"prethread": prethread,
 	}
+	if insertion_max > 0.0:
+		data["insertion_max"] = insertion_max
 	# Request server-side path planning + entry alignment only when a VPP route
 	# is configured; low_tort sessions omit these and spawn near the origin.
 	if start_position.size() == 3 and end_position.size() == 3:
 		data["start_position"] = start_position
 		data["end_position"] = end_position
 		data["smooth"] = smooth
-		data["guided"] = guided
 	return data
 
 

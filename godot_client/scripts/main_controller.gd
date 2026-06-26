@@ -18,6 +18,14 @@ extends Node3D
 ## LPS millimeters; leave empty for non-VPP (low_tort / segment_part) sessions.
 @export var start_position: Array = []
 @export var end_position: Array = []
+# Per-model navigation config, pushed to the WebSocket client on launch / switch.
+# guided=false runs real MuJoCo physics (the server still force-guides phantoms
+# that cannot be traversed physically, e.g. segment_part / VPP). prethread spawns
+# the wire pre-bent along the centerline (sealed-lumen phantoms like aorta_trunk).
+var guided: bool = false
+var n_bodies: int = 40
+var prethread: bool = false
+var insertion_max: float = 0.0  # 0 = use server default
 
 # Switchable phantom models, cycled at runtime with the M key. The exported
 # phantom above selects which entry is active on launch (matched by phantom
@@ -54,15 +62,20 @@ const MODELS: Array = [
 	},
 	{
 		# Sealed-lumen aortic trunk built from the radius-bearing aorta centerline
-		# (tools/build_tube_phantom.py). Ships its own entry + B-spline-smoothed
-		# centerline.json, so leave start/end empty like segment_part: the backend
-		# reads the entry landmark and streams the smooth path for rendering.
+		# (tools/build_tube_phantom.py). Runs REAL physics: guided=false, and the
+		# wire is pre-threaded along the B-spline centerline (prethread=true) with a
+		# long enough body chain (n_bodies) + slider range (insertion_max) to span
+		# the trunk, so it spawns inside the sealed lumen and the wall holds it.
 		"name": "主动脉本干 Aorta-Trunk",
 		"phantom": "aorta_trunk",
 		"target": "root",
 		"case_id": "case_001",
 		"start": [],
 		"end": [],
+		"guided": false,
+		"n_bodies": 130,
+		"prethread": true,
+		"insertion_max": 0.5,
 	},
 ]
 
@@ -132,6 +145,22 @@ func _apply_model_config(cfg: Dictionary) -> void:
 	case_id = str(cfg.case_id)
 	start_position = (cfg.start as Array).duplicate()
 	end_position = (cfg.end as Array).duplicate()
+	# Per-model physics config (defaults keep existing models unchanged).
+	guided = bool(cfg.get("guided", false))
+	n_bodies = int(cfg.get("n_bodies", 40))
+	prethread = bool(cfg.get("prethread", false))
+	insertion_max = float(cfg.get("insertion_max", 0.0))
+
+
+# Push the active model's navigation config onto the WebSocket client so the next
+# session_start carries it. Called on launch and on every model switch.
+func _push_nav_config() -> void:
+	if _ws == null:
+		return
+	_ws.guided = guided
+	_ws.n_bodies = n_bodies
+	_ws.prethread = prethread
+	_ws.insertion_max = insertion_max
 
 
 # Build the vessel mesh plus the renderers that share its coordinate frame
@@ -326,6 +355,7 @@ func _setup_network_and_input() -> void:
 	_ws.case_id = case_id
 	_ws.start_position = start_position
 	_ws.end_position = end_position
+	_push_nav_config()
 	add_child(_ws)
 	_input = preload("res://scripts/input_handler.gd").new()
 	add_child(_input)
@@ -429,6 +459,7 @@ func _cycle_model() -> void:
 	_apply_model_config(cfg)
 	print("[Main] switching model -> %s (phantom=%s)" % [cfg.name, phantom])
 	_load_model_scene()
+	_push_nav_config()
 	_ws.restart_session(phantom, target, case_id, start_position, end_position)
 	_session_id = "none"
 	_msg_count = 0

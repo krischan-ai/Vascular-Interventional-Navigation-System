@@ -25,6 +25,14 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _DATA_ROOT = _PROJECT_ROOT / "data" / "vpp_assets"
 
 
+# Built-in phantoms whose lumen is *sealed* (procedurally swept wall, e.g.
+# aorta_trunk from tools/build_tube_phantom.py): the wall actually contains the
+# physical guidewire, so these can run real MuJoCo physics and must NOT be forced
+# into guided mode despite shipping a centerline.json. Everything else that ships
+# a centerline (segment_part) stays force-guided.
+_PHYSICS_CAPABLE_BUILTIN: frozenset[str] = frozenset({"aorta_trunk"})
+
+
 def _builtin_phantom_centerline(phantom: str) -> Path | None:
     """Path to a built-in phantom's shipped centerline.json, if it exists.
 
@@ -109,6 +117,12 @@ class SessionStartData(BaseModel):
     # path so it reliably reaches the target on full-length VPP vessels that the
     # physical guidewire cannot traverse. Auto-enabled for VPP routes below.
     guided: bool = False
+    # Physical-mode placement: pre-thread the MuJoCo guidewire along the planned
+    # centerline at reset (sealed-lumen phantoms like aorta_trunk) so the wire
+    # spawns inside the vessel instead of buckling at the entry. insertion_max
+    # is the slider upper bound (meters); None keeps the engine default.
+    prethread: bool = False
+    insertion_max: float | None = None
 
 
 class ResetData(BaseModel):
@@ -323,10 +337,17 @@ class WebSocketHandler:
         # kinematic centerline-follow: VPP routes, and built-in phantoms that ship
         # a centerline (e.g. segment_part). Guided mode spawns the wire at the
         # entry and advances it along the path, so it actually reaches the target.
+        # Exception: phantoms with a *sealed* lumen (aorta_trunk) can run real
+        # physics -- the wire is pre-threaded and the wall contains it -- so they
+        # respect the client's guided flag instead of being forced into guided.
+        ships_centerline = _builtin_phantom_centerline(params.phantom) is not None
+        force_guided_builtin = (
+            ships_centerline and params.phantom not in _PHYSICS_CAPABLE_BUILTIN
+        )
         guided = (
             params.guided
             or (planned_path is not None and params.phantom.endswith("_vpp"))
-            or _builtin_phantom_centerline(params.phantom) is not None
+            or force_guided_builtin
         )
 
         try:
@@ -339,6 +360,8 @@ class WebSocketHandler:
                 n_substeps=params.n_substeps,
                 planned_path=planned_path,
                 guided=guided,
+                prethread=params.prethread,
+                insertion_max=params.insertion_max,
             )
             conn_state.session_id = session_id
             conn_state.batch_mode = params.batch_mode
