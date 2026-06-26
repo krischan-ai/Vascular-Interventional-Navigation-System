@@ -365,6 +365,11 @@ class WebSocketHandler:
             )
             conn_state.session_id = session_id
             conn_state.batch_mode = params.batch_mode
+            # The planned path is sent once per session on the first batch. A model
+            # switch reuses this connection (session_stop + session_start on the same
+            # socket), so reset the flag here -- otherwise the new phantom's path is
+            # never streamed and the client keeps drawing the previous route (or none).
+            conn_state.path_sent = False
 
             await self._send_message(
                 conn_state,
