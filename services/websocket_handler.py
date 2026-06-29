@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from services.navigation_engine import NavigationEngine, NavigationState
 from services.path_planner import PathPlanner
+from services.realtime import Frame, PhysicsWorker
 from services.session_manager import SessionManager
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -164,6 +165,13 @@ class ConnectionState:
     control_rate_limiter: float = 0.0  # Last control timestamp
     batch_mode: bool = False  # Send state_batch (with render data) instead of state_update
     path_sent: bool = False  # The planned path is constant; send it once, then omit
+    # Real-time link (batch_mode only): a worker steps physics autonomously and a
+    # sender task streams the latest frame. Both are None for lock-step sessions.
+    worker: "PhysicsWorker | None" = None
+    sender_task: "asyncio.Task | None" = None
+    # Constants captured once per session so the sender never touches the engine.
+    planned_path: list = field(default_factory=list)
+    entry_pose: dict = field(default_factory=dict)
 
 
 class WebSocketHandler:
@@ -180,6 +188,7 @@ class WebSocketHandler:
     PING_INTERVAL = 5.0  # seconds
     PONG_TIMEOUT = 45.0  # seconds (generous margin for MuJoCo cold-start init)
     MIN_CONTROL_INTERVAL = 0.033  # ~30Hz max
+    STATE_PUSH_RATE = 25.0  # Hz: sender push rate for batch_mode real-time stream
 
     def __init__(self, session_manager: SessionManager):
         """Initialize WebSocket handler.
@@ -378,9 +387,19 @@ class WebSocketHandler:
                 data={
                     "phantom": params.phantom,
                     "target": params.target,
+                    # The server decides physics vs. kinematic (it force-guides
+                    # phantoms the physical wire cannot traverse); surface it so the
+                    # client HUD can honestly label "物理 / 演示" mode.
+                    "guided": guided,
                     "state": self._state_to_dict(state),
                 },
             )
+
+            # Real-time link: batch_mode sessions step physics autonomously and
+            # stream frames at STATE_PUSH_RATE; the client interpolates. Lock-step
+            # (non-batch) sessions keep the request/response path below unchanged.
+            if conn_state.batch_mode:
+                await self._start_realtime(conn_state, session_id, state)
 
         except Exception as e:  # noqa: BLE001 - report any init failure to the client
             traceback.print_exc()
@@ -426,6 +445,7 @@ class WebSocketHandler:
             return
 
         session_id = conn_state.session_id
+        await self._stop_realtime(conn_state)
         self._session_manager.close_session(session_id)
         conn_state.session_id = None
 
@@ -444,6 +464,19 @@ class WebSocketHandler:
             await self._send_error(
                 conn_state, "NO_SESSION", "No active session for control"
             )
+            return
+
+        # Real-time link: ``control`` only updates the latest input; the worker
+        # steps autonomously and the sender streams frames. No per-control step,
+        # no response, and no rate limit (the worker decouples step rate from
+        # input rate, so flooding cannot back up a queue).
+        if conn_state.worker is not None:
+            try:
+                control = ControlData(**data)
+            except ValidationError as e:
+                await self._send_error(conn_state, "INVALID_CONTROL", str(e))
+                return
+            conn_state.worker.set_input(control.delta_push, control.delta_rotate)
             return
 
         now = time.time()
@@ -468,13 +501,22 @@ class WebSocketHandler:
             )
 
             if conn_state.batch_mode:
+                # Lock-step batch fallback (no worker): build the batch directly
+                # from the engine. The real-time path returns earlier via the
+                # worker gate, so this only runs if a batch session has no worker.
                 engine = self._session_manager.get_session(conn_state.session_id)
                 include_path = not conn_state.path_sent
                 await self._send_message(
                     conn_state,
                     MessageType.STATE_BATCH,
                     session_id=conn_state.session_id,
-                    data=self._state_to_batch(state, engine, include_path=include_path),
+                    data=self._build_batch(
+                        state,
+                        engine.get_render_bodies(),
+                        engine.planned_path,
+                        engine.entry_pose,
+                        include_path=include_path,
+                    ),
                 )
                 conn_state.path_sent = True
             else:
@@ -543,6 +585,21 @@ class WebSocketHandler:
             )
             return
 
+        # Real-time link: reset through the worker (serialized against stepping),
+        # then re-stream the planned path on the next frame. The sender pushes the
+        # new state within one push interval; no direct response is needed.
+        if conn_state.worker is not None:
+            try:
+                await self._run_blocking(conn_state.worker.reset)
+            except KeyError:
+                conn_state.session_id = None
+                await self._send_error(
+                    conn_state, "SESSION_EXPIRED", "Session no longer exists"
+                )
+                return
+            conn_state.path_sent = False
+            return
+
         try:
             state = await self._run_blocking(
                 self._session_manager.reset_session, conn_state.session_id
@@ -552,7 +609,13 @@ class WebSocketHandler:
             if conn_state.batch_mode:
                 engine = self._session_manager.get_session(conn_state.session_id)
                 payload = {
-                    **self._state_to_batch(state, engine, include_path=True),
+                    **self._build_batch(
+                        state,
+                        engine.get_render_bodies(),
+                        engine.planned_path,
+                        engine.entry_pose,
+                        include_path=True,
+                    ),
                     "episode_count": info.episode_count,
                 }
                 conn_state.path_sent = True
@@ -586,41 +649,50 @@ class WebSocketHandler:
         """
         return state.as_dict()
 
-    def _state_to_batch(
+    def _build_batch(
         self,
         state: NavigationState,
-        engine: NavigationEngine,
-        include_path: bool = True,
+        bodies: list,
+        planned_path: list,
+        entry_pose: dict,
+        include_path: bool,
+        seq: int | None = None,
+        t_phys: float | None = None,
     ) -> dict:
-        """Build the state_batch payload with guidewire render data.
+        """Build the state_batch payload from already-extracted frame data.
 
         Follows the state_batch structure in doc/03-API与通信协议.md §1.4,
         adding per-segment body positions (for tube rendering), the planned path,
-        and aggregated safety/episode blocks.
+        and aggregated safety/episode blocks. ``bodies`` / ``planned_path`` /
+        ``entry_pose`` are passed in (not read from the engine) so this can run on
+        the event loop without touching ``physics.data`` the worker is mutating.
 
         The planned path is constant for a session and can be large (thousands of
         points for VPP routes). It is only included when ``include_path`` is True
-        (first batch / reset); subsequent batches omit ``waypoints`` to keep each
-        frame small. The client keeps its existing path drawing when waypoints is
-        empty.
+        (first frame / after reset); subsequent frames omit ``waypoints`` to keep
+        each frame small. The client keeps its existing path when waypoints empty.
+
+        ``seq`` / ``t_phys`` (optional, backward compatible) tag the physics frame
+        so the client can interpolate between distinct frames; absent for the
+        legacy lock-step path.
         """
-        return {
+        batch: dict[str, Any] = {
             "tip": {
                 "position": state.tip_position,
                 "direction": state.tip_direction,
                 "quaternion": state.tip_quaternion,
             },
-            "bodies": engine.get_render_bodies(),
+            "bodies": bodies,
             "path": {
-                "waypoints": engine.planned_path if include_path else [],
+                "waypoints": planned_path if include_path else [],
                 "progress": state.path_progress,
                 "deviation": state.path_deviation,
             },
             # Vessel-entry (vascular access) and target markers, for highlighting
             # in the client. The entry is constant for a session, so it rides the
-            # same first-batch/reset frame as the path; the target is small and
+            # same first-frame/reset frame as the path; the target is small and
             # sent every frame.
-            "entry": engine.entry_pose if include_path else {},
+            "entry": entry_pose if include_path else {},
             "target": state.target_position,
             "safety": {
                 "status": state.safety_status,
@@ -635,6 +707,85 @@ class WebSocketHandler:
                 "done": state.done,
             },
         }
+        if seq is not None:
+            batch["seq"] = seq
+        if t_phys is not None:
+            batch["t_phys"] = t_phys
+        return batch
+
+    async def _start_realtime(
+        self, conn_state: ConnectionState, session_id: str, initial_state: NavigationState
+    ) -> None:
+        """Start the autonomous physics worker and the frame sender for a session.
+
+        Captures the constant planned path / entry pose once (so the sender never
+        reads the engine), seeds the worker with the initial post-reset state, and
+        launches the step loop and the sender task.
+        """
+        engine = self._session_manager.get_session(session_id)
+        conn_state.planned_path = engine.planned_path
+        conn_state.entry_pose = engine.entry_pose
+
+        worker = PhysicsWorker(engine)
+        worker.seed(initial_state)
+        worker.start()
+        conn_state.worker = worker
+        conn_state.sender_task = asyncio.create_task(self._sender_loop(conn_state))
+
+    async def _stop_realtime(self, conn_state: ConnectionState) -> None:
+        """Stop the sender task and the physics worker (if any), in that order."""
+        task = conn_state.sender_task
+        conn_state.sender_task = None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        worker = conn_state.worker
+        conn_state.worker = None
+        if worker is not None:
+            # join() blocks up to one in-flight step; keep it off the event loop.
+            await self._run_blocking(worker.stop)
+
+    async def _sender_loop(self, conn_state: ConnectionState) -> None:
+        """Push the latest physics frame to the client at STATE_PUSH_RATE.
+
+        Only distinct physics frames (new ``seq``) are sent, so a slow physics
+        rate does not flood the client with duplicates; the client interpolates
+        between them. The planned path / entry ride the first frame after start or
+        reset (gated by ``path_sent``).
+        """
+        interval = 1.0 / self.STATE_PUSH_RATE
+        last_seq = -1
+        while conn_state.is_alive and conn_state.worker is not None:
+            await asyncio.sleep(interval)
+            worker = conn_state.worker
+            if worker is None:
+                break
+            frame: Frame | None = worker.snapshot()
+            if frame is None or frame.seq == last_seq:
+                continue
+            last_seq = frame.seq
+
+            include_path = not conn_state.path_sent
+            data = self._build_batch(
+                frame.state,
+                frame.bodies,
+                conn_state.planned_path,
+                conn_state.entry_pose,
+                include_path=include_path,
+                seq=frame.seq,
+                t_phys=frame.t_phys,
+            )
+            conn_state.path_sent = True
+            await self._send_message(
+                conn_state,
+                MessageType.STATE_BATCH,
+                session_id=conn_state.session_id,
+                data=data,
+            )
 
     async def _send_message(
         self,
@@ -670,6 +821,7 @@ class WebSocketHandler:
     async def _cleanup_connection(self, conn_state: ConnectionState) -> None:
         """Clean up resources when connection closes."""
         print(f"[WS] cleanup: closing connection (session={conn_state.session_id})")
+        await self._stop_realtime(conn_state)
         if conn_state.session_id:
             self._session_manager.close_session(conn_state.session_id)
 

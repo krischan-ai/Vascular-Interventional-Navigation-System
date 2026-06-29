@@ -114,11 +114,19 @@ var _auto_followed: bool = false
 var _session_id: String = "none"
 var _msg_count: int = 0
 var _last_msg: String = "—"
+# Mode + physics-rate annotation (Phase B): the stream is visually smoothed by
+# client interpolation, but physics is still low frequency. Show the honest mode
+# (物理/演示) and measured physics frame rate so the operator is not misled into
+# thinking the smooth 60fps render is high-fidelity physics.
+var _mode_text: String = "—"
+var _phys_hz: float = 0.0
+var _last_phys_seq: int = -1
+var _last_phys_time: float = 0.0
 
 
 func _update_debug() -> void:
-	_hud.set_debug("session: %s\nstate msgs: %d\nlast: %s" % [
-		_session_id, _msg_count, _last_msg,
+	_hud.set_debug("session: %s\nmode: %s  phys: %.1fHz\nstate msgs: %d\nlast: %s" % [
+		_session_id, _mode_text, _phys_hz, _msg_count, _last_msg,
 	])
 
 
@@ -405,6 +413,7 @@ func _on_server_error(err: Dictionary) -> void:
 func _on_session_started(sid: String, state: Dictionary) -> void:
 	print("[Main] session started: %s" % sid)
 	_session_id = sid.substr(0, 8) if sid.length() >= 8 else sid
+	_mode_text = "演示 Demo (运动学)" if _ws.server_guided else "物理 Physics"
 	_last_msg = "session_started"
 	_update_debug()
 	if not state.is_empty():
@@ -416,6 +425,16 @@ func _on_batch(batch: Dictionary) -> void:
 	_path.update_from_batch(batch)
 	_entry_marker.update_from_batch(batch)
 	_feed_rig(batch.get("tip", {}))
+	# Measure the physics frame rate from the stream's seq (distinct physics
+	# frames), smoothed, for the HUD's honest "phys NHz" readout.
+	var seq := int(batch.get("seq", -1))
+	if seq != -1 and seq != _last_phys_seq:
+		var now := Time.get_ticks_msec() / 1000.0
+		if _last_phys_seq != -1 and now > _last_phys_time:
+			var inst := 1.0 / (now - _last_phys_time)
+			_phys_hz = inst if _phys_hz <= 0.0 else lerpf(_phys_hz, inst, 0.3)
+		_last_phys_time = now
+		_last_phys_seq = seq
 	var safety: Dictionary = batch.get("safety", {})
 	var episode: Dictionary = batch.get("episode", {})
 	_hud.update_safety(str(safety.get("status", "STANDBY")))
@@ -471,6 +490,10 @@ func _cycle_model() -> void:
 	_session_id = "none"
 	_msg_count = 0
 	_last_msg = "model switch"
+	# Reset the physics-rate / mode readout; the new session_started repopulates it.
+	_mode_text = "—"
+	_phys_hz = 0.0
+	_last_phys_seq = -1
 	_hud.set_model(str(cfg.name))
 	_hud.set_view_mode(CAM_MODE_NAMES.get(CamMode.OVERVIEW, "?"))
 	_hud.update_safety("STANDBY")

@@ -383,7 +383,13 @@ class TestWebSocketIntegration:
             assert 0.0 <= data["risk_score"] <= 1.0
 
     def test_websocket_batch_mode_state_batch(self):
-        """With batch_mode the control response is a state_batch with render data."""
+        """batch_mode streams state_batch frames autonomously (real-time link).
+
+        Phase B: ``control`` only updates the latest input; a physics worker steps
+        on its own and a sender streams the latest frame (tagged with ``seq``).
+        So the client does not get one state_batch per control -- it receives a
+        continuous stream, and physics advances on its own once an input is set.
+        """
         client = TestClient(app)
 
         with client.websocket_connect("/ws/session") as websocket:
@@ -398,26 +404,39 @@ class TestWebSocketIntegration:
             start_response = _recv(websocket)
             assert start_response["type"] == "session_started"
 
+            # Nudge the input; the worker advances physics autonomously from here.
             websocket.send_json({
                 "type": "control",
                 "data": {"delta_push": 0.3, "delta_rotate": 0.0}
             })
-            response = _recv(websocket)
 
-            assert response["type"] == "state_batch"
-            data = response["data"]
-            assert set(data) >= {"tip", "bodies", "path", "safety", "episode"}
-            assert "position" in data["tip"]
-            assert isinstance(data["bodies"], list)
-            assert len(data["bodies"]) > 0
-            assert "pos" in data["bodies"][0]
-            assert "quat" in data["bodies"][0]
-            assert data["safety"]["status"] in (
+            # The sender streams state_batch frames; within a few we should see the
+            # structure intact, a seq tag, and the episode length advancing past 0
+            # (proof that physics stepped without a per-control request/response).
+            advanced = None
+            for _ in range(40):
+                response = _recv(websocket)
+                if response["type"] != "state_batch":
+                    continue
+                data = response["data"]
+                assert set(data) >= {"tip", "bodies", "path", "safety", "episode"}
+                assert "seq" in data
+                assert "position" in data["tip"]
+                assert isinstance(data["bodies"], list)
+                assert len(data["bodies"]) > 0
+                assert "pos" in data["bodies"][0]
+                assert "quat" in data["bodies"][0]
+                if data["episode"]["length"] > 0:
+                    advanced = data
+                    break
+
+            assert advanced is not None, "worker did not advance physics autonomously"
+            assert advanced["safety"]["status"] in (
+                "STANDBY",
                 "SAFE_NAV",
                 "DANGER_WARNING",
                 "COLLISION_STOP",
             )
-            assert data["episode"]["length"] == 1
 
 
 class TestSessionStartDataVPP:
