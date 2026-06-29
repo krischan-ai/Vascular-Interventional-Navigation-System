@@ -46,12 +46,18 @@ const MODELS: Array = [
 		"end": [],
 	},
 	{
+		# Thin tortuous vessel: runs guided (kinematic centerline-follow), not real
+		# physics -- its V-HACD lumen is not sealed, so physics is unreachable. The
+		# render path is the re-smoothed B-spline centerline (max turn 60.8->12.9 deg,
+		# tools/resmooth_centerline.py), so the guided wire reads as a smooth curve.
+		# guided=true is explicit here; the server also force-guides this phantom.
 		"name": "全身体膜 Segment-Part",
 		"phantom": "segment_part",
 		"target": "root",
 		"case_id": "case_001",
 		"start": [],
 		"end": [],
+		"guided": true,
 	},
 	{
 		"name": "局部血管空腔 VPP",
