@@ -46,18 +46,16 @@ const MODELS: Array = [
 		"end": [],
 	},
 	{
-		# Thin tortuous vessel: runs guided (kinematic centerline-follow), not real
-		# physics -- its V-HACD lumen is not sealed, so physics is unreachable. The
-		# render path is the re-smoothed B-spline centerline (max turn 60.8->12.9 deg,
-		# tools/resmooth_centerline.py), so the guided wire reads as a smooth curve.
-		# guided=true is explicit here; the server also force-guides this phantom.
-		"name": "全身体膜 Segment-Part",
+		# Newton demo target: with CATHSIM_PHYSICS_ENGINE=newton_demo on the backend,
+		# this runs the opt-in Newton short-guidewire physical display. Without that
+		# backend flag, the server may still force-guide segment_part as before.
+		"name": "Newton最小物理演示 Segment-Part",
 		"phantom": "segment_part",
 		"target": "root",
 		"case_id": "case_001",
 		"start": [],
 		"end": [],
-		"guided": true,
+		"guided": false,
 	},
 	{
 		"name": "局部血管空腔 VPP",
@@ -192,11 +190,10 @@ func _load_model_scene() -> void:
 	_teardown_model_scene()
 	var vessel := _setup_vessel()
 	_vessel = vessel
-	# Parent the guidewire and planned-path renderers under the vessel scene root
-	# so all three share the same coordinate space (the glTF/trimesh axis-
-	# conversion transform applies equally to the mesh and the streamed
-	# guidewire/path positions). Falls back to this node when the GLB is missing.
-	var frame: Node = vessel if vessel != null else self
+	# Streamed guidewire/path positions and the exported GLB are already in the
+	# same MuJoCo meter frame. Keep renderers as siblings of the vessel so Godot's
+	# imported scene-node transforms cannot be applied a second time to the path.
+	var frame: Node = self
 	_setup_guidewire(frame)
 	_setup_path(frame)
 	_setup_entry_marker(frame)
@@ -350,14 +347,13 @@ func _setup_path(parent: Node) -> void:
 
 
 func _setup_entry_marker(parent: Node) -> void:
-	# Parented under the vessel frame (same as the guidewire/path) so the entry
-	# and target marker coordinates need no conversion.
+	# Same world frame as the guidewire/path and exported vessel GLB.
 	_entry_marker = preload("res://scripts/entry_marker.gd").new()
 	parent.add_child(_entry_marker)
 
 
 func _setup_rig(parent: Node) -> void:
-	# Parent under the vessel frame so tip coordinates need no conversion.
+	# Same world frame as the streamed tip coordinates.
 	_rig = preload("res://scripts/camera_rig.gd").new()
 	parent.add_child(_rig)
 

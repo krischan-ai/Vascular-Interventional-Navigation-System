@@ -6,6 +6,7 @@ This module implements the WebSocket protocol defined in doc/03-API与通信协�
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import traceback
 from dataclasses import dataclass, field
@@ -358,6 +359,12 @@ class WebSocketHandler:
             or (planned_path is not None and params.phantom.endswith("_vpp"))
             or force_guided_builtin
         )
+        newton_demo = os.environ.get("CATHSIM_PHYSICS_ENGINE", "").lower() in {
+            "newton",
+            "newton_demo",
+        }
+        if newton_demo:
+            guided = False
 
         try:
             session_id, state = await self._run_blocking(

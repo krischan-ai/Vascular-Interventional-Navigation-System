@@ -18,6 +18,7 @@ from services.physics.base import (
 from services.physics.factory import make_engine
 from services.physics.kinematic_engine import KinematicEngine
 from services.physics.mujoco_engine import MuJoCoEngine
+from services.physics.newton_engine import NewtonEngine
 
 __all__ = [
     "MAX_WALL_DISTANCE",
@@ -28,4 +29,5 @@ __all__ = [
     "make_engine",
     "KinematicEngine",
     "MuJoCoEngine",
+    "NewtonEngine",
 ]
