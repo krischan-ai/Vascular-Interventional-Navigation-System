@@ -176,6 +176,96 @@ def _despike(pts: np.ndarray, thresh_deg: float = 25.0, iters: int = 20) -> np.n
     return pts
 
 
+def _perp_bases(pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Vectorized orthonormal (u, v) spanning the plane perpendicular to the tangent."""
+    t = _tangents(pts)
+    ref = np.tile(np.array([0.0, 1.0, 0.0]), (len(pts), 1))
+    ref[np.abs(t[:, 1]) >= 0.9] = np.array([1.0, 0.0, 0.0])
+    u = np.cross(t, ref)
+    u /= np.linalg.norm(u, axis=1, keepdims=True) + 1e-12
+    v = np.cross(t, u)
+    return u, v
+
+
+def _dist(pq, P: np.ndarray) -> np.ndarray:
+    """Unsigned nearest distance to the vessel surface (fast: skips the inside/outside
+    test). Equivalent to |signed| here because points start inside the lumen and the
+    ascent only moves them further from walls, so they never leave the lumen."""
+    _, dist, _ = pq.on_surface(P)
+    return dist
+
+
+def _sdf_targets(pq, pts: np.ndarray,
+                 micro: int = 14, eps: float = 4.0e-4, lr: float = 1.0) -> np.ndarray:
+    """Gradient-ASCEND each point on the distance-to-wall field, confined to the plane
+    perpendicular to the local tangent, onto the lumen medial ridge (local max of
+    distance-to-wall). Robust where the ray-fan fails: at the open mouth the lateral
+    walls still give a well-defined gradient toward center, and at branches ascent
+    climbs to the *local* thickest point instead of escaping down a branch.
+
+    All four finite-difference samples are batched into one proximity query per step."""
+    u, v = _perp_bases(pts)
+    q = pts.copy()
+    N = len(pts)
+    for _ in range(micro):
+        samples = np.vstack([q + eps * u, q - eps * u, q + eps * v, q - eps * v])
+        d = _dist(pq, samples)
+        gu = (d[:N] - d[N:2 * N]) / (2 * eps)
+        gv = (d[2 * N:3 * N] - d[3 * N:]) / (2 * eps)
+        g = gu[:, None] * u + gv[:, None] * v       # in-plane gradient of distance-to-wall
+        gn = np.linalg.norm(g, axis=1)
+        dirn = g / (gn[:, None] + 1e-9)              # unit ascent direction
+        active = gn > 1e-3                           # at the ridge the gradient vanishes -> stop
+        q = q + (lr * eps) * dirn * active[:, None]
+    return q
+
+
+def _sdf_recenter_pass(pq, pts: np.ndarray, relax: float,
+                       window: int = 15, abs_clamp: float = 2.5e-3) -> np.ndarray:
+    """One SDF-based pass: ascend to medial targets, low-pass the displacement field
+    along the path (coherent, no zigzag), then apply clamped."""
+    targets = _sdf_targets(pq, pts)
+    deltas = _smooth_field(targets - pts, window)
+    out = pts.copy()
+    for i in range(len(pts)):
+        step = relax * deltas[i]
+        sn = np.linalg.norm(step)
+        if sn > abs_clamp:
+            step *= abs_clamp / sn
+        out[i] = pts[i] + step
+    return out
+
+
+def _wall_report(pq, pts: np.ndarray) -> str:
+    """Nearest-wall stats via proximity query (works at the mouth too)."""
+    d = _dist(pq, pts) * 1e3
+    return (f"nearest_wall mean={d.mean():.2f}mm min={d.min():.2f}mm "
+            f"first8_min={d[:8].min():.2f}mm n<0.5mm={(d < 0.5).sum()}")
+
+
+def _extrapolate_ends(pq, pts: np.ndarray, min_wall: float = 1.5e-3, max_pts: int = 24) -> np.ndarray:
+    """Fix the open-mouth points that gradient ascent cannot center (rays/gradient are
+    ill-posed at an open end). Project the leading/trailing near-wall points laterally
+    onto the medial line of the first/last *well-centered* point (axial position kept,
+    so insertion depth is unchanged)."""
+    pts = pts.copy()
+    d = _dist(pq, pts)
+    n = len(pts)
+    k = next((i for i in range(min(max_pts, n)) if d[i] > min_wall), None)
+    if k is not None and k > 0:
+        tang = pts[k + 1] - pts[k]
+        tang /= np.linalg.norm(tang) + 1e-12
+        for i in range(k):
+            pts[i] = pts[k] + np.dot(pts[i] - pts[k], tang) * tang  # drop lateral offset
+    j = next((i for i in range(n - 1, max(n - 1 - max_pts, -1), -1) if d[i] > min_wall), None)
+    if j is not None and j < n - 1:
+        tang = pts[j] - pts[j - 1]
+        tang /= np.linalg.norm(tang) + 1e-12
+        for i in range(j + 1, n):
+            pts[i] = pts[j] + np.dot(pts[i] - pts[j], tang) * tang
+    return pts
+
+
 def _metrics(pts: np.ndarray) -> dict:
     seg = np.linalg.norm(np.diff(pts, axis=0), axis=1)
     length = float(seg.sum())
@@ -195,7 +285,9 @@ def _metrics(pts: np.ndarray) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("phantom")
-    ap.add_argument("--iters", type=int, default=4)
+    ap.add_argument("--method", choices=["sdf", "ray"], default="sdf",
+                    help="sdf = signed-distance gradient ascent (robust at mouth/branches); ray = ray-fan")
+    ap.add_argument("--iters", type=int, default=3)
     ap.add_argument("--relax", type=float, default=0.6)
     ap.add_argument("--smoothing", type=float, default=2e-6)
     ap.add_argument("--write", action="store_true")
@@ -209,24 +301,28 @@ def main() -> None:
     scene = trimesh.load(glb_path, process=False)
     mesh = trimesh.util.concatenate(scene.dump()) if isinstance(scene, trimesh.Scene) else scene
 
-    r0, n0 = _offset_ratio(mesh, pts0)
+    pq = trimesh.proximity.ProximityQuery(mesh)  # built once, reused across passes
+    target = pq if args.method == "sdf" else mesh
+    pass_fn = _sdf_recenter_pass if args.method == "sdf" else _recenter_pass
+
     m0 = _metrics(pts0)
-    print(f"[{args.phantom}] before: offset/radius={r0:.3f}  nearest_wall={n0:.2f}mm  "
-          f"turn p50={m0['p50_turn']:.1f} p95={m0['p95_turn']:.1f} max={m0['max_turn_deg']:.1f}deg "
-          f"n>30deg={m0['n_over_30']}")
+    print(f"[{args.phantom}] before ({args.method}): {_wall_report(pq, pts0)}")
+    print(f"            turn p50={m0['p50_turn']:.1f} p95={m0['p95_turn']:.1f} "
+          f"max={m0['max_turn_deg']:.1f}deg n>30deg={m0['n_over_30']}")
 
     pts = pts0.copy()
     for it in range(args.iters):
-        pts = _recenter_pass(mesh, pts, args.relax)
+        pts = pass_fn(target, pts, args.relax)
         pts = _laplacian(pts, lam=0.3, iters=2)  # keep smooth each iter (no spline overshoot)
     pts = _despike(pts)                           # relax any branch-junction cusps
     pts = _laplacian(pts, lam=0.3, iters=3)
+    if args.method == "sdf":
+        pts = _extrapolate_ends(pq, pts)          # center the open-mouth points
 
-    r1, n1 = _offset_ratio(mesh, pts)
     m1 = _metrics(pts)
-    print(f"[{args.phantom}] after : offset/radius={r1:.3f}  nearest_wall={n1:.2f}mm  "
-          f"turn p50={m1['p50_turn']:.1f} p95={m1['p95_turn']:.1f} max={m1['max_turn_deg']:.1f}deg "
-          f"n>30deg={m1['n_over_30']}  length={m1['length_m']:.3f}m")
+    print(f"[{args.phantom}] after  ({args.method}): {_wall_report(pq, pts)}")
+    print(f"            turn p50={m1['p50_turn']:.1f} p95={m1['p95_turn']:.1f} "
+          f"max={m1['max_turn_deg']:.1f}deg n>30deg={m1['n_over_30']}  length={m1['length_m']:.3f}m")
 
     if args.write:
         bak = cl_path.with_suffix(".json.bak")
