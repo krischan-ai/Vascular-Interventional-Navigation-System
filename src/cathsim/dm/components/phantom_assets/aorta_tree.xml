@@ -1,0 +1,14 @@
+<mujoco model="aorta_tree">
+  <compiler meshdir="meshes" />
+  <default>
+    <geom type="mesh" />
+  </default>
+  <asset>
+    <mesh name="visual" file="aorta_tree/visual.stl" />
+  </asset>
+  <worldbody>
+    <geom type="mesh" mesh="visual" rgba=".8 .5 .3 .3" group="0" contype="0" conaffinity="0" />
+    <site name="entry" pos="-0.541520 -0.194271 0.315729" />
+    <site name="root" pos="-0.990591 -0.256471 0.128052" />
+  </worldbody>
+</mujoco>

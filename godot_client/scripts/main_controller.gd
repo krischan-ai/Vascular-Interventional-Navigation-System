@@ -12,7 +12,7 @@ extends Node3D
 # For a built-in phantom that ships its own entry + centerline (e.g.
 # segment_part), set phantom/target and leave start/end empty: the backend reads
 # the entry landmark and centerline.json from the phantom assets.
-@export var phantom: String = "segment_part"
+@export var phantom: String = "aorta_tree"
 @export var target: String = "root"
 @export var case_id: String = "case_001"
 ## LPS millimeters; leave empty for non-VPP (low_tort / segment_part) sessions.
@@ -24,6 +24,8 @@ extends Node3D
 # name); each entry is the single source of truth for that model's navigation
 # config, so switching just reapplies one row and re-handshakes the session.
 #   - 项目初始模型: the original CathSim low-tort aorta near the origin.
+#   - 主动脉干: the aorta_trunk sealed-lumen phantom (ships its own entry +
+#     centerline; the centerline is the VMTK route, centered in the lumen).
 #   - 全身体膜: the segment_part cavity phantom (ships its own entry + centerline).
 #   - 局部血管空腔: the VPP real-vessel case; backend plans the route from the
 #     start/end endpoints (LPS millimeters) documented in godot_client/README.md.
@@ -32,6 +34,22 @@ const MODELS: Array = [
 		"name": "项目初始模型 Low-Tort",
 		"phantom": "low_tort",
 		"target": "bca",
+		"case_id": "case_001",
+		"start": [],
+		"end": [],
+	},
+	{
+		"name": "主动脉干 Aorta-Trunk",
+		"phantom": "aorta_trunk",
+		"target": "root",
+		"case_id": "case_001",
+		"start": [],
+		"end": [],
+	},
+	{
+		"name": "主动脉树 Aorta-Tree",
+		"phantom": "aorta_tree",
+		"target": "root",
 		"case_id": "case_001",
 		"start": [],
 		"end": [],

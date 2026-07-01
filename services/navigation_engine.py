@@ -136,7 +136,7 @@ class NavigationEngine:
         )
     """
 
-    VALID_PHANTOMS = ("low_tort", "phantom2", "phantom3", "phantom4", "segment_part", "aorta_trunk")
+    VALID_PHANTOMS = ("low_tort", "phantom2", "phantom3", "phantom4", "segment_part", "aorta_trunk", "aorta_tree")
     VALID_TARGETS = ("bca", "lcca", "root")
 
     # Distance reported when the guidewire is not in contact with any wall (m).
