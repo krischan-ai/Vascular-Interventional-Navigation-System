@@ -165,7 +165,8 @@ class TestNavigationEngineHelpers:
 
     def test_set_planned_path_clear(self):
         engine = self._engine(planned_path=[[0, 0, 0], [0, 0, 1]])
-        assert engine._path_total_len > 0
+        assert engine._path is not None
+        assert engine._path.total_len > 0
         engine.set_planned_path(None)
         assert engine._compute_path_progress([0.0, 0.0, 0.5]) == (0.0, 0.0)
 
@@ -233,6 +234,25 @@ class TestNavigationEngineHelpers:
         assert pose["position"] == [1.0, 0.0, 0.0]
         # Direction is the unit feed direction into the vessel.
         assert pose["direction"] == pytest.approx([0.0, 0.0, 1.0])
+
+    def test_aorta_tree_routes_are_selectable_without_mujoco(self):
+        engine = self._engine(phantom="aorta_tree", guided=True)
+        routes = engine.available_routes
+
+        assert routes
+        target = sorted(routes)[0]
+        assert engine.select_route(target) is True
+        assert engine._route_target == target
+        assert engine.entry_pose["position"] == pytest.approx(engine.planned_path[0])
+        assert engine.reset().target_position == pytest.approx(routes[target])
+
+    def test_aorta_tree_constructor_route_target_uses_branch(self):
+        first = self._engine(phantom="aorta_tree", guided=True)
+        target = sorted(first.available_routes)[-1]
+
+        engine = self._engine(phantom="aorta_tree", guided=True, route_target=target)
+
+        assert engine.planned_path[-1] == pytest.approx(engine.available_routes[target])
 
 
 class TestGuidedMode:

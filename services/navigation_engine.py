@@ -1,7 +1,16 @@
-"""Navigation Engine: Bridge between FastAPI and CathSim MuJoCo environment.
+"""Navigation Engine: orchestration layer over a pluggable physics backend.
 
-This module provides a high-level interface for controlling the CathSim
-guidewire simulation through the NavigationEngine class.
+``NavigationEngine`` is the high-level interface FastAPI / the session manager
+talk to. It owns the *engine-agnostic* concerns -- planned-path setup, entry-pose
+resolution, progress / deviation, curvature, safety status and risk -- and
+delegates the actual stepping to a single :class:`~services.physics.base.PhysicsEngine`
+chosen once at construction (kinematic centerline-follow vs. MuJoCo physics).
+
+The former ``if self._is_guided()`` fork that ran two engines inside this one
+object is gone: a backend is selected by :func:`~services.physics.factory.make_engine`
+and this class never branches on engine type in the hot path. Derived navigation
+quantities stay here so they are computed once, independent of which backend (or
+a future GPU solver) produced the raw pose.
 """
 
 from __future__ import annotations
@@ -14,6 +23,14 @@ from pathlib import Path
 from typing import Any, Literal, Sequence
 
 import numpy as np
+
+from services.physics import (
+    MAX_WALL_DISTANCE,
+    PhysicsEngine,
+    PlannedPath,
+    make_engine,
+)
+from services.physics.kinematic_engine import KinematicEngine
 
 # Make the in-repo `cathsim` package importable even when the server runs in a
 # Python environment where it was not installed editable (e.g. uvicorn launched
@@ -48,18 +65,6 @@ def resolve_vpp_assets_dir(phantom: str) -> str | None:
     case_id = phantom[: -len("_vpp")]
     mujoco_dir = _VPP_DATA_ROOT / case_id / "mujoco"
     return str(mujoco_dir) if mujoco_dir.is_dir() else None
-
-
-def _rot_x(a: float) -> np.ndarray:
-    """Rotation matrix about the x axis by angle ``a`` (radians)."""
-    c, s = np.cos(a), np.sin(a)
-    return np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]])
-
-
-def _rot_y(b: float) -> np.ndarray:
-    """Rotation matrix about the y axis by angle ``b`` (radians)."""
-    c, s = np.cos(b), np.sin(b)
-    return np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]])
 
 
 @dataclass
@@ -116,12 +121,13 @@ SafetyStatus = Literal["STANDBY", "SAFE_NAV", "DANGER_WARNING", "COLLISION_STOP"
 
 
 class NavigationEngine:
-    """High-level interface for CathSim guidewire navigation.
+    """High-level orchestration interface for CathSim guidewire navigation.
 
-    This class wraps the CathSim dm_control environment and provides:
+    Wraps a single :class:`PhysicsEngine` backend (kinematic or MuJoCo) and
+    provides:
     - Simplified step/reset interface
-    - Normalized state extraction
-    - Safety status monitoring
+    - Normalized state extraction (progress / deviation / curvature / safety)
+    - Risk scoring
 
     Example:
         engine = NavigationEngine(phantom="low_tort", target="bca")
@@ -140,7 +146,7 @@ class NavigationEngine:
     VALID_TARGETS = ("bca", "lcca", "root")
 
     # Distance reported when the guidewire is not in contact with any wall (m).
-    MAX_WALL_DISTANCE = 0.05
+    MAX_WALL_DISTANCE = MAX_WALL_DISTANCE
     # Safety thresholds on wall distance, in MuJoCo meters (1.0mm / 0.5mm).
     WALL_DISTANCE_SAFE = 0.001
     WALL_DISTANCE_DANGER = 0.0005
@@ -210,6 +216,8 @@ class NavigationEngine:
             wall_lean: Max offset (meters) toward the inner side of curves in
                        guided render, so the wire hugs the inner vessel wall at
                        bends like a tensioned wire. 0 disables (centerline).
+            route_target: Optional branch endpoint id for multi-route phantoms
+                          that ship routes.json (e.g. ``aorta_tree``).
         """
         self.phantom = phantom
         self.target = target
@@ -233,40 +241,28 @@ class NavigationEngine:
             else None
         )
 
-        # Guided (kinematic centerline-follow) mode state.
+        # Guided (kinematic centerline-follow) configuration.
         self._guided = bool(guided)
         self._advance_per_step = float(advance_per_step)
         self._wire_length = float(wire_length)
         self._wall_lean = float(wall_lean)
-        self._wall_lean_gain = 1.5
-        self._s = 0.0  # current insertion depth as arc length along the path (m)
+        self._route_target = route_target
 
-        self._env = None
-        self._time_step = None
         self._episode_length = 0
         self._previous_tip_pos = None
-        self._initialized = False
-
         self._tip_history: deque[list[float]] = deque(maxlen=self.TIP_HISTORY_LEN)
-        # Cached (geom_id, body_id) pairs for guidewire render data; built once
-        # since the model structure is fixed after initialization.
-        self._render_geom_ids: list[tuple[int, int]] | None = None
 
         from services.risk_assessor import RiskAssessor
 
         self._risk_assessor = RiskAssessor()
 
-        # Planned path state (populated by set_planned_path / _setup_path).
-        self._path_points: np.ndarray | None = None
-        self._path_cumlen: np.ndarray | None = None
-        self._path_total_len: float = 0.0
-        self._path_kdtree = None
-        # Multi-branch phantoms (e.g. aorta_tree) ship routes.json: one centered
-        # route from the vascular-access entry to each leaf endpoint. When a
-        # route_target is given (or later chosen via select_route), that branch is
-        # the planned path; otherwise fall back to the shipped primary centerline.
+        # Planned path (arc-length geometry) shared with the backing engine.
+        # Set _path / _engine to None first so set_planned_path's engine
+        # propagation is a no-op during this initial setup.
+        self._path: PlannedPath | None = None
+        self._engine: PhysicsEngine | None = None
         self._routes: dict | None = self._load_phantom_routes()
-        self._route_target = route_target
+
         if planned_path is not None:
             self.set_planned_path(planned_path)
         else:
@@ -275,6 +271,27 @@ class NavigationEngine:
                 default_path = self._default_centerline_points()
             if default_path is not None:
                 self.set_planned_path(default_path)
+
+        # Resolve the entry pose (needs the path) then construct the one backend.
+        entry_pt, entry_dir = self._resolve_entry()
+        self._engine = make_engine(
+            guided=self._guided,
+            path=self._path,
+            phantom=self.phantom,
+            target=self.target,
+            use_pixels=self.use_pixels,
+            image_size=self.image_size,
+            assets_dir=self.assets_dir,
+            n_bodies=self.n_bodies,
+            n_substeps=self.n_substeps,
+            insertion_max=self.insertion_max,
+            stiffness_scale=self.stiffness_scale,
+            prethread=self.prethread,
+            entry_point=entry_pt,
+            entry_direction=entry_dir,
+            advance_per_step=self._advance_per_step,
+            wall_lean=self._wall_lean,
+        )
 
     def _default_centerline_points(self) -> list[list[float]] | None:
         """Load a built-in phantom's shipped B-spline centerline, if present.
@@ -328,8 +345,8 @@ class NavigationEngine:
         """Load a built-in phantom's per-endpoint branch routes (routes.json).
 
         Multi-branch phantoms (e.g. aorta_tree) ship a routes.json mapping each
-        leaf endpoint id to a dense, centered, smoothed route from the vascular
-        entry. Returns None when absent (single-route phantoms use centerline.json).
+        leaf endpoint id to a dense, centered route from the vascular entry.
+        Returns None when absent (single-route phantoms use centerline.json).
         """
         if self.assets_dir is not None:
             return None
@@ -347,11 +364,7 @@ class NavigationEngine:
             return None
 
     def _route_waypoints(self, target: str | None) -> list[list[float]] | None:
-        """Waypoints of the branch route named ``target`` from routes.json.
-
-        ``target`` is an endpoint id (e.g. ``endpoint_24``). Returns None when no
-        routes are loaded or the id is unknown.
-        """
+        """Waypoints of the branch route named ``target`` from routes.json."""
         if not self._routes or not target:
             return None
         route = self._routes.get("routes", {}).get(target)
@@ -364,63 +377,49 @@ class NavigationEngine:
 
     @property
     def available_routes(self) -> dict[str, list[float]]:
-        """Selectable branch targets as ``{endpoint_id: [x, y, z] target}`` (m).
-
-        Empty for phantoms that do not ship routes.json. Lets a client present the
-        reachable branch tips and pick one via ``select_route``.
-        """
+        """Selectable branch targets as ``{endpoint_id: [x, y, z] target}`` (m)."""
         if not self._routes:
             return {}
         return {
-            rid: list(r.get("target", []))
-            for rid, r in self._routes.get("routes", {}).items()
+            rid: list(route.get("target", []))
+            for rid, route in self._routes.get("routes", {}).items()
         }
 
     def select_route(self, target: str) -> bool:
-        """Switch the planned path to branch route ``target`` and reset progress.
-
-        Returns True when the route exists and was applied. Guided insertion depth
-        is reset so the guidewire re-runs from the entry along the new branch.
-        """
+        """Switch the planned path to branch route ``target`` and reset progress."""
         waypoints = self._route_waypoints(target)
         if waypoints is None:
             return False
         self.set_planned_path(waypoints)
         self._route_target = target
-        self._s = 0.0
         self._episode_length = 0
         self._previous_tip_pos = None
         self._tip_history.clear()
+        if self._engine is not None and hasattr(self._engine, "_s"):
+            self._engine._s = 0.0
         return True
 
     def set_planned_path(self, planned_path: Sequence[Sequence[float]] | None) -> None:
         """Set or clear the planned path used for progress/deviation tracking.
+
+        When the engine already exists (e.g. an interactive re-plan via
+        :meth:`plan_to_target`), the new geometry is propagated to it so the next
+        reset/step uses it. Note: switching a guided session from "no path" to a
+        path after construction does not retroactively turn it kinematic -- the
+        backend type is fixed at construction; pass the path up front for guided.
 
         Args:
             planned_path: List of [x, y, z] points in MuJoCo meters, or None to
                           disable path tracking.
         """
         if planned_path is None or len(planned_path) < 2:
-            self._path_points = None
-            self._path_cumlen = None
-            self._path_total_len = 0.0
-            self._path_kdtree = None
-            return
+            self._path = None
+        else:
+            self._path = PlannedPath(planned_path)
 
-        points = np.asarray(planned_path, dtype=np.float64)
-        segment_len = np.linalg.norm(np.diff(points, axis=0), axis=1)
-        cumlen = np.concatenate([[0.0], np.cumsum(segment_len)])
-
-        self._path_points = points
-        self._path_cumlen = cumlen
-        self._path_total_len = float(cumlen[-1])
-
-        try:
-            from scipy.spatial import cKDTree
-
-            self._path_kdtree = cKDTree(points)
-        except Exception:
-            self._path_kdtree = None
+        if getattr(self, "_engine", None) is not None:
+            # Both backends keep a `_path` reference; keep it in sync for re-plan.
+            self._engine._path = self._path
 
     def _resolve_entry(self) -> tuple[np.ndarray | None, np.ndarray | None]:
         """Resolve the guidewire entry pose, deriving it from the planned path.
@@ -432,12 +431,12 @@ class NavigationEngine:
         entry_point = self._entry_point
         entry_direction = self._entry_direction
 
-        if entry_point is None and self._path_points is not None:
-            entry_point = self._path_points[0]
+        if entry_point is None and self._path is not None:
+            entry_point = self._path.points[0]
 
-        if entry_direction is None and self._path_points is not None:
-            origin = self._path_points[0]
-            for point in self._path_points[1:]:
+        if entry_direction is None and self._path is not None:
+            origin = self._path.points[0]
+            for point in self._path.points[1:]:
                 seg = point - origin
                 if np.linalg.norm(seg) > 1e-9:
                     entry_direction = seg
@@ -506,159 +505,18 @@ class NavigationEngine:
             if waypoints:
                 self.set_planned_path(waypoints)
                 return (waypoints, result.smooth_length_mm / 1000.0)
-        except Exception as e:
+        except Exception:
             return None
 
         return None
 
-    def _ensure_initialized(self) -> None:
-        """Lazy initialization of CathSim environment."""
-        if self._initialized:
-            return
-
-        from cathsim.dm import make_dm_env
-
-        entry_point, entry_direction = self._resolve_entry()
-
-        self._env = make_dm_env(
-            phantom=self.phantom,
-            target=self.target,
-            use_pixels=self.use_pixels,
-            image_size=self.image_size,
-            visualize_sites=False,
-            visualize_target=False,
-            sample_target=False,
-            assets_dir=self.assets_dir,
-            n_bodies=self.n_bodies,
-            n_substeps=self.n_substeps,
-            insertion_max=self.insertion_max,
-            stiffness_scale=self.stiffness_scale,
-            entry_point=entry_point,
-            entry_direction=entry_direction,
-        )
-        self._initialized = True
-
     def reset(self) -> NavigationState:
-        """Reset the environment and return initial state.
-
-        Returns:
-            NavigationState with initial positions and zeroed dynamics
-        """
-        if self._is_guided():
-            self._s = 0.0
-            self._episode_length = 0
-            self._previous_tip_pos = None
-            self._tip_history.clear()
-            return self._guided_state()
-
-        self._ensure_initialized()
-
-        self._time_step = self._env.reset()
-        if self.prethread and self._path_points is not None:
-            self._thread_physics_along_path()
+        """Reset the backing engine and return the initial state."""
+        raw = self._engine.reset()
         self._episode_length = 0
         self._previous_tip_pos = None
         self._tip_history.clear()
-
-        return self._extract_state()
-
-    def _thread_physics_along_path(self) -> None:
-        """Bend the physical guidewire onto the planned centerline at spawn.
-
-        A straight wire pushed by the straight base slider jams against the
-        vessel wall as soon as the lumen curves. Instead we set the guidewire's
-        steering-hinge angles so the body chain lies along the planned centerline
-        from the entry inward, so the wire spawns *inside* the lumen with a
-        physically plausible shape. Physics then holds it there via wall contacts
-        (the wire presses on the bends, as a real guidewire does).
-
-        The chain is a sequence of 2-DOF universal joints (J0 about local x, J1
-        about local y); each body's segment direction is its local +z. Marching
-        base->tip, for body i we solve the two hinge angles so its +z matches the
-        centerline tangent T at that arc length::
-
-            t_local = parent_rot^T @ T
-            J1 = asin(t_local.x);  J0 = atan2(-t_local.y, t_local.z)
-            child_rot = parent_rot @ Rx(J0) @ Ry(J1)
-        """
-        physics = self._env.physics
-        model = physics.model
-
-        chain = self._guidewire_chain_bodies(model)
-        if not chain:
-            return
-
-        # Base segment orientation is fixed by the spawn pose; start the march
-        # from the first base body and walk the centerline from the entry.
-        base_id = chain[0][0]
-        parent_rot = np.asarray(physics.data.xmat[base_id], dtype=np.float64).reshape(3, 3)
-        qpos = physics.data.qpos
-
-        # The proximal base body spawns ~one wire-length back from the entry along
-        # the straight feed axis, so anchoring the centerline shape at it would
-        # translate the whole wire out of the lumen. Advance the slider so the
-        # base sits at the entry; then the bends below place the wire inside the
-        # vessel from the entry inward.
-        feed_axis = parent_rot @ np.array([0.0, 0.0, 1.0])
-        entry = self._path_points[0]
-        base_pos = np.asarray(physics.data.xpos[base_id], dtype=np.float64)
-        slide = float(np.dot(entry - base_pos, feed_axis))
-        slide = float(np.clip(slide, 0.0, self.insertion_max))
-        slider_adr = self._slider_qposadr(model)
-        if slider_adr is not None:
-            qpos[slider_adr] = slide
-
-        s = 0.0
-        for _body_id, seg_len, j0_adr, j1_adr in chain[1:]:
-            s = min(s + seg_len, self._path_total_len)
-            tangent = self._tangent_at_arclen(s)
-            t_local = parent_rot.T @ tangent
-            tx = float(np.clip(t_local[0], -1.0, 1.0))
-            j1 = float(np.arcsin(tx))
-            cos_j1 = float(np.sqrt(max(1.0 - tx * tx, 1e-12)))
-            j0 = float(np.arctan2(-t_local[1] / cos_j1, t_local[2] / cos_j1))
-            if j0_adr is not None and j1_adr is not None:
-                qpos[j0_adr] = j0
-                qpos[j1_adr] = j1
-            parent_rot = parent_rot @ _rot_x(j0) @ _rot_y(j1)
-
-        physics.forward()
-
-    @staticmethod
-    def _slider_qposadr(model) -> int | None:
-        """qpos address of the guidewire insertion (slider) joint, if present."""
-        for j in range(model.njnt):
-            if (model.id2name(j, "joint") or "").endswith("slider"):
-                return int(model.jnt_qposadr[j])
-        return None
-
-    @staticmethod
-    def _guidewire_chain_bodies(model) -> list[tuple[int, float, int | None, int | None]]:
-        """Ordered guidewire/tip chain as (body_id, seg_len, j0_qposadr, j1_qposadr).
-
-        The first entry is the base body (its orientation is fixed by the spawn
-        pose, so its joint addresses are None). Subsequent entries carry the two
-        steering-hinge qpos addresses used to bend the chain onto the centerline.
-        """
-        chain: list[tuple[int, float, int | None, int | None]] = []
-        for body_id in range(model.nbody):
-            name = model.id2name(body_id, "body") or ""
-            is_gw = "guidewire_body_" in name
-            is_tip = "tip_body_" in name
-            if not (is_gw or is_tip):
-                continue
-            seg_len = float(model.body_pos[body_id][2])
-            joints = [j for j in range(model.njnt) if int(model.jnt_bodyid[j]) == body_id]
-            hinge_adrs = [int(model.jnt_qposadr[j]) for j in joints if int(model.jnt_type[j]) == 3]
-            j0 = hinge_adrs[0] if len(hinge_adrs) >= 1 else None
-            j1 = hinge_adrs[1] if len(hinge_adrs) >= 2 else None
-            # Base body_0 carries the slider/rotator (its hinge is the rotator,
-            # not a steering pair) -- mark it as the fixed root of the march.
-            if name.endswith("guidewire_body_0"):
-                chain.append((body_id, seg_len, None, None))
-            else:
-                chain.append((body_id, seg_len, j0, j1))
-        return chain
+        return self._assemble_state(raw)
 
     def step(self, delta_push: float, delta_rotate: float) -> NavigationState:
         """Execute one simulation step.
@@ -673,249 +531,62 @@ class NavigationEngine:
         delta_push = float(np.clip(delta_push, -1.0, 1.0))
         delta_rotate = float(np.clip(delta_rotate, -1.0, 1.0))
 
-        if self._is_guided():
-            self._s = float(
-                np.clip(
-                    self._s + delta_push * self._advance_per_step,
-                    0.0,
-                    self._path_total_len,
-                )
-            )
-            self._episode_length += 1
-            return self._guided_state()
-
-        if not self._initialized or self._time_step is None:
-            raise RuntimeError("Engine not initialized. Call reset() first.")
-
-        action = np.array([delta_push, delta_rotate], dtype=np.float64)
-        self._time_step = self._env.step(action)
+        raw = self._engine.step(delta_push, delta_rotate)
         self._episode_length += 1
-
-        return self._extract_state()
+        return self._assemble_state(raw)
 
     def _is_guided(self) -> bool:
-        """Whether kinematic centerline-follow mode is active.
+        """Whether the active backend is the kinematic centerline-follow engine.
 
-        Requires both the guided flag and a valid planned path; otherwise the
-        engine falls back to the physical MuJoCo simulation.
+        Kept as a thin accessor (the runtime fork is gone -- the backend type is
+        fixed at construction). Returns False before the engine is constructed.
         """
-        return self._guided and self._path_points is not None and self._path_total_len > 0.0
+        return isinstance(self._engine, KinematicEngine)
 
-    def _point_at_arclen(self, s: float) -> np.ndarray:
-        """Interpolate a point on the planned path at arc length ``s`` (meters)."""
-        cum = self._path_cumlen
-        pts = self._path_points
-        s = float(np.clip(s, 0.0, self._path_total_len))
-        idx = int(np.searchsorted(cum, s))
-        if idx <= 0:
-            return pts[0].copy()
-        if idx >= len(pts):
-            return pts[-1].copy()
-        s0, s1 = cum[idx - 1], cum[idx]
-        t = 0.0 if s1 <= s0 else (s - s0) / (s1 - s0)
-        return pts[idx - 1] + t * (pts[idx] - pts[idx - 1])
+    def _assemble_state(self, raw) -> NavigationState:
+        """Assemble a NavigationState from an engine RawPose plus derived terms.
 
-    def _tangent_at_arclen(self, s: float) -> np.ndarray:
-        """Unit tangent of the planned path at arc length ``s`` (meters)."""
-        eps = max(self._path_total_len * 1e-3, 1e-4)
-        p0 = self._point_at_arclen(s - eps)
-        p1 = self._point_at_arclen(s + eps)
-        d = p1 - p0
-        n = float(np.linalg.norm(d))
-        return d / n if n > 1e-9 else np.array([0.0, 0.0, 1.0])
-
-    @staticmethod
-    def _quat_from_direction(direction: np.ndarray) -> list[float]:
-        """Quaternion [x, y, z, w] rotating +z onto ``direction`` (protocol order)."""
-        a = np.array([0.0, 0.0, 1.0])
-        b = np.asarray(direction, dtype=np.float64)
-        nb = float(np.linalg.norm(b))
-        if nb < 1e-9:
-            return [0.0, 0.0, 0.0, 1.0]
-        b = b / nb
-        d = float(np.dot(a, b))
-        if d > 1.0 - 1e-9:
-            return [0.0, 0.0, 0.0, 1.0]
-        if d < -1.0 + 1e-9:
-            return [1.0, 0.0, 0.0, 0.0]  # 180 deg about x
-        axis = np.cross(a, b)
-        w = 1.0 + d
-        q = np.array([axis[0], axis[1], axis[2], w])
-        q = q / np.linalg.norm(q)
-        return [float(v) for v in q]
-
-    def _guided_state(self) -> NavigationState:
-        """Synthesize a NavigationState from the centerline-follow parameter.
-
-        The tip rides the planned path at arc length ``self._s``; progress is the
-        normalized arc length and deviation is zero by construction. No physical
-        contact is modeled (wall_distance is the free-space sentinel), so the
-        guidewire reliably traverses the full route to the target.
+        Derived (engine-agnostic) quantities -- velocity, curvature, path
+        progress/deviation, safety status, risk -- are computed here so they are
+        identical regardless of which backend produced ``raw``. When the engine
+        reports an exact inserted arc length (``raw.arclen``, kinematic mode),
+        progress is derived continuously from it and deviation is zero; otherwise
+        progress/deviation come from projecting the tip onto the planned path.
         """
-        tip_pos_arr = self._point_at_arclen(self._s)
-        tip_pos = [float(v) for v in tip_pos_arr]
+        tip_pos = raw.tip_position
         self._tip_history.append(tip_pos)
-
-        tip_dir = self._tangent_at_arclen(self._s)
-        tip_direction = [float(v) for v in tip_dir]
-        tip_quaternion = self._quat_from_direction(tip_dir)
 
         velocity = self._compute_velocity(tip_pos)
         curvature = self._compute_curvature()
 
-        target_pos = [float(v) for v in self._path_points[-1]]
-        progress = float(self._s / self._path_total_len) if self._path_total_len > 0 else 0.0
+        if raw.arclen is not None and self._path is not None and self._path.total_len > 0.0:
+            path_progress = float(raw.arclen / self._path.total_len)
+            path_deviation = 0.0
+        else:
+            path_progress, path_deviation = self._compute_path_progress(tip_pos)
 
-        safety_status = "STANDBY" if self._episode_length == 0 else "SAFE_NAV"
-
-        state = NavigationState(
-            tip_position=tip_pos,
-            tip_direction=tip_direction,
-            tip_quaternion=tip_quaternion,
-            velocity=float(velocity),
-            contact_force=0.0,
-            wall_distance=self.MAX_WALL_DISTANCE,
-            curvature=float(curvature),
-            episode_length=self._episode_length,
-            target_position=target_pos,
-            path_progress=progress,
-            path_deviation=0.0,
-            joint_positions=[],
-            joint_velocities=[],
-            safety_status=safety_status,
-            reward=0.0,
-            done=progress >= 0.999,
-        )
-        state.risk_score = self._risk_assessor.assess(state)["risk_score"]
-        return state
-
-    def _guided_render_bodies(self) -> list[dict[str, list[float]]]:
-        """Sample the full inserted guidewire (entry -> tip) along the centerline.
-
-        Renders the entire inserted length so the wire visibly curves through
-        every vessel bend (not just a short tip stub), and leans each point
-        toward the inner side of curves (like a tensioned wire pressing on the
-        inner wall) so the shape reads as a real bending guidewire.
-        """
-        s_tip = self._s
-        if s_tip <= 1e-6:
-            pos = self._point_at_arclen(0.0)
-            quat = self._quat_from_direction(self._tangent_at_arclen(0.0))
-            return [{"pos": [float(v) for v in pos], "quat": quat}]
-
-        spacing = 0.004  # ~4mm between render segments
-        n = int(np.clip(int(s_tip / spacing) + 1, 2, 256))
-        bodies: list[dict[str, list[float]]] = []
-        for i in range(n + 1):
-            s = s_tip * i / n
-            pos = self._point_at_arclen(s)
-            if self._wall_lean > 0.0:
-                pos = pos + self._inner_wall_offset(s)
-            quat = self._quat_from_direction(self._tangent_at_arclen(s))
-            bodies.append({"pos": [float(v) for v in pos], "quat": quat})
-        return bodies
-
-    def _inner_wall_offset(self, s: float) -> np.ndarray:
-        """Offset toward the inner (concave) side of the local curve.
-
-        Zero on straight sections; grows with curvature, capped at wall_lean.
-        """
-        delta = 0.01
-        p_prev = self._point_at_arclen(s - delta)
-        p = self._point_at_arclen(s)
-        p_next = self._point_at_arclen(s + delta)
-        inward = 0.5 * (p_prev + p_next) - p  # toward the center of curvature
-        # Keep only the lateral component; a one-sided difference at the path
-        # ends (where p_prev/p_next clamp) is purely tangential and must not
-        # shift the wire along its own direction.
-        tangent = self._tangent_at_arclen(s)
-        inward = inward - tangent * float(np.dot(inward, tangent))
-        n = float(np.linalg.norm(inward))
-        if n < 1e-9:
-            return np.zeros(3)
-        mag = min(self._wall_lean, n * self._wall_lean_gain)
-        return (inward / n) * mag
-
-    def _extract_state(self) -> NavigationState:
-        """Extract normalized state from current time_step."""
-        obs = self._time_step.observation
-        physics = self._env.physics
-        task = self._env.task
-
-        tip_pos = task.get_head_pos(physics).tolist()
-        self._tip_history.append(tip_pos)
-
-        tip_direction = self._compute_tip_direction(physics)
-        tip_quaternion = self._compute_tip_quaternion(physics)
-
-        velocity = self._compute_velocity(tip_pos)
-
-        contact_force = float(task.get_total_force(physics))
-        wall_distance = self._compute_wall_distance(physics)
-        curvature = self._compute_curvature()
-
-        target_pos = task.target_pos
-        if isinstance(target_pos, np.ndarray):
-            target_pos = target_pos.tolist()
-
-        path_progress, path_deviation = self._compute_path_progress(tip_pos)
-
-        joint_pos = obs.get("joint_pos", np.array([])).tolist()
-        joint_vel = obs.get("joint_vel", np.array([])).tolist()
-
-        reward = self._time_step.reward if self._time_step.reward is not None else 0.0
-        done = self._time_step.last()
-
-        safety_status = self._compute_safety_status(self._episode_length, wall_distance)
+        safety_status = self._compute_safety_status(self._episode_length, raw.wall_distance)
 
         state = NavigationState(
             tip_position=tip_pos,
-            tip_direction=tip_direction,
-            tip_quaternion=tip_quaternion,
+            tip_direction=raw.tip_direction,
+            tip_quaternion=raw.tip_quaternion,
             velocity=float(velocity),
-            contact_force=contact_force,
-            wall_distance=float(wall_distance),
+            contact_force=float(raw.contact_force),
+            wall_distance=float(raw.wall_distance),
             curvature=float(curvature),
             episode_length=self._episode_length,
-            target_position=target_pos,
+            target_position=raw.target_position,
             path_progress=float(path_progress),
             path_deviation=float(path_deviation),
-            joint_positions=joint_pos,
-            joint_velocities=joint_vel,
+            joint_positions=raw.joint_positions,
+            joint_velocities=raw.joint_velocities,
             safety_status=safety_status,
-            reward=float(reward),
-            done=done,
+            reward=float(raw.reward),
+            done=raw.done,
         )
         state.risk_score = self._risk_assessor.assess(state)["risk_score"]
         return state
-
-    def _compute_tip_quaternion(self, physics) -> list[float]:
-        """Get the tip body orientation as a quaternion in [x, y, z, w] order.
-
-        MuJoCo stores quaternions as [w, x, y, z]; we reorder to [x, y, z, w] to
-        match the Godot/WebSocket protocol convention.
-        """
-        try:
-            body_id = int(physics.model.geom_bodyid[-1])
-            w, x, y, z = (float(v) for v in physics.data.xquat[body_id])
-            return [x, y, z, w]
-        except Exception:
-            return [0.0, 0.0, 0.0, 1.0]
-
-    def _compute_wall_distance(self, physics) -> float:
-        """Estimate the minimum gap between the guidewire and the vessel wall.
-
-        This is a contact-based proxy: when MuJoCo reports active contacts the
-        gap distance (clamped at 0 for penetration) is used; otherwise a large
-        sentinel (MAX_WALL_DISTANCE) is returned. Distances are in meters.
-        """
-        ncon = int(physics.data.ncon)
-        if ncon == 0:
-            return self.MAX_WALL_DISTANCE
-
-        dists = np.asarray(physics.data.contact.dist[:ncon], dtype=np.float64)
-        min_gap = float(np.clip(dists, 0.0, None).min())
-        return min(min_gap, self.MAX_WALL_DISTANCE)
 
     def _compute_curvature(self) -> float:
         """Estimate local tip curvature (m^-1) via Menger curvature.
@@ -950,21 +621,9 @@ class NavigationEngine:
             deviation is the distance to the nearest path vertex (meters).
             Returns (0.0, 0.0) when no planned path is set.
         """
-        if self._path_points is None or self._path_total_len <= 0.0:
+        if self._path is None or self._path.total_len <= 0.0:
             return 0.0, 0.0
-
-        tip = np.asarray(tip_pos, dtype=np.float64)
-        if self._path_kdtree is not None:
-            deviation, idx = self._path_kdtree.query(tip)
-            idx = int(idx)
-        else:
-            diffs = self._path_points - tip
-            sq = np.einsum("ij,ij->i", diffs, diffs)
-            idx = int(np.argmin(sq))
-            deviation = float(np.sqrt(sq[idx]))
-
-        progress = float(self._path_cumlen[idx] / self._path_total_len)
-        return progress, float(deviation)
+        return self._path.progress_deviation(tip_pos)
 
     def _compute_safety_status(self, episode_length: int, wall_distance: float) -> SafetyStatus:
         """Derive the safety status from episode state and wall distance."""
@@ -976,24 +635,8 @@ class NavigationEngine:
             return "DANGER_WARNING"
         return "COLLISION_STOP"
 
-    def _compute_tip_direction(self, physics) -> list[float]:
-        """Compute tip direction from the last two geom positions."""
-        geom_xpos = physics.data.geom_xpos
-        if geom_xpos.shape[0] < 2:
-            return [0.0, 0.0, 1.0]
-
-        tip_pos = geom_xpos[-1]
-        prev_pos = geom_xpos[-2]
-        direction = tip_pos - prev_pos
-        norm = np.linalg.norm(direction)
-        if norm > 1e-8:
-            direction = direction / norm
-        else:
-            direction = np.array([0.0, 0.0, 1.0])
-        return direction.tolist()
-
     def _compute_velocity(self, tip_pos: list[float]) -> float:
-        """Compute tip velocity from position change."""
+        """Compute tip velocity (m/s) from position change over a control step."""
         if self._previous_tip_pos is None:
             self._previous_tip_pos = tip_pos
             return 0.0
@@ -1002,48 +645,22 @@ class NavigationEngine:
         velocity = np.linalg.norm(delta)
         self._previous_tip_pos = tip_pos
 
-        # Guided mode has no MuJoCo env; assume a nominal ~30Hz control step.
-        if self._env is not None:
-            control_timestep = getattr(self._env.task, "control_timestep", 0.02)
-        else:
-            control_timestep = 0.033
-        velocity_per_second = velocity / control_timestep if control_timestep > 0 else 0.0
+        control_timestep = self._engine.control_timestep if self._engine is not None else 0.033
+        return velocity / control_timestep if control_timestep > 0 else 0.0
 
-        return velocity_per_second
+    def _inner_wall_offset(self, s: float) -> np.ndarray:
+        """Inner-wall lean offset at arc length ``s`` (kinematic backend only)."""
+        return self._engine._inner_wall_offset(s)
 
     def get_render_bodies(self) -> list[dict[str, list[float]]]:
         """Return per-segment guidewire render data for tube rendering.
 
         Each entry is ``{"pos": [x, y, z], "quat": [x, y, z, w]}`` for one
-        guidewire geom, ordered from base to tip. Quaternions are reordered from
-        MuJoCo's [w, x, y, z] to the protocol's [x, y, z, w]. Returns an empty
-        list when the environment is not initialized.
+        guidewire segment, ordered from base to tip. Quaternions are in the
+        protocol's [x, y, z, w] order. Returns an empty list when the backend
+        has no geometry yet.
         """
-        if self._is_guided():
-            return self._guided_render_bodies()
-
-        if not self._initialized or self._env is None:
-            return []
-
-        physics = self._env.physics
-        model = physics.model
-        data = physics.data
-
-        if self._render_geom_ids is None:
-            ids: list[tuple[int, int]] = []
-            for geom_id in range(model.ngeom):
-                body_id = int(model.geom_bodyid[geom_id])
-                name = model.id2name(body_id, "body") or ""
-                if "guidewire" in name:
-                    ids.append((geom_id, body_id))
-            self._render_geom_ids = ids
-
-        bodies: list[dict[str, list[float]]] = []
-        for geom_id, body_id in self._render_geom_ids:
-            pos = [float(v) for v in data.geom_xpos[geom_id]]
-            w, x, y, z = (float(v) for v in data.xquat[body_id])
-            bodies.append({"pos": pos, "quat": [x, y, z, w]})
-        return bodies
+        return self._engine.render_bodies()
 
     def get_safety_status(self, state: NavigationState) -> SafetyStatus:
         """Return the safety status carried by the given state.
@@ -1061,20 +678,17 @@ class NavigationEngine:
         return state.safety_status  # type: ignore[return-value]
 
     def close(self) -> None:
-        """Clean up resources."""
-        if self._env is not None:
-            del self._env
-            self._env = None
-        self._initialized = False
-        self._time_step = None
+        """Clean up resources held by the backing engine."""
+        if getattr(self, "_engine", None) is not None:
+            self._engine.close()
 
     def __del__(self):
         self.close()
 
     @property
     def is_initialized(self) -> bool:
-        """Check if engine is initialized."""
-        return self._initialized
+        """Whether the backend has built its (lazy) simulation resources."""
+        return bool(getattr(self._engine, "is_initialized", False))
 
     @property
     def episode_length(self) -> int:
@@ -1084,9 +698,9 @@ class NavigationEngine:
     @property
     def planned_path(self) -> list[list[float]]:
         """The active planned path as a list of [x, y, z] points (meters)."""
-        if self._path_points is None:
+        if self._path is None:
             return []
-        return self._path_points.tolist()
+        return self._path.as_list()
 
     @property
     def entry_pose(self) -> dict[str, list[float]]:
