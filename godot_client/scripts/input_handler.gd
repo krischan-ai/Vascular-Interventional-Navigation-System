@@ -18,6 +18,9 @@ signal view_cycle
 ## Emitted on each M keypress to cycle the phantom model
 ## (初始模型 low_tort / 全身体膜 segment_part / 局部血管空腔 VPP).
 signal model_cycle
+## Emitted on each B keypress to cycle the navigation target branch
+## (multi-branch phantoms like aorta_tree; ignored when only one route exists).
+signal branch_cycle
 
 @export var send_interval: float = 0.05  ## seconds (~20 Hz)
 
@@ -32,6 +35,8 @@ func _input(event: InputEvent) -> void:
 			view_cycle.emit()
 		elif event.physical_keycode == KEY_M:
 			model_cycle.emit()
+		elif event.physical_keycode == KEY_B:
+			branch_cycle.emit()
 
 
 func _process(delta: float) -> void:

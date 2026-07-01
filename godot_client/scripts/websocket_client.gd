@@ -11,6 +11,8 @@ extends Node
 signal connected
 signal disconnected
 signal session_started(session_id: String, state: Dictionary)
+## Selectable branch targets for multi-branch phantoms: {endpoint_id: [x,y,z]}.
+signal routes_received(routes: Dictionary)
 signal state_received(state: Dictionary)        ## state_update payload
 signal batch_received(batch: Dictionary)        ## state_batch payload
 signal path_received(path: Dictionary)          ## path_response payload
@@ -140,6 +142,7 @@ func _handle_packet(packet: String) -> void:
 		"session_started":
 			session_id = str(msg.get("session_id", ""))
 			session_started.emit(session_id, data.get("state", {}))
+			routes_received.emit(data.get("routes", {}))
 		"state_update":
 			# Drop frames that arrive while no session is active: during a model
 			# switch (restart_session clears session_id until the new
@@ -195,6 +198,16 @@ func send_control(delta_push: float, delta_rotate: float) -> void:
 func send_reset() -> void:
 	if _was_open:
 		_send("reset", {})
+
+
+## Switch the active session's navigation target to a branch route (multi-branch
+## phantoms like aorta_tree). ``target`` is an endpoint id from routes_received.
+## The backend re-arms the guidewire at the entry along the chosen branch and
+## re-sends the new path, so the renderer redraws it.
+func send_select_route(target: String) -> void:
+	if _was_open and session_id != "":
+		_awaiting = false  # a fresh path/state arrives; clear any in-flight lock
+		_send("select_route", {"target": target})
 
 
 ## Switch to a different phantom model on the live connection: stop the current

@@ -62,18 +62,19 @@ def load_all_curves(curves_dir: Path) -> list[tuple[int, np.ndarray, np.ndarray]
     return out
 
 
-def longest_route(
-    curves: list[tuple[int, np.ndarray, np.ndarray]], join_tol: float = 0.004
-) -> tuple[np.ndarray, np.ndarray]:
-    """Chain curves into the longest root->leaf polyline via shared endpoints.
+# An endpoint graph: node coords + adjacency (node -> [(other, curve_idx, flip)]).
+Graph = tuple[list[np.ndarray], dict[int, list[tuple[int, int, bool]]]]
 
-    Each curve is an edge between two endpoint-nodes (clustered within
-    ``join_tol`` metres). The VMTK export is a tree, so the longest simple path is
-    found by two greedy farthest-node walks (tree diameter). Returns the
-    concatenated (points_m, radius_m) of that path, with curves flipped to run
-    head-to-tail.
+
+def build_endpoint_graph(
+    curves: list[tuple[int, np.ndarray, np.ndarray]], join_tol: float = 0.004
+) -> Graph:
+    """Build the branch tree: cluster curve endpoints into nodes, curves as edges.
+
+    Each curve is an edge between its two endpoint-nodes (clustered within
+    ``join_tol`` metres). ``flip`` records whether traversing the edge from the
+    first node runs the curve reversed. Returns (node_coords, adjacency).
     """
-    # Cluster endpoints into nodes.
     nodes: list[np.ndarray] = []
 
     def node_id(p: np.ndarray) -> int:
@@ -83,51 +84,47 @@ def longest_route(
         nodes.append(p.copy())
         return len(nodes) - 1
 
-    # adjacency: node -> list of (other_node, curve_index_in_list, flip)
     adj: dict[int, list[tuple[int, int, bool]]] = {}
     for ci, (_idx, pts, _rad) in enumerate(curves):
         a, b = node_id(pts[0]), node_id(pts[-1])
-        length = float(np.linalg.norm(np.diff(pts, axis=0), axis=1).sum())
         adj.setdefault(a, []).append((b, ci, False))
         adj.setdefault(b, []).append((a, ci, True))
+    return nodes, adj
 
-    def farthest(start: int) -> tuple[int, float, dict[int, tuple[int, int, bool]]]:
-        """Farthest node from ``start`` over the tree (visited-set DFS).
 
-        The adjacency is bidirectional, so a plain relaxation would bounce back
-        and forth across an edge forever; a visited set is safe because a VMTK
-        centerline export is a tree (no cycles). Returns (node, dist, parent).
-        """
-        best_node, best_dist = start, 0.0
-        parent: dict[int, tuple[int, int, bool]] = {}
-        visited = {start}
-        stack = [(start, 0.0)]
-        while stack:
-            u, du = stack.pop()
-            if du > best_dist:
-                best_node, best_dist = u, du
-            for v, ci, flip in adj.get(u, []):
-                if v in visited:
-                    continue
-                visited.add(v)
-                w = float(np.linalg.norm(np.diff(curves[ci][1], axis=0), axis=1).sum())
-                parent[v] = (u, ci, flip)
-                stack.append((v, du + w))
-        return best_node, best_dist, parent
+def _edge_len(curves, ci: int) -> float:
+    return float(np.linalg.norm(np.diff(curves[ci][1], axis=0), axis=1).sum())
 
-    start_node = next(iter(adj))
-    end_a, _, _ = farthest(start_node)
-    end_b, _, parent = farthest(end_a)
 
-    # Walk parent chain end_b -> end_a, collecting curves in order.
-    chain: list[tuple[int, bool]] = []
-    v = end_b
-    while v in parent:
-        u, ci, flip = parent[v]
-        chain.append((ci, flip))
-        v = u
-    chain.reverse()
+def farthest(
+    adj: dict[int, list[tuple[int, int, bool]]], curves, start: int
+) -> tuple[int, float, dict[int, tuple[int, int, bool]]]:
+    """Farthest node from ``start`` over the tree (visited-set DFS).
 
+    The adjacency is bidirectional, so a plain relaxation would bounce back and
+    forth across an edge forever; a visited set is safe because a VMTK centerline
+    export is a tree (no cycles). Returns (node, dist, parent) where ``parent``
+    maps every reachable node to the (prev_node, curve_idx, flip) it arrived by.
+    """
+    best_node, best_dist = start, 0.0
+    parent: dict[int, tuple[int, int, bool]] = {}
+    visited = {start}
+    stack = [(start, 0.0)]
+    while stack:
+        u, du = stack.pop()
+        if du > best_dist:
+            best_node, best_dist = u, du
+        for v, ci, flip in adj.get(u, []):
+            if v in visited:
+                continue
+            visited.add(v)
+            parent[v] = (u, ci, flip)
+            stack.append((v, du + _edge_len(curves, ci)))
+    return best_node, best_dist, parent
+
+
+def _concat_chain(curves, chain: list[tuple[int, bool]], join_tol: float):
+    """Concatenate dense branch geometry along an ordered (curve_idx, flip) chain."""
     pts_out: list[np.ndarray] = []
     rad_out: list[np.ndarray] = []
     for ci, flip in chain:
@@ -139,6 +136,78 @@ def longest_route(
         pts_out.append(pts)
         rad_out.append(rad)
     return np.vstack(pts_out), np.concatenate(rad_out)
+
+
+def route_between(
+    curves, graph: Graph, start_node: int, end_node: int, join_tol: float = 0.004
+) -> tuple[np.ndarray, np.ndarray]:
+    """Dense (points_m, radius_m) of the unique tree path start_node -> end_node.
+
+    Walks the real VMTK branch geometry between the two endpoint-nodes (not a
+    straight line between them), so the route stays centered in every branch.
+    """
+    _nodes, adj = graph
+    _far, _d, parent = farthest(adj, curves, start_node)
+    chain: list[tuple[int, bool]] = []
+    v = end_node
+    while v in parent:
+        u, ci, flip = parent[v]
+        chain.append((ci, flip))
+        v = u
+    chain.reverse()
+    if not chain:
+        raise ValueError(f"no path between nodes {start_node} and {end_node}")
+    return _concat_chain(curves, chain, join_tol)
+
+
+def leaf_nodes(graph: Graph) -> list[int]:
+    """Endpoint-graph nodes of degree 1 (branch tips / vessel leaves)."""
+    _nodes, adj = graph
+    return [n for n, edges in adj.items() if len(edges) == 1]
+
+
+def nearest_node(graph: Graph, point: np.ndarray) -> int:
+    """Index of the endpoint-graph node closest to ``point`` (metres)."""
+    nodes, _adj = graph
+    return int(np.argmin([np.linalg.norm(n - point) for n in nodes]))
+
+
+def generate_routes(
+    curves, graph: Graph, entry_node: int, seg: float, smooth_mm: float
+) -> dict[str, dict]:
+    """Dense, centered, smoothed routes from ``entry_node`` to every other leaf.
+
+    One route per branch tip (vessel leaf), so a client can pick any target
+    endpoint and the guidewire follows the real branch centerline to it. Keyed by
+    ``endpoint_<node>``; each carries target position, length, and waypoints.
+    """
+    routes: dict[str, dict] = {}
+    for leaf in leaf_nodes(graph):
+        if leaf == entry_node:
+            continue
+        pts, rad = route_between(curves, graph, entry_node, leaf)
+        pts, rad = smooth_route(pts, rad, seg, smooth_mm)
+        if len(pts) < 2:
+            continue
+        routes[f"endpoint_{leaf}"] = {
+            "target": [round(float(v), 6) for v in pts[-1]],
+            "length_m": round(float(np.linalg.norm(np.diff(pts, axis=0), axis=1).sum()), 5),
+            "n_waypoints": len(pts),
+            "waypoints": [[round(float(v), 6) for v in p] for p in pts],
+            "radius_m": [round(float(r), 6) for r in rad],
+        }
+    return routes
+
+
+def longest_route(
+    curves: list[tuple[int, np.ndarray, np.ndarray]], join_tol: float = 0.004
+) -> tuple[np.ndarray, np.ndarray]:
+    """Longest root->leaf dense polyline (tree diameter via two farthest walks)."""
+    graph = build_endpoint_graph(curves, join_tol)
+    _nodes, adj = graph
+    end_a, _, _ = farthest(adj, curves, next(iter(adj)))
+    end_b, _, _ = farthest(adj, curves, end_a)
+    return route_between(curves, graph, end_a, end_b, join_tol)
 
 
 def smooth_route(
@@ -227,6 +296,11 @@ def main() -> int:
                     help="B-spline smoothing budget for the primary route (mm); "
                          "rounds junction kinks while keeping the line centered. "
                          "0 disables.")
+    ap.add_argument("--entry", type=float, nargs=3,
+                    default=[-1.020652, -0.231892, 0.257573],
+                    metavar=("X", "Y", "Z"),
+                    help="Vascular-access entry point (MuJoCo metres); routes to "
+                         "every leaf start here. Default = aorta_trunk entry.")
     ap.add_argument("--no-bricks", action="store_true",
                     help="skip collision wall bricks (guided-mode-only phantoms)")
     args = ap.parse_args()
@@ -276,9 +350,16 @@ def main() -> int:
         b.export(str(mesh_dir / f"hull_{i}.stl"), file_type="stl")
     print(f"[bricks] wrote {len(all_bricks)} collision hulls")
 
-    # Primary navigable route: longest root->leaf chain, B-spline smoothed to
-    # iron the corners where branches meet at bifurcations.
-    route_pts, route_rad = longest_route(curves)
+    # Branch routing: build the endpoint tree, fix the vascular-access entry, and
+    # route from it to every leaf along the real (dense, centered) branch
+    # geometry -- B-spline smoothed to iron the bifurcation corners.
+    graph = build_endpoint_graph(curves)
+    entry_pt = np.asarray(args.entry, dtype=np.float64)
+    entry_node = nearest_node(graph, entry_pt)
+    _far, _d, _p = farthest(graph[1], curves, entry_node)  # farthest leaf from entry
+    far_leaf = _far
+
+    route_pts, route_rad = route_between(curves, graph, entry_node, far_leaf)
     route_pts, route_rad = smooth_route(route_pts, route_rad, args.seg, args.smooth_mm)
     route_len = float(np.linalg.norm(np.diff(route_pts, axis=0), axis=1).sum())
     (mesh_dir / "centerline.json").write_text(
@@ -287,7 +368,7 @@ def main() -> int:
                 "phantom": args.name,
                 "coordinate_system": "mujoco",
                 "unit": "m",
-                "source": f"{curves_dir.name} (3D Slicer VMTK, LPS mm /1000), longest root->leaf chain",
+                "source": f"{curves_dir.name} (3D Slicer VMTK, LPS mm /1000), entry->farthest leaf",
                 "entry": [round(float(v), 6) for v in route_pts[0]],
                 "target_root": [round(float(v), 6) for v in route_pts[-1]],
                 "length_m": round(route_len, 5),
@@ -308,7 +389,22 @@ def main() -> int:
         ),
         encoding="utf-8",
     )
+
+    # Per-endpoint branch routes for target selection (guided navigation).
+    routes = generate_routes(curves, graph, entry_node, args.seg, args.smooth_mm)
+    (mesh_dir / "routes.json").write_text(
+        json.dumps(
+            {"phantom": args.name, "coordinate_system": "mujoco", "unit": "m",
+             "entry": [round(float(v), 6) for v in graph[0][entry_node]],
+             "n_routes": len(routes),
+             "routes": routes},
+            ensure_ascii=False, indent=1,
+        ),
+        encoding="utf-8",
+    )
     print(f"[route] primary centerline: {len(route_pts)} pts, {route_len*1e3:.0f}mm")
+    print(f"[routes] {len(routes)} branch routes from entry node {entry_node} "
+          f"@ {np.round(graph[0][entry_node], 3)}")
 
     xml = write_tree_xml(args.name, len(all_bricks), route_pts[0], route_pts[-1])
     print(f"[done] phantom '{args.name}': {len(all_bricks)} hulls -> {xml}")

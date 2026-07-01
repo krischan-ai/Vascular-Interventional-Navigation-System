@@ -166,6 +166,7 @@ class NavigationEngine:
         advance_per_step: float = 0.01,
         wire_length: float = 0.12,
         wall_lean: float = 0.0025,
+        route_target: str | None = None,
     ):
         """Initialize the navigation engine.
 
@@ -260,10 +261,18 @@ class NavigationEngine:
         self._path_cumlen: np.ndarray | None = None
         self._path_total_len: float = 0.0
         self._path_kdtree = None
+        # Multi-branch phantoms (e.g. aorta_tree) ship routes.json: one centered
+        # route from the vascular-access entry to each leaf endpoint. When a
+        # route_target is given (or later chosen via select_route), that branch is
+        # the planned path; otherwise fall back to the shipped primary centerline.
+        self._routes: dict | None = self._load_phantom_routes()
+        self._route_target = route_target
         if planned_path is not None:
             self.set_planned_path(planned_path)
         else:
-            default_path = self._default_centerline_points()
+            default_path = self._route_waypoints(route_target)
+            if default_path is None:
+                default_path = self._default_centerline_points()
             if default_path is not None:
                 self.set_planned_path(default_path)
 
@@ -314,6 +323,75 @@ class NavigationEngine:
             return json.loads(graph_path.read_text(encoding="utf-8"))
         except Exception:
             return None
+
+    def _load_phantom_routes(self) -> dict | None:
+        """Load a built-in phantom's per-endpoint branch routes (routes.json).
+
+        Multi-branch phantoms (e.g. aorta_tree) ship a routes.json mapping each
+        leaf endpoint id to a dense, centered, smoothed route from the vascular
+        entry. Returns None when absent (single-route phantoms use centerline.json).
+        """
+        if self.assets_dir is not None:
+            return None
+        routes_path = (
+            _SRC_DIR
+            / "cathsim/dm/components/phantom_assets/meshes"
+            / self.phantom
+            / "routes.json"
+        )
+        if not routes_path.is_file():
+            return None
+        try:
+            return json.loads(routes_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    def _route_waypoints(self, target: str | None) -> list[list[float]] | None:
+        """Waypoints of the branch route named ``target`` from routes.json.
+
+        ``target`` is an endpoint id (e.g. ``endpoint_24``). Returns None when no
+        routes are loaded or the id is unknown.
+        """
+        if not self._routes or not target:
+            return None
+        route = self._routes.get("routes", {}).get(target)
+        if not route:
+            return None
+        waypoints = route.get("waypoints")
+        if isinstance(waypoints, list) and len(waypoints) >= 2:
+            return waypoints
+        return None
+
+    @property
+    def available_routes(self) -> dict[str, list[float]]:
+        """Selectable branch targets as ``{endpoint_id: [x, y, z] target}`` (m).
+
+        Empty for phantoms that do not ship routes.json. Lets a client present the
+        reachable branch tips and pick one via ``select_route``.
+        """
+        if not self._routes:
+            return {}
+        return {
+            rid: list(r.get("target", []))
+            for rid, r in self._routes.get("routes", {}).items()
+        }
+
+    def select_route(self, target: str) -> bool:
+        """Switch the planned path to branch route ``target`` and reset progress.
+
+        Returns True when the route exists and was applied. Guided insertion depth
+        is reset so the guidewire re-runs from the entry along the new branch.
+        """
+        waypoints = self._route_waypoints(target)
+        if waypoints is None:
+            return False
+        self.set_planned_path(waypoints)
+        self._route_target = target
+        self._s = 0.0
+        self._episode_length = 0
+        self._previous_tip_pos = None
+        self._tip_history.clear()
+        return True
 
     def set_planned_path(self, planned_path: Sequence[Sequence[float]] | None) -> None:
         """Set or clear the planned path used for progress/deviation tracking.

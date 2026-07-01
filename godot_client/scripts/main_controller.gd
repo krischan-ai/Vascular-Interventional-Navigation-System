@@ -94,6 +94,10 @@ var _vessel_mat_interior: StandardMaterial3D  # opaque inner wall (endoscope)
 var _env: Environment  # world environment; endoscope toggles its depth fog
 var _vessel: Node3D  # current vessel scene root (freed/rebuilt on model switch)
 var _model_index: int = 0  # index into MODELS of the active phantom
+# Multi-branch navigation: ordered target endpoint ids the backend offers for the
+# active phantom (aorta_tree), cycled with the B key. Empty for single-route models.
+var _branch_targets: Array = []
+var _branch_index: int = 0
 # Auto-switch to the close-up follow view once the first tip pose streams in, so
 # the guidewire is visible immediately instead of a dot in the overview.
 var _auto_followed: bool = false
@@ -340,6 +344,7 @@ func _setup_network_and_input() -> void:
 	_ws.disconnected.connect(_on_disconnected)
 	_ws.error_received.connect(_on_server_error)
 	_ws.session_started.connect(_on_session_started)
+	_ws.routes_received.connect(_on_routes)
 	_ws.batch_received.connect(_on_batch)
 	_ws.state_received.connect(_on_state)
 	_input.control.connect(_ws.send_control)
@@ -347,6 +352,7 @@ func _setup_network_and_input() -> void:
 	_input.reset_requested.connect(_ws.send_reset)
 	_input.view_cycle.connect(_cycle_camera_mode)
 	_input.model_cycle.connect(_cycle_model)
+	_input.branch_cycle.connect(_cycle_branch)
 
 
 func _on_connected() -> void:
@@ -378,6 +384,33 @@ func _on_session_started(sid: String, state: Dictionary) -> void:
 	_update_debug()
 	if not state.is_empty():
 		_on_state(state)
+
+
+# Capture the selectable branch targets for the active phantom (aorta_tree ships
+# many; single-route models send an empty dict). Sorted for a stable B-key order.
+func _on_routes(routes: Dictionary) -> void:
+	_branch_targets = routes.keys()
+	_branch_targets.sort()
+	_branch_index = 0
+	if _branch_targets.is_empty():
+		return
+	_hud.set_model("%s  ·  分支 B 切换 (%d)" % [
+		str(MODELS[_model_index].name), _branch_targets.size()])
+	print("[Main] %d branch targets available (press B to cycle)" % _branch_targets.size())
+
+
+# Cycle to the next target branch (B key) and ask the backend to re-route there.
+func _cycle_branch() -> void:
+	if _branch_targets.size() < 2:
+		return
+	_branch_index = (_branch_index + 1) % _branch_targets.size()
+	var target := str(_branch_targets[_branch_index])
+	_ws.send_select_route(target)
+	_auto_followed = false  # re-drop into follow view on the new branch's first pose
+	_hud.set_model("%s  ·  分支 %d/%d %s" % [
+		str(MODELS[_model_index].name), _branch_index + 1,
+		_branch_targets.size(), target])
+	print("[Main] select branch -> %s" % target)
 
 
 func _on_batch(batch: Dictionary) -> void:

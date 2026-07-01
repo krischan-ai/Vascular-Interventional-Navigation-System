@@ -59,6 +59,7 @@ class MessageType(str, Enum):
     SESSION_START = "session_start"
     SESSION_STOP = "session_stop"
     PATH_REQUEST = "path_request"
+    SELECT_ROUTE = "select_route"
     RESET = "reset"
     PONG = "pong"
 
@@ -109,6 +110,15 @@ class SessionStartData(BaseModel):
     # path so it reliably reaches the target on full-length VPP vessels that the
     # physical guidewire cannot traverse. Auto-enabled for VPP routes below.
     guided: bool = False
+    # Initial branch route id (e.g. "endpoint_24") for multi-branch phantoms that
+    # ship routes.json (aorta_tree). None -> the shipped primary centerline.
+    route_target: str | None = None
+
+
+class SelectRouteData(BaseModel):
+    """Runtime branch-target switch for a multi-branch phantom session."""
+
+    target: str
 
 
 class ResetData(BaseModel):
@@ -287,6 +297,9 @@ class WebSocketHandler:
         elif msg_type == MessageType.PATH_REQUEST:
             await self._handle_path_request(conn_state, message.data)
 
+        elif msg_type == MessageType.SELECT_ROUTE:
+            await self._handle_select_route(conn_state, message.data)
+
         elif msg_type == MessageType.RESET:
             await self._handle_reset(conn_state, message.data)
 
@@ -339,10 +352,14 @@ class WebSocketHandler:
                 n_substeps=params.n_substeps,
                 planned_path=planned_path,
                 guided=guided,
+                route_target=params.route_target,
             )
             conn_state.session_id = session_id
             conn_state.batch_mode = params.batch_mode
 
+            # Multi-branch phantoms expose their selectable branch tips so the
+            # client can offer targets and switch via a select_route message.
+            engine = self._session_manager.get_session(session_id)
             await self._send_message(
                 conn_state,
                 MessageType.SESSION_STARTED,
@@ -351,6 +368,7 @@ class WebSocketHandler:
                     "phantom": params.phantom,
                     "target": params.target,
                     "state": self._state_to_dict(state),
+                    "routes": engine.available_routes,
                 },
             )
 
@@ -503,6 +521,56 @@ class WebSocketHandler:
             MessageType.PATH_RESPONSE,
             session_id=conn_state.session_id,
             data=result.as_dict(),
+        )
+
+    async def _handle_select_route(
+        self, conn_state: ConnectionState, data: dict
+    ) -> None:
+        """Switch the active session to a different branch route and re-arm it.
+
+        For multi-branch phantoms (aorta_tree): the client picks a target endpoint
+        id; the engine swaps its planned path to that branch route and resets, so
+        the guidewire re-runs from the entry toward the chosen branch. The new path
+        is re-sent (path_sent cleared) so the client redraws it.
+        """
+        if not conn_state.session_id:
+            await self._send_error(conn_state, "NO_SESSION", "No active session")
+            return
+        try:
+            req = SelectRouteData(**data)
+        except ValidationError as e:
+            await self._send_error(conn_state, "INVALID_PARAMS", str(e))
+            return
+
+        try:
+            engine = self._session_manager.get_session(conn_state.session_id)
+        except KeyError:
+            conn_state.session_id = None
+            await self._send_error(conn_state, "SESSION_EXPIRED", "Session no longer exists")
+            return
+
+        def _apply() -> NavigationState:
+            if not engine.select_route(req.target):
+                raise ValueError(f"unknown route target: {req.target}")
+            return engine.reset()
+
+        try:
+            state = await self._run_blocking(_apply)
+        except ValueError as e:
+            await self._send_error(conn_state, "ROUTE_NOT_FOUND", str(e))
+            return
+
+        conn_state.path_sent = False  # re-send the new branch path to the client
+        if conn_state.batch_mode:
+            payload = self._state_to_batch(state, engine, include_path=True)
+            conn_state.path_sent = True
+            msg_type = MessageType.STATE_BATCH
+        else:
+            payload = self._state_to_dict(state)
+            msg_type = MessageType.STATE_UPDATE
+
+        await self._send_message(
+            conn_state, msg_type, session_id=conn_state.session_id, data=payload
         )
 
     async def _handle_reset(
