@@ -30,11 +30,6 @@ signal error_received(error: Dictionary)        ## error payload
 # reliably reaches the target on full-length VPP vessels. Only takes effect when
 # a path is planned (low_tort sessions stay physics-driven regardless).
 @export var guided: bool = true
-# Physical-mode placement for sealed-lumen phantoms (e.g. aorta_trunk): pre-thread
-# the wire along the centerline at reset; insertion_max widens the slider range so
-# a long body chain can span the vessel. insertion_max <= 0 omits the override.
-@export var prethread: bool = false
-@export var insertion_max: float = 0.0
 # Interactive performance profile: a lighter guidewire and fewer physics
 # substeps cut per-step cost ~10-15x for responsive control (full fidelity is
 # n_bodies=80, n_substeps=3).
@@ -42,6 +37,7 @@ signal error_received(error: Dictionary)        ## error payload
 @export var n_substeps: int = 2
 
 @export var session_retry_interval: float = 3.0  ## resend session_start until acknowledged
+@export var ack_timeout: float = 2.0  ## clear in-flight control if no response arrives
 
 var _socket := WebSocketPeer.new()
 var _was_open := false
@@ -50,9 +46,10 @@ var _session_accum := 0.0    ## time since last session_start attempt
 var _session_attempts := 0
 var _seen_types := {}        ## debug: first-occurrence logging
 var _control_sent := false   ## debug: log the first control we send
-# The server's actual mode decision (it force-guides phantoms the physical wire
-# cannot traverse), surfaced in session_started so the HUD can label it honestly.
-var server_guided := false
+# Lock-step control: keep at most one control command in flight so the client
+# paces itself to the backend's step throughput instead of flooding it.
+var _awaiting := false
+var _awaiting_since := 0.0
 
 
 func _ready() -> void:
@@ -71,6 +68,11 @@ func _ready() -> void:
 
 
 func _process(delta: float) -> void:
+	# Safety: if a control response never arrives, release the lock so input is
+	# not stuck blocked forever.
+	if _awaiting and (Time.get_ticks_msec() / 1000.0 - _awaiting_since) > ack_timeout:
+		_awaiting = false
+
 	_socket.poll()
 	var state := _socket.get_ready_state()
 
@@ -108,20 +110,14 @@ func _build_session_start() -> Dictionary:
 		"n_bodies": n_bodies,
 		"n_substeps": n_substeps,
 		"case_id": case_id,
-		# Always sent: the server decides physics vs guided per phantom (it still
-		# force-guides phantoms that cannot be traversed physically). prethread is
-		# honoured by sealed-lumen phantoms in physics mode.
-		"guided": guided,
-		"prethread": prethread,
 	}
-	if insertion_max > 0.0:
-		data["insertion_max"] = insertion_max
 	# Request server-side path planning + entry alignment only when a VPP route
 	# is configured; low_tort sessions omit these and spawn near the origin.
 	if start_position.size() == 3 and end_position.size() == 3:
 		data["start_position"] = start_position
 		data["end_position"] = end_position
 		data["smooth"] = smooth
+		data["guided"] = guided
 	return data
 
 
@@ -143,7 +139,6 @@ func _handle_packet(packet: String) -> void:
 			_send("pong", {})
 		"session_started":
 			session_id = str(msg.get("session_id", ""))
-			server_guided = bool(data.get("guided", false))
 			session_started.emit(session_id, data.get("state", {}))
 		"state_update":
 			# Drop frames that arrive while no session is active: during a model
@@ -153,10 +148,12 @@ func _handle_packet(packet: String) -> void:
 			# outside the newly loaded vessel.
 			if session_id == "":
 				return
+			_awaiting = false
 			state_received.emit(data)
 		"state_batch":
 			if session_id == "":
 				return
+			_awaiting = false
 			batch_received.emit(data)
 		"path_response":
 			path_received.emit(data)
@@ -179,13 +176,16 @@ func send_control(delta_push: float, delta_rotate: float) -> void:
 	# session_start result).
 	if not _was_open or session_id == "":
 		return
-	# No lock-step: the backend's physics worker reads the latest input and steps
-	# autonomously, so we send the current input every tick (the input handler
-	# throttles to ~20Hz). This cannot flood the backend -- control just overwrites
-	# the latest-input buffer; it does not enqueue a step.
+	# Lock-step: skip if a control is still awaiting its state response, so we
+	# never flood the backend faster than it can step (which causes latency and
+	# heartbeat starvation).
+	if _awaiting:
+		return
 	if not _control_sent:
 		_control_sent = true
 		print("[WS] first control sent (push=%.2f rot=%.2f)" % [delta_push, delta_rotate])
+	_awaiting = true
+	_awaiting_since = Time.get_ticks_msec() / 1000.0
 	_send("control", {
 		"delta_push": clampf(delta_push, -1.0, 1.0),
 		"delta_rotate": clampf(delta_rotate, -1.0, 1.0),
@@ -210,11 +210,12 @@ func restart_session(new_phantom: String, new_target: String, new_case_id: Strin
 	case_id = new_case_id
 	start_position = new_start
 	end_position = new_end
-	# Reset handshake state so _process resends session_start.
+	# Reset handshake + lock-step state so _process resends session_start.
 	session_id = ""
 	_session_attempts = 0
 	_session_accum = 0.0
 	_control_sent = false
+	_awaiting = false
 
 
 func send_path_request(start_position: Array, end_position: Array,

@@ -38,25 +38,15 @@ class AutopilotConfig:
     min_push: float = 0.05              # floor so we keep gently probing
     align_full_deg: float = 25.0        # <= this heading error -> full push
     align_zero_deg: float = 110.0       # >= this -> push at min_push only
-    # Steering. Rotation spins the J-tip bend azimuth, which in a *wide* lumen
-    # swings the free tip through a large arc -- so steering must be gentle and
-    # must NOT fire when the tip is already aimed, or it whips a placed wire off
-    # the centerline (measured: aggressive rotate drove heading 7deg -> 93deg in
-    # ~4 steps and stalled). Hence a deadband, low authority, sign hysteresis and
-    # a per-step slew limit.
-    align_deadband_deg: float = 18.0    # heading error below which NO rotation
-    rotate_gain: float = 0.8            # P-gain mapping heading error -> rotate
-    max_rotate: float = 0.4             # rotation authority ceiling
-    flip_margin_deg: float = 6.0        # hill-climb flips sign only past this rise
-    rotate_slew: float = 0.25           # max change in rotate command per step
+    rotate_gain: float = 1.4            # P-gain mapping heading error -> rotate
+    max_rotate: float = 1.0
     force_soft: float = 1.5             # contact force where push starts easing
-    force_hard: float = 4.0            # contact force where push is fully cut
-    goal_tol_m: float = 0.012           # within this arc length of the end -> hold
+    force_hard: float = 6.0            # contact force where push is fully cut
     stall_window: int = 12              # steps of no progress -> declare stall
     stall_advance_m: float = 0.002      # min arc-length gain counted as progress
-    sweep_rotate: float = 0.35          # rotation magnitude during a stall sweep
+    sweep_rotate: float = 1.0           # rotation magnitude during a stall sweep
     sweep_push: float = 0.12            # gentle push kept during a sweep
-    retract_push: float = -0.12         # brief pull-back when deeply wedged
+    retract_push: float = -0.25         # brief pull-back when deeply wedged
     retract_after: int = 30             # stall steps before trying a retract
 
 
@@ -89,7 +79,6 @@ class PhysicsAutopilot:
         """Clear per-episode controller state."""
         self._prev_heading: float | None = None
         self._rotate_sign: float = 1.0
-        self._prev_rotate: float = 0.0
         self._best_arclen: float = 0.0
         self._stall_steps: int = 0
         self._sweep_phase: float = 0.0
@@ -124,17 +113,6 @@ class PhysicsAutopilot:
         d = d / nd if nd > 1e-9 else np.array([0.0, 0.0, 1.0])
 
         s_now, _ = self._arclen_at(tip)
-
-        # Near the goal, hold: stop pushing/steering once the tip reaches the end
-        # of the path. Without this the stall logic reads "can't advance past the
-        # end" as "wedged" and retracts a wire that is already at the target
-        # (measured: a pre-threaded wire at the goal got pulled most of the way
-        # back out). Holding lets physics settle the placed wire instead.
-        if self._total - s_now <= cfg.goal_tol_m:
-            self._stall_steps = 0
-            self._best_arclen = max(self._best_arclen, s_now)
-            return self._emit(0.0, 0.0)
-
         aim = self._point_at(s_now + cfg.lookahead_m)
         to_aim = aim - tip
         n_aim = float(np.linalg.norm(to_aim))
@@ -151,51 +129,21 @@ class PhysicsAutopilot:
             self._stall_steps += 1
 
         if self._stall_steps >= cfg.stall_window:
-            rotate = self._stall_rotate()
-            push = (
-                cfg.retract_push
-                if self._stall_steps >= cfg.stall_window + cfg.retract_after
-                else cfg.sweep_push
-            )
-            if self._stall_steps >= cfg.stall_window + cfg.retract_after:
-                self._stall_steps = cfg.stall_window  # retry the window after a retract
-            return self._emit(push, rotate)
+            return self._stall_action()
 
-        rotate = self._steer(heading)
+        # Steering: rotation spins the J-tip bend azimuth; we cannot observe that
+        # azimuth, so hill-climb -- keep rotating one way while heading error
+        # falls, flip when it rises.
+        if self._prev_heading is not None and heading > self._prev_heading + 1e-3:
+            self._rotate_sign = -self._rotate_sign
+        self._prev_heading = heading
+        rotate = self._rotate_sign * min(cfg.rotate_gain * heading, cfg.max_rotate)
 
         # Push gating on alignment, then attenuate on contact force.
         push = self._push_from_alignment(heading)
         push *= self._force_attenuation(contact_force)
         push = max(push, cfg.min_push)
 
-        return self._emit(push, rotate)
-
-    def _steer(self, heading: float) -> float:
-        """Gentle, deadbanded hill-climb steering toward the path tangent.
-
-        No rotation while the tip is already aimed (within the deadband) -- this
-        is what keeps a placed/pre-threaded wire from being whipped off the
-        centerline in a wide lumen. Outside the deadband, hill-climb the bend
-        azimuth with sign hysteresis (only flip on a real rise) and low gain.
-        """
-        cfg = self.config
-        if heading <= np.radians(cfg.align_deadband_deg):
-            self._prev_heading = heading
-            return 0.0
-        if (
-            self._prev_heading is not None
-            and heading > self._prev_heading + np.radians(cfg.flip_margin_deg)
-        ):
-            self._rotate_sign = -self._rotate_sign
-        self._prev_heading = heading
-        return self._rotate_sign * min(cfg.rotate_gain * heading, cfg.max_rotate)
-
-    def _emit(self, push: float, rotate: float) -> tuple[float, float]:
-        """Clip outputs and rate-limit the rotation command (anti-whip slew)."""
-        cfg = self.config
-        delta = float(np.clip(rotate - self._prev_rotate, -cfg.rotate_slew, cfg.rotate_slew))
-        rotate = self._prev_rotate + delta
-        self._prev_rotate = rotate
         return float(np.clip(push, -1.0, 1.0)), float(np.clip(rotate, -1.0, 1.0))
 
     def _push_from_alignment(self, heading: float) -> float:
@@ -219,15 +167,17 @@ class PhysicsAutopilot:
             return 0.0
         return 1.0 - (f - cfg.force_soft) / (cfg.force_hard - cfg.force_soft)
 
-    def _stall_rotate(self) -> float:
-        """Wedged: slow rotation sweep so the J-tip cycles through azimuths.
-
-        Gentle (low ``sweep_rotate``) and slew-limited via :meth:`_emit` so the
-        search for an opening does not itself whip the wire out of the lumen.
-        """
+    def _stall_action(self) -> tuple[float, float]:
+        """Wedged: sweep rotation to find an opening, retract if deeply stuck."""
         cfg = self.config
+        # Continuous rotation sweep so the J-tip cycles through azimuths.
         self._sweep_phase += 1.0
-        return cfg.sweep_rotate * (1.0 if (int(self._sweep_phase) // 8) % 2 == 0 else -1.0)
+        rotate = cfg.sweep_rotate * (1.0 if (int(self._sweep_phase) // 8) % 2 == 0 else -1.0)
+        if self._stall_steps >= cfg.stall_window + cfg.retract_after:
+            # Reset the stall clock after a retract attempt so we try again.
+            self._stall_steps = cfg.stall_window
+            return float(cfg.retract_push), float(rotate)
+        return float(cfg.sweep_push), float(rotate)
 
     @property
     def deepest_arclen(self) -> float:

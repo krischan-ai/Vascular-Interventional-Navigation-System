@@ -78,7 +78,7 @@ def main() -> int:
     t0 = time.perf_counter()
     state = engine.reset()
     t_reset = time.perf_counter() - t0
-    path_len = engine._path.total_len if engine._path is not None else 0.0
+    path_len = engine._path_total_len
     print(f"[reset] ok in {t_reset:.2f}s | planned_path_len={path_len:.3f}m")
     print(
         f"[reset] tip={_fmt(state.tip_position)} target={_fmt(state.target_position)} "

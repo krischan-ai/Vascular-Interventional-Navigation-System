@@ -82,9 +82,6 @@ class SessionManager:
         n_bodies: int = 80,
         n_substeps: int | None = None,
         guided: bool = False,
-        prethread: bool = False,
-        insertion_max: float | None = None,
-        stiffness_scale: float = 1.0,
     ) -> tuple[str, NavigationState]:
         """Create a new navigation session.
 
@@ -113,7 +110,7 @@ class SessionManager:
 
             session_id = str(uuid.uuid4())
 
-            engine_kwargs = dict(
+            engine = NavigationEngine(
                 phantom=phantom,
                 target=target,
                 use_pixels=use_pixels,
@@ -122,15 +119,7 @@ class SessionManager:
                 n_bodies=n_bodies,
                 n_substeps=n_substeps,
                 guided=guided,
-                prethread=prethread,
-                stiffness_scale=stiffness_scale,
             )
-            # Only override insertion_max when the caller specifies it, so the
-            # engine default still applies for phantoms that don't need a longer
-            # slider range.
-            if insertion_max is not None:
-                engine_kwargs["insertion_max"] = insertion_max
-            engine = NavigationEngine(**engine_kwargs)
 
             initial_state = engine.reset()
 

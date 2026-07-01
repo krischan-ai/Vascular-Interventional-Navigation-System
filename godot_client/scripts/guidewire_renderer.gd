@@ -45,26 +45,6 @@ var _wire_material: StandardMaterial3D
 # in avoids a stray sphere appearing outside the vessel during a switch.
 var _has_data: bool = false
 
-# --- Frame interpolation (Phase B real-time link) -------------------------------
-# The backend streams the latest physics frame at ~25Hz, but physics itself is
-# low frequency (~3Hz). To render at a smooth 60fps we interpolate body positions
-# between two *distinct* physics frames (identified by the batch ``seq``): on a
-# new seq we snapshot the currently displayed pose as the source and lerp toward
-# the new target over the measured inter-frame interval. Duplicate-seq frames are
-# ignored so the wire keeps gliding instead of stalling between physics steps.
-var _source_pts := PackedVector3Array()  # displayed pose when the target arrived
-var _target_pts := PackedVector3Array()  # latest distinct physics frame
-var _display_pts := PackedVector3Array() # currently displayed (interpolated)
-var _source_tip := Vector3.ZERO
-var _target_tip := Vector3.ZERO
-var _display_tip := Vector3.ZERO
-var _last_seq: int = -999          # last applied physics frame number
-var _lerp_t: float = 0.0           # seconds since the current target arrived
-var _lerp_dur: float = 0.2         # estimated interval between physics frames (s)
-var _last_frame_time: float = 0.0  # wall time the last distinct frame arrived
-const _LERP_DUR_MIN := 0.05
-const _LERP_DUR_MAX := 1.0
-
 
 func _ready() -> void:
 	wire_radius = wire_radius_overview
@@ -102,76 +82,17 @@ func _ready() -> void:
 
 
 func update_from_batch(batch: Dictionary) -> void:
-	# Parse the new frame's tip + body centers.
 	var tip_data: Dictionary = batch.get("tip", {})
-	var new_tip := _target_tip
 	if tip_data.has("position"):
-		new_tip = _to_vec3(tip_data["position"])
+		_tip.position = _to_vec3(tip_data["position"])
+		_mark_data()
 
 	var bodies: Array = batch.get("bodies", [])
-	var new_pts := PackedVector3Array()
+	var points := PackedVector3Array()
 	for body in bodies:
 		if typeof(body) == TYPE_DICTIONARY and body.has("pos"):
-			new_pts.append(_to_vec3(body["pos"]))
-
-	var seq: int = int(batch.get("seq", -1))
-	# Duplicate physics frame (sender re-pushed the same seq): ignore so the
-	# in-flight interpolation continues smoothly instead of resetting.
-	if seq != -1 and seq == _last_seq:
-		return
-
-	# A new distinct frame: re-estimate the physics interval from arrival timing
-	# so the lerp duration tracks the real (variable) physics rate.
-	var now := Time.get_ticks_msec() / 1000.0
-	if _last_seq != -999:
-		var dt := now - _last_frame_time
-		if dt > 0.0:
-			_lerp_dur = clampf(dt, _LERP_DUR_MIN, _LERP_DUR_MAX)
-	_last_frame_time = now
-	_last_seq = seq
-
-	# Source = currently displayed pose (so motion is continuous), unless the body
-	# count changed (kinematic wire grows) or there is no seq -- then snap.
-	var can_lerp := seq != -1 and _display_pts.size() == new_pts.size() and new_pts.size() > 0
-	if can_lerp:
-		_source_pts = _display_pts.duplicate()
-		_source_tip = _display_tip
-	else:
-		_source_pts = new_pts.duplicate()
-		_source_tip = new_tip
-		_display_pts = new_pts.duplicate()
-		_display_tip = new_tip
-	_target_pts = new_pts
-	_target_tip = new_tip
-	_lerp_t = 0.0
-
-	if new_pts.size() > 0:
-		_mark_data()
-	elif tip_data.has("position"):
-		# No body data yet (e.g. pre-init frame): at least place the tip sphere.
-		_tip.position = new_tip
-		_mark_data()
-
-
-func _process(delta: float) -> void:
-	if not _has_data or _target_pts.size() < 2:
-		return
-
-	_lerp_t += delta
-	var alpha := 1.0
-	if _lerp_dur > 0.0:
-		alpha = clampf(_lerp_t / _lerp_dur, 0.0, 1.0)
-
-	if _source_pts.size() == _target_pts.size():
-		_display_pts.resize(_target_pts.size())
-		for i in _target_pts.size():
-			_display_pts[i] = _source_pts[i].lerp(_target_pts[i], alpha)
-	else:
-		_display_pts = _target_pts.duplicate()
-	_display_tip = _source_tip.lerp(_target_tip, alpha)
-
-	_tip.position = _display_tip
-	_build_tube(_display_pts, wire_radius)
+			points.append(_to_vec3(body["pos"]))
+	_build_tube(points, wire_radius)
 
 
 func update_from_state(state: Dictionary) -> void:

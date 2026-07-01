@@ -18,15 +18,6 @@ extends Node3D
 ## LPS millimeters; leave empty for non-VPP (low_tort / segment_part) sessions.
 @export var start_position: Array = []
 @export var end_position: Array = []
-# Per-model navigation config, pushed to the WebSocket client on launch / switch.
-# guided=false runs real MuJoCo physics (the server still force-guides phantoms
-# that cannot be traversed physically, e.g. segment_part / VPP). prethread spawns
-# the wire pre-bent along the centerline (sealed-lumen phantoms like aorta_trunk).
-var guided: bool = false
-var n_bodies: int = 40
-var n_substeps: int = 2  # physics substeps per control step; lower = faster
-var prethread: bool = false
-var insertion_max: float = 0.0  # 0 = use server default
 
 # Switchable phantom models, cycled at runtime with the M key. The exported
 # phantom above selects which entry is active on launch (matched by phantom
@@ -46,16 +37,12 @@ const MODELS: Array = [
 		"end": [],
 	},
 	{
-		# Newton demo target: with CATHSIM_PHYSICS_ENGINE=newton_demo on the backend,
-		# this runs the opt-in Newton short-guidewire physical display. Without that
-		# backend flag, the server may still force-guide segment_part as before.
-		"name": "Newton最小物理演示 Segment-Part",
+		"name": "全身体膜 Segment-Part",
 		"phantom": "segment_part",
 		"target": "root",
 		"case_id": "case_001",
 		"start": [],
 		"end": [],
-		"guided": false,
 	},
 	{
 		"name": "局部血管空腔 VPP",
@@ -64,27 +51,6 @@ const MODELS: Array = [
 		"case_id": "case_001",
 		"start": [0.173, -268.24, 291.25],
 		"end": [-975.65, -217.22, 250.32],
-	},
-	{
-		# Sealed-lumen aortic trunk built from the radius-bearing aorta centerline
-		# (tools/build_tube_phantom.py). Runs REAL physics: guided=false, and the
-		# wire is pre-threaded along the B-spline centerline (prethread=true) with a
-		# long enough body chain (n_bodies) + slider range (insertion_max) to span
-		# the trunk, so it spawns inside the sealed lumen and the wall holds it.
-		# n_substeps=1 (vs the default 2) halves the per-step physics cost for a
-		# free ~1.5Hz -> ~3Hz with negligible fidelity loss (measured reach
-		# unchanged), since the sealed-lumen contacts stay stable at one substep.
-		"name": "主动脉本干 Aorta-Trunk",
-		"phantom": "aorta_trunk",
-		"target": "root",
-		"case_id": "case_001",
-		"start": [],
-		"end": [],
-		"guided": false,
-		"n_bodies": 130,
-		"n_substeps": 1,
-		"prethread": true,
-		"insertion_max": 0.5,
 	},
 ]
 
@@ -118,19 +84,11 @@ var _auto_followed: bool = false
 var _session_id: String = "none"
 var _msg_count: int = 0
 var _last_msg: String = "—"
-# Mode + physics-rate annotation (Phase B): the stream is visually smoothed by
-# client interpolation, but physics is still low frequency. Show the honest mode
-# (物理/演示) and measured physics frame rate so the operator is not misled into
-# thinking the smooth 60fps render is high-fidelity physics.
-var _mode_text: String = "—"
-var _phys_hz: float = 0.0
-var _last_phys_seq: int = -1
-var _last_phys_time: float = 0.0
 
 
 func _update_debug() -> void:
-	_hud.set_debug("session: %s\nmode: %s  phys: %.1fHz\nstate msgs: %d\nlast: %s" % [
-		_session_id, _mode_text, _phys_hz, _msg_count, _last_msg,
+	_hud.set_debug("session: %s\nstate msgs: %d\nlast: %s" % [
+		_session_id, _msg_count, _last_msg,
 	])
 
 
@@ -162,24 +120,6 @@ func _apply_model_config(cfg: Dictionary) -> void:
 	case_id = str(cfg.case_id)
 	start_position = (cfg.start as Array).duplicate()
 	end_position = (cfg.end as Array).duplicate()
-	# Per-model physics config (defaults keep existing models unchanged).
-	guided = bool(cfg.get("guided", false))
-	n_bodies = int(cfg.get("n_bodies", 40))
-	n_substeps = int(cfg.get("n_substeps", 2))
-	prethread = bool(cfg.get("prethread", false))
-	insertion_max = float(cfg.get("insertion_max", 0.0))
-
-
-# Push the active model's navigation config onto the WebSocket client so the next
-# session_start carries it. Called on launch and on every model switch.
-func _push_nav_config() -> void:
-	if _ws == null:
-		return
-	_ws.guided = guided
-	_ws.n_bodies = n_bodies
-	_ws.n_substeps = n_substeps
-	_ws.prethread = prethread
-	_ws.insertion_max = insertion_max
 
 
 # Build the vessel mesh plus the renderers that share its coordinate frame
@@ -190,10 +130,11 @@ func _load_model_scene() -> void:
 	_teardown_model_scene()
 	var vessel := _setup_vessel()
 	_vessel = vessel
-	# Streamed guidewire/path positions and the exported GLB are already in the
-	# same MuJoCo meter frame. Keep renderers as siblings of the vessel so Godot's
-	# imported scene-node transforms cannot be applied a second time to the path.
-	var frame: Node = self
+	# Parent the guidewire and planned-path renderers under the vessel scene root
+	# so all three share the same coordinate space (the glTF/trimesh axis-
+	# conversion transform applies equally to the mesh and the streamed
+	# guidewire/path positions). Falls back to this node when the GLB is missing.
+	var frame: Node = vessel if vessel != null else self
 	_setup_guidewire(frame)
 	_setup_path(frame)
 	_setup_entry_marker(frame)
@@ -347,13 +288,14 @@ func _setup_path(parent: Node) -> void:
 
 
 func _setup_entry_marker(parent: Node) -> void:
-	# Same world frame as the guidewire/path and exported vessel GLB.
+	# Parented under the vessel frame (same as the guidewire/path) so the entry
+	# and target marker coordinates need no conversion.
 	_entry_marker = preload("res://scripts/entry_marker.gd").new()
 	parent.add_child(_entry_marker)
 
 
 func _setup_rig(parent: Node) -> void:
-	# Same world frame as the streamed tip coordinates.
+	# Parent under the vessel frame so tip coordinates need no conversion.
 	_rig = preload("res://scripts/camera_rig.gd").new()
 	parent.add_child(_rig)
 
@@ -372,7 +314,6 @@ func _setup_network_and_input() -> void:
 	_ws.case_id = case_id
 	_ws.start_position = start_position
 	_ws.end_position = end_position
-	_push_nav_config()
 	add_child(_ws)
 	_input = preload("res://scripts/input_handler.gd").new()
 	add_child(_input)
@@ -415,7 +356,6 @@ func _on_server_error(err: Dictionary) -> void:
 func _on_session_started(sid: String, state: Dictionary) -> void:
 	print("[Main] session started: %s" % sid)
 	_session_id = sid.substr(0, 8) if sid.length() >= 8 else sid
-	_mode_text = "演示 Demo (运动学)" if _ws.server_guided else "物理 Physics"
 	_last_msg = "session_started"
 	_update_debug()
 	if not state.is_empty():
@@ -427,16 +367,6 @@ func _on_batch(batch: Dictionary) -> void:
 	_path.update_from_batch(batch)
 	_entry_marker.update_from_batch(batch)
 	_feed_rig(batch.get("tip", {}))
-	# Measure the physics frame rate from the stream's seq (distinct physics
-	# frames), smoothed, for the HUD's honest "phys NHz" readout.
-	var seq := int(batch.get("seq", -1))
-	if seq != -1 and seq != _last_phys_seq:
-		var now := Time.get_ticks_msec() / 1000.0
-		if _last_phys_seq != -1 and now > _last_phys_time:
-			var inst := 1.0 / (now - _last_phys_time)
-			_phys_hz = inst if _phys_hz <= 0.0 else lerpf(_phys_hz, inst, 0.3)
-		_last_phys_time = now
-		_last_phys_seq = seq
 	var safety: Dictionary = batch.get("safety", {})
 	var episode: Dictionary = batch.get("episode", {})
 	_hud.update_safety(str(safety.get("status", "STANDBY")))
@@ -487,15 +417,10 @@ func _cycle_model() -> void:
 	_apply_model_config(cfg)
 	print("[Main] switching model -> %s (phantom=%s)" % [cfg.name, phantom])
 	_load_model_scene()
-	_push_nav_config()
 	_ws.restart_session(phantom, target, case_id, start_position, end_position)
 	_session_id = "none"
 	_msg_count = 0
 	_last_msg = "model switch"
-	# Reset the physics-rate / mode readout; the new session_started repopulates it.
-	_mode_text = "—"
-	_phys_hz = 0.0
-	_last_phys_seq = -1
 	_hud.set_model(str(cfg.name))
 	_hud.set_view_mode(CAM_MODE_NAMES.get(CamMode.OVERVIEW, "?"))
 	_hud.update_safety("STANDBY")

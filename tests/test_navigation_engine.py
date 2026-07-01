@@ -165,7 +165,7 @@ class TestNavigationEngineHelpers:
 
     def test_set_planned_path_clear(self):
         engine = self._engine(planned_path=[[0, 0, 0], [0, 0, 1]])
-        assert engine._path.total_len > 0
+        assert engine._path_total_len > 0
         engine.set_planned_path(None)
         assert engine._compute_path_progress([0.0, 0.0, 0.5]) == (0.0, 0.0)
 
