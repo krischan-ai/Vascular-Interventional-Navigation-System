@@ -33,6 +33,7 @@ var _mesh: ImmediateMesh
 var _mi: MeshInstance3D
 var _material: StandardMaterial3D
 var _drawn_count: int = -1
+var _drawn_signature: String = ""
 
 
 func _ready() -> void:
@@ -62,9 +63,13 @@ func update_from_batch(batch: Dictionary) -> void:
 	if waypoints.is_empty():
 		return
 	# Redraw only when the route changes to avoid rebuilding the mesh every frame.
-	if waypoints.size() == _drawn_count:
+	# A branch switch can produce the same waypoint count, so include endpoints.
+	var signature := _path_signature(waypoints)
+	if waypoints.size() == _drawn_count and signature == _drawn_signature:
 		return
 	_drawn_count = waypoints.size()
+	_drawn_signature = signature
+	print("[Path] redraw waypoints=%d signature=%s" % [_drawn_count, _drawn_signature])
 	_draw(waypoints)
 
 
@@ -74,6 +79,16 @@ func _draw(waypoints: Array) -> void:
 		if typeof(point) == TYPE_ARRAY and point.size() >= 3:
 			points.append(Vector3(float(point[0]), float(point[1]), float(point[2])))
 	_build_tube(points, path_radius)
+
+
+func _path_signature(waypoints: Array) -> String:
+	if waypoints.is_empty():
+		return ""
+	return "%d:%s:%s" % [
+		waypoints.size(),
+		str(waypoints[0]),
+		str(waypoints[waypoints.size() - 1]),
+	]
 
 
 func _build_tube(points: PackedVector3Array, radius: float) -> void:

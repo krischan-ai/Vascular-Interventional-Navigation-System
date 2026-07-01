@@ -24,6 +24,7 @@ extends Node3D
 @export var wire_sides: int = 8            ## tube cross-section segments
 @export var wire_color: Color = Color(0.85, 0.86, 0.9)
 @export var tip_color: Color = Color(1.0, 0.35, 0.2)
+@export var root_color: Color = Color(0.2, 0.75, 1.0)
 
 # Active radii (default to overview); the tube rebuilds every batch so wire_radius
 # takes effect next frame, while the tip sphere is resized immediately.
@@ -36,6 +37,7 @@ var tip_radius: float = 0.0018
 const GUIDEWIRE_RENDER_LAYER := 1 << 1  ## render layer 2
 
 var _tip: MeshInstance3D
+var _root: MeshInstance3D
 var _wire: MeshInstance3D
 var _wire_mesh: ImmediateMesh
 var _wire_material: StandardMaterial3D
@@ -62,6 +64,20 @@ func _ready() -> void:
 	_tip.material_override = tip_mat
 	_tip.layers = GUIDEWIRE_RENDER_LAYER
 	add_child(_tip)
+
+	_root = MeshInstance3D.new()
+	var root_sphere := SphereMesh.new()
+	root_sphere.radius = tip_radius * 0.8
+	root_sphere.height = tip_radius * 1.6
+	_root.mesh = root_sphere
+	var root_mat := StandardMaterial3D.new()
+	root_mat.albedo_color = root_color
+	root_mat.emission_enabled = true
+	root_mat.emission = root_color
+	root_mat.emission_energy_multiplier = 0.55
+	_root.material_override = root_mat
+	_root.layers = GUIDEWIRE_RENDER_LAYER
+	add_child(_root)
 
 	_wire_mesh = ImmediateMesh.new()
 	_wire = MeshInstance3D.new()
@@ -92,6 +108,8 @@ func update_from_batch(batch: Dictionary) -> void:
 	for body in bodies:
 		if typeof(body) == TYPE_DICTIONARY and body.has("pos"):
 			points.append(_to_vec3(body["pos"]))
+	if points.size() > 0:
+		_root.position = points[0]
 	_build_tube(points, wire_radius)
 
 
@@ -118,6 +136,10 @@ func set_close_up(close: bool) -> void:
 	if sphere:
 		sphere.radius = tip_radius
 		sphere.height = tip_radius * 2.0
+	var root_sphere := _root.mesh as SphereMesh
+	if root_sphere:
+		root_sphere.radius = tip_radius * 0.8
+		root_sphere.height = tip_radius * 1.6
 
 
 func _build_tube(points: PackedVector3Array, radius: float) -> void:

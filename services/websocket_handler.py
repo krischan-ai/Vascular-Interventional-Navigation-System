@@ -6,6 +6,7 @@ This module implements the WebSocket protocol defined in doc/03-API与通信协�
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import traceback
 from dataclasses import dataclass, field
@@ -23,6 +24,11 @@ from services.session_manager import SessionManager
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _DATA_ROOT = _PROJECT_ROOT / "data" / "vpp_assets"
+
+# Built-in sealed-lumen phantoms can run physical backends despite shipping a
+# centerline. Other centerline phantoms default to kinematic guidance unless an
+# explicit engine override (Newton demo) is active.
+_PHYSICS_CAPABLE_BUILTIN: frozenset[str] = frozenset({"aorta_trunk"})
 
 
 def _builtin_phantom_centerline(phantom: str) -> Path | None:
@@ -333,14 +339,23 @@ class WebSocketHandler:
             return
 
         # Full-length vessels the physical guidewire cannot traverse default to
-        # kinematic centerline-follow: VPP routes, and built-in phantoms that ship
-        # a centerline (e.g. segment_part). Guided mode spawns the wire at the
-        # entry and advances it along the path, so it actually reaches the target.
+        # kinematic centerline-follow. Sealed built-ins and explicit Newton demo
+        # runs must remain physical so the selected backend actually owns motion.
+        ships_centerline = _builtin_phantom_centerline(params.phantom) is not None
+        force_guided_builtin = (
+            ships_centerline and params.phantom not in _PHYSICS_CAPABLE_BUILTIN
+        )
         guided = (
             params.guided
             or (planned_path is not None and params.phantom.endswith("_vpp"))
-            or _builtin_phantom_centerline(params.phantom) is not None
+            or force_guided_builtin
         )
+        newton_demo = os.environ.get("CATHSIM_PHYSICS_ENGINE", "").lower() in {
+            "newton",
+            "newton_demo",
+        }
+        if newton_demo:
+            guided = False
 
         try:
             session_id, state = await self._run_blocking(
@@ -371,6 +386,14 @@ class WebSocketHandler:
                     "routes": engine.available_routes,
                 },
             )
+            if conn_state.batch_mode:
+                await self._send_message(
+                    conn_state,
+                    MessageType.STATE_BATCH,
+                    session_id=session_id,
+                    data=self._state_to_batch(state, engine, include_path=True),
+                )
+                conn_state.path_sent = True
 
         except Exception as e:  # noqa: BLE001 - report any init failure to the client
             traceback.print_exc()
@@ -645,6 +668,7 @@ class WebSocketHandler:
         empty.
         """
         return {
+            "engine": type(engine._engine).__name__ if getattr(engine, "_engine", None) is not None else "",
             "tip": {
                 "position": state.tip_position,
                 "direction": state.tip_direction,

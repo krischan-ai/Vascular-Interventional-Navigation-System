@@ -106,6 +106,7 @@ var _auto_followed: bool = false
 var _session_id: String = "none"
 var _msg_count: int = 0
 var _last_msg: String = "—"
+var _logged_first_batch: bool = false
 
 
 func _update_debug() -> void:
@@ -393,6 +394,7 @@ func _on_routes(routes: Dictionary) -> void:
 	_branch_targets.sort()
 	_branch_index = 0
 	if _branch_targets.is_empty():
+		_hud.set_model(str(MODELS[_model_index].name))
 		return
 	_hud.set_model("%s  ·  分支 B 切换 (%d)" % [
 		str(MODELS[_model_index].name), _branch_targets.size()])
@@ -414,10 +416,17 @@ func _cycle_branch() -> void:
 
 
 func _on_batch(batch: Dictionary) -> void:
+	if not _logged_first_batch:
+		_logged_first_batch = true
+		var path: Dictionary = batch.get("path", {})
+		print("[Main] first state_batch waypoints=%d target=%s" % [
+			(path.get("waypoints", []) as Array).size(),
+			str(batch.get("target", [])),
+		])
 	_guidewire.update_from_batch(batch)
 	_path.update_from_batch(batch)
 	_entry_marker.update_from_batch(batch)
-	_feed_rig(batch.get("tip", {}))
+	_feed_rig(_camera_pose_from_batch(batch))
 	var safety: Dictionary = batch.get("safety", {})
 	var episode: Dictionary = batch.get("episode", {})
 	_hud.update_safety(str(safety.get("status", "STANDBY")))
@@ -456,6 +465,28 @@ func _feed_rig(tip: Dictionary) -> void:
 		_set_camera_mode(CamMode.FOLLOW)
 
 
+func _camera_pose_from_batch(batch: Dictionary) -> Dictionary:
+	# Newton demo currently drives the proximal/root body; the distal red tip can
+	# lag or buckle. Follow the active root end for debugging while keeping other
+	# engines on the semantic tip pose.
+	if str(batch.get("engine", "")) == "NewtonEngine":
+		var bodies: Array = batch.get("bodies", [])
+		if bodies.size() >= 2:
+			var b0: Dictionary = bodies[0]
+			var b1: Dictionary = bodies[1]
+			if b0.has("pos") and b1.has("pos"):
+				var p0 := _to_vec3(b0["pos"])
+				var p1 := _to_vec3(b1["pos"])
+				var dir := p1 - p0
+				if dir.length() > 1e-6:
+					return {
+						"position": b0["pos"],
+						"direction": [dir.x, dir.y, dir.z],
+						"quaternion": b0.get("quat", []),
+					}
+	return batch.get("tip", {})
+
+
 func _cycle_camera_mode() -> void:
 	_set_camera_mode((_cam_mode + 1) % CamMode.size())
 
@@ -467,6 +498,9 @@ func _cycle_model() -> void:
 	var cfg: Dictionary = MODELS[_model_index]
 	_apply_model_config(cfg)
 	print("[Main] switching model -> %s (phantom=%s)" % [cfg.name, phantom])
+	_branch_targets = []
+	_branch_index = 0
+	_logged_first_batch = false
 	_load_model_scene()
 	_ws.restart_session(phantom, target, case_id, start_position, end_position)
 	_session_id = "none"

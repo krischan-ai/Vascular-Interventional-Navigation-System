@@ -36,6 +36,7 @@ def _parallel_frames(points: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.nda
 
 
 def _resample(points: np.ndarray, ds: float) -> np.ndarray:
+    points = _dedupe_consecutive(points)
     seg = np.linalg.norm(np.diff(points, axis=0), axis=1)
     cum = np.concatenate([[0.0], np.cumsum(seg)])
     samples = np.arange(0.0, cum[-1], ds)
@@ -51,7 +52,19 @@ def _resample(points: np.ndarray, ds: float) -> np.ndarray:
         else:
             t = (s - cum[idx - 1]) / max(cum[idx] - cum[idx - 1], 1e-12)
             out.append(points[idx - 1] + t * (points[idx] - points[idx - 1]))
-    return np.asarray(out, dtype=np.float64)
+    return _dedupe_consecutive(np.asarray(out, dtype=np.float64))
+
+
+def _dedupe_consecutive(points: np.ndarray, eps: float = 1e-9) -> np.ndarray:
+    """Drop consecutive duplicate points that break Newton cable frames."""
+    pts = np.asarray(points, dtype=np.float64)
+    if len(pts) <= 1:
+        return pts
+    keep = [pts[0]]
+    for point in pts[1:]:
+        if float(np.linalg.norm(point - keep[-1])) > eps:
+            keep.append(point)
+    return np.asarray(keep, dtype=np.float64)
 
 
 def _point_at_s(points: np.ndarray, s: float) -> np.ndarray:
@@ -68,7 +81,14 @@ def _point_at_s(points: np.ndarray, s: float) -> np.ndarray:
 
 
 def _sample_along(points: np.ndarray, length: float, seg_len: float) -> np.ndarray:
-    return np.asarray([_point_at_s(points, s) for s in np.arange(0.0, length + 0.5 * seg_len, seg_len)])
+    seg = np.linalg.norm(np.diff(points, axis=0), axis=1)
+    total = float(np.sum(seg))
+    length = float(np.clip(length, 0.0, total))
+    samples = np.arange(0.0, length + 0.5 * seg_len, seg_len)
+    if len(samples) == 0 or samples[-1] < length:
+        samples = np.append(samples, length)
+    samples = np.clip(samples, 0.0, length)
+    return _dedupe_consecutive(np.asarray([_point_at_s(points, s) for s in samples]))
 
 
 def _point_to_polyline_distance(point: np.ndarray, points: np.ndarray) -> float:
@@ -127,6 +147,20 @@ class NewtonEngine:
         self._control = None
         self._contacts = None
         self._rod_bodies: list[int] = []
+
+    def set_path(self, path: PlannedPath | None) -> None:
+        """Replace the planned path and force the Newton scene to be rebuilt.
+
+        Newton builds collision SDF and rod bodies from the centerline during
+        initialization. A route switch changes that geometry, so merely swapping
+        ``_path`` is not enough; the cached model/state must be discarded.
+        """
+        if path is None or path.total_len <= 0.0:
+            raise ValueError("Newton demo engine requires a planned path/centerline")
+        self.close()
+        self._path = path
+        self._centerline = _resample(self._path.points, 0.002)
+        self._insert_s = 0.0
 
     @property
     def is_initialized(self) -> bool:

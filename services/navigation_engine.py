@@ -418,8 +418,12 @@ class NavigationEngine:
             self._path = PlannedPath(planned_path)
 
         if getattr(self, "_engine", None) is not None:
-            # Both backends keep a `_path` reference; keep it in sync for re-plan.
-            self._engine._path = self._path
+            # Backends keep path-derived state; let engines that cache geometry
+            # rebuild themselves, otherwise keep the plain `_path` reference in sync.
+            if hasattr(self._engine, "set_path"):
+                self._engine.set_path(self._path)
+            else:
+                self._engine._path = self._path
 
     def _resolve_entry(self) -> tuple[np.ndarray | None, np.ndarray | None]:
         """Resolve the guidewire entry pose, deriving it from the planned path.
