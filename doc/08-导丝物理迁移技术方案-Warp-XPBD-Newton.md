@@ -320,6 +320,26 @@ D0–D3 证明了"单根连续体导丝能在真腔里 60Hz 跟手、不穿管"�
 
 物理轨道最自然的续接是 **D4 真实力驱动**——它直接偿还 graded soft-anchor 的运动学欠账，是 doc/08 判据（"手感"）之后"像真导丝"这一目标的核心。建议：先在 A6000 spike 里把 **D4（分段刚度 + 扭转转向 + sheath 约束的力驱动）** 与 **D5（autopilot 接回）** 一起验证（二者耦合：真实力驱动必须配主动转向才能推进），通过后再按 D3 的"上层零改"方式接入 `newton_engine.py`。
 
+### 9.5 ShapeIntent 控制层落地进度（doc/09 P0，更新 2026-07-02）
+
+D4/D5 已上线（真实力驱动 + autopilot，commit `c1e0651`）。其上按 [09-人机交互与强化学习架构-ShapeIntent.md](09-人机交互与强化学习架构-ShapeIntent.md) 把 D5 autopilot **泛化为统一控制抽象**（Human=RL 共用 `ShapeIntent → Controller → 纯物理`），本轮三步全部完成并在 A6000 冒烟跑通一次链路：
+
+| 步骤 | 做了什么 | 状态 |
+|---|---|---|
+| **Step 1 控制抽象** | `services/shape_intent.py`：`ShapeIntent`（`target_direction`/`target_waypoint`/`intensity`，**禁止段落位置场**——那是 D3 运动学回退）+ `ShapeIntentController`（薄封装 `PhysicsAutopilot`）；`PhysicsAutopilot.compute` 加 keyword-only `aim_override`/`desired_override`/`push_scale`，默认逐字节等于原循线行为 | ✅ 6 测试，含 `intent=None` **逐帧==原 autopilot** 回归 |
+| **Step 2 接进 live pipeline** | `NavigationEngine.set_shape_intent()` 懒建 controller（仅物理模式；guided/kinematic 返回 off）；`step()` 在 intent 激活时用 controller 解算 `push/rotate` **覆盖**手动值（物理引擎仍只吃 `push/rotate`，物理零改）；新 WS 消息 `shape_intent`（`ShapeIntentData` + `_handle_shape_intent`，回显 `{active, mode}`） | ✅ 5 wiring 测试；**services 层 87 测试全绿** |
+| **Step 3 Godot 点击导航** | 左键 → 取最近路线 waypoint（世界系比较，回传**后端坐标系原始点，零逆变换**）→ `shape_intent` engage；ESC / 任意手动键脱离；激活时 ~20Hz 打空拍步进 | ✅ 前端接线完成（Godot 编辑器实测待做） |
+
+**A6000 冒烟（跑通一次链路，PASS）**：服务器仓库（scp 同步，非 git）同步 4 个改动后端文件、force 驱动重启。live WS 链路：`session_start` → `shape_intent{active:true}` → 700 × `control(0,0)` 由 `ShapeIntentController` 驱动 → endpoint_9 **progress 0.429 → 0.989**（与 D5 endpoint_9 PASS 一致）→ waypoint 模式 ack → 脱离 ack。**链路端到端通，且忠实于 D5**。
+
+**三条诚实边界（后续须知）**：
+
+1. **对现有画面故意零改变**：手动驾驶逐帧不变（Step 1 回归保证）、物理零改（doc/09 §一 禁止把意图注入物理）。**唯一新增"可见"能力是点击导航**；不点击则与之前完全一致。
+2. **`COLLISION_STOP` 语义误报**：冒烟中安全状态多为 `COLLISION_STOP`，是既有 `wall_distance<0.5mm` 启发式在 force 模式**正常贴壁**时过敏，非穿壁（progress 仍达标），也非本次接线引入 → 归入 §9.3 P1"模式显式化"（安全阈值需按 guided/physics 模式分别标定）。
+3. **点击导航暂无强反馈**：无目标标记 / HUD 提示，导丝又走得慢，易误以为无反应 → 待补（与 §9.3 P1 训练闭环/HUD 一并做）。
+
+**未提交**：以上后端（3 改 + 1 新 + 2 测试）+ Godot（3 个 `.gd`）改动在 `feat/warp-xpbd-guidewire` 未提交；A6000 后端当前以同步的未提交文件运行。
+
 ---
 
 > 关联文档：[05-开发进度记录.md](05-开发进度记录.md)（§28 物理攻关、§29 抽象+实时、§30 Newton D2/D3 完成）、[07-Newton导丝物理仿真开发记录与规划.md](07-Newton导丝物理仿真开发记录与规划.md)（§6 阶段 A–E 规划、§9 D2/D3 完成记录）。

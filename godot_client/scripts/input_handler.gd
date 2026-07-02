@@ -21,6 +21,11 @@ signal model_cycle
 ## Emitted on each B keypress to cycle the navigation target branch
 ## (multi-branch phantoms like aorta_tree; ignored when only one route exists).
 signal branch_cycle
+## Emitted on left mouse click with the viewport screen position, for click-to-
+## navigate (project onto the route -> waypoint -> ShapeIntent autopilot).
+signal navigate_click(screen_pos: Vector2)
+## Emitted on ESC to disengage click autopilot and return to manual control.
+signal autopilot_off
 
 @export var send_interval: float = 0.05  ## seconds (~20 Hz)
 
@@ -37,6 +42,11 @@ func _input(event: InputEvent) -> void:
 			model_cycle.emit()
 		elif event.physical_keycode == KEY_B:
 			branch_cycle.emit()
+		elif event.physical_keycode == KEY_ESCAPE:
+			autopilot_off.emit()
+	elif event is InputEventMouseButton and event.pressed \
+			and event.button_index == MOUSE_BUTTON_LEFT:
+		navigate_click.emit(event.position)
 
 
 func _process(delta: float) -> void:

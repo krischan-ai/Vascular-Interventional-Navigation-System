@@ -67,6 +67,7 @@ class MessageType(str, Enum):
     PATH_REQUEST = "path_request"
     SELECT_ROUTE = "select_route"
     ENGINE_PARAMS = "engine_params"
+    SHAPE_INTENT = "shape_intent"
     RESET = "reset"
     PONG = "pong"
 
@@ -85,6 +86,21 @@ class ControlData(BaseModel):
 
     delta_push: float = Field(ge=-1.0, le=1.0)
     delta_rotate: float = Field(ge=-1.0, le=1.0)
+
+
+class ShapeIntentData(BaseModel):
+    """ShapeIntent (autopilot) command data (doc/09).
+
+    ``active=False`` disengages and returns manual control. With ``active=True``
+    and no target, the controller follows the planned centerline (plain
+    autopilot). A ``target_waypoint`` (e.g. a UI click projected onto the vessel)
+    or ``target_direction`` redirects the aim; ``intensity`` scales the push.
+    """
+
+    active: bool = True
+    target_waypoint: list[float] | None = Field(default=None, min_length=3, max_length=3)
+    target_direction: list[float] | None = Field(default=None, min_length=3, max_length=3)
+    intensity: float = Field(default=1.0, ge=0.0, le=1.0)
 
 
 class SessionStartData(BaseModel):
@@ -309,6 +325,9 @@ class WebSocketHandler:
 
         elif msg_type == MessageType.ENGINE_PARAMS:
             await self._handle_engine_params(conn_state, message.data)
+
+        elif msg_type == MessageType.SHAPE_INTENT:
+            await self._handle_shape_intent(conn_state, message.data)
 
         elif msg_type == MessageType.RESET:
             await self._handle_reset(conn_state, message.data)
@@ -631,6 +650,50 @@ class WebSocketHandler:
             MessageType.ENGINE_PARAMS,
             session_id=conn_state.session_id,
             data={"effective": effective or {}},
+        )
+
+    async def _handle_shape_intent(
+        self, conn_state: ConnectionState, data: dict
+    ) -> None:
+        """Engage/adjust ShapeIntent (autopilot) control (doc/09).
+
+        Physics stays pure force-driven; this only steers where the tip aims.
+        While active, the server's control steps derive push/rotate from the
+        intent, so the client can keep ticking (or stop sending manual control).
+        The resulting control state is echoed back for the client HUD.
+        """
+        if not conn_state.session_id:
+            await self._send_error(conn_state, "NO_SESSION", "No active session")
+            return
+        try:
+            req = ShapeIntentData(**data)
+        except ValidationError as e:
+            await self._send_error(conn_state, "INVALID_PARAMS", str(e))
+            return
+
+        try:
+            engine = self._session_manager.get_session(conn_state.session_id)
+        except KeyError:
+            conn_state.session_id = None
+            await self._send_error(conn_state, "SESSION_EXPIRED", "Session no longer exists")
+            return
+
+        intent = {
+            "target_waypoint": req.target_waypoint,
+            "target_direction": req.target_direction,
+            "intensity": req.intensity,
+        }
+        try:
+            result = await self._run_blocking(engine.set_shape_intent, intent, req.active)
+        except Exception as e:  # noqa: BLE001 - surface any control error to the client
+            await self._send_error(conn_state, "INTENT_ERROR", f"{type(e).__name__}: {e}")
+            return
+
+        await self._send_message(
+            conn_state,
+            MessageType.SHAPE_INTENT,
+            session_id=conn_state.session_id,
+            data=result,
         )
 
     async def _handle_reset(

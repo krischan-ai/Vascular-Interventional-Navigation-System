@@ -102,6 +102,14 @@ var _branch_index: int = 0
 # Auto-switch to the close-up follow view once the first tip pose streams in, so
 # the guidewire is visible immediately instead of a dot in the overview.
 var _auto_followed: bool = false
+# Click-to-navigate (doc/09 ShapeIntent). The planned route's waypoints in the
+# backend meter frame, captured from state_batch. A left click picks the nearest
+# route waypoint to the click ray and drives the tip there via the autopilot; ESC
+# or any manual key hands control back. Tick the backend at ~20 Hz while engaged.
+var _path_waypoints: Array = []
+var _autopilot_active: bool = false
+var _autopilot_accum: float = 0.0
+const _AUTOPILOT_TICK: float = 0.05
 
 # On-screen diagnostics.
 var _session_id: String = "none"
@@ -357,11 +365,16 @@ func _setup_network_and_input() -> void:
 	_ws.engine_params_received.connect(_deform.sync_effective)
 
 	_input.control.connect(_ws.send_control)
+	# Grabbing manual control (any W/S/A/D tick) cancels click autopilot.
+	_input.control.connect(_on_manual_control)
 	_input.input_state.connect(_hud.update_input)
 	_input.reset_requested.connect(_ws.send_reset)
 	_input.view_cycle.connect(_cycle_camera_mode)
 	_input.model_cycle.connect(_cycle_model)
 	_input.branch_cycle.connect(_cycle_branch)
+	_input.navigate_click.connect(_on_navigate_click)
+	_input.autopilot_off.connect(_disengage_autopilot)
+	_ws.shape_intent_received.connect(_on_shape_intent)
 
 
 func _on_connected() -> void:
@@ -416,6 +429,8 @@ func _cycle_branch() -> void:
 	_branch_index = (_branch_index + 1) % _branch_targets.size()
 	var target := str(_branch_targets[_branch_index])
 	_ws.send_select_route(target)
+	_path_waypoints = []  # the new branch re-streams its route
+	_disengage_autopilot()
 	_auto_followed = false  # re-drop into follow view on the new branch's first pose
 	_hud.set_model("%s  ·  分支 %d/%d %s" % [
 		str(MODELS[_model_index].name), _branch_index + 1,
@@ -431,6 +446,11 @@ func _on_batch(batch: Dictionary) -> void:
 			(path.get("waypoints", []) as Array).size(),
 			str(batch.get("target", [])),
 		])
+	# Capture the route waypoints (backend meter frame) for click-to-navigate;
+	# they arrive only on the first batch / after a reset or route switch.
+	var path_wps: Array = batch.get("path", {}).get("waypoints", [])
+	if not path_wps.is_empty():
+		_path_waypoints = path_wps
 	_guidewire.update_from_batch(batch)
 	_path.update_from_batch(batch)
 	_entry_marker.update_from_batch(batch)
@@ -458,6 +478,81 @@ func _on_state(state: Dictionary) -> void:
 	_msg_count += 1
 	_last_msg = "state_update"
 	_update_debug()
+
+
+# While click autopilot is engaged, tick the backend at ~20 Hz with a neutral
+# control frame; the server overrides it with the ShapeIntentController output,
+# so the tip keeps advancing toward the clicked waypoint without keyboard input.
+func _process(delta: float) -> void:
+	if not _autopilot_active:
+		return
+	_autopilot_accum += delta
+	if _autopilot_accum < _AUTOPILOT_TICK:
+		return
+	_autopilot_accum = 0.0
+	_ws.send_control(0.0, 0.0)
+
+
+# Left click -> pick the route waypoint nearest the click ray and drive the tip
+# there via the backend autopilot. Robust to coordinate frames: the waypoints are
+# in the backend meter frame and rendered under the path node, so we compare in
+# world space via that node's transform and send back the exact backend waypoint
+# (no inverse transform needed).
+func _on_navigate_click(screen_pos: Vector2) -> void:
+	if _path_waypoints.is_empty() or _path == null or not is_instance_valid(_path):
+		return
+	var cam := get_viewport().get_camera_3d()
+	if cam == null:
+		return
+	var origin := cam.project_ray_origin(screen_pos)
+	var dir := cam.project_ray_normal(screen_pos)
+	var xform: Transform3D = _path.global_transform
+
+	var best_index := -1
+	var best_perp := INF
+	for i in _path_waypoints.size():
+		var wp: Variant = _path_waypoints[i]
+		if typeof(wp) != TYPE_ARRAY or (wp as Array).size() < 3:
+			continue
+		var world: Vector3 = xform * Vector3(float(wp[0]), float(wp[1]), float(wp[2]))
+		var t := (world - origin).dot(dir)
+		if t <= 0.0:
+			continue  # behind the camera
+		var perp := (world - (origin + dir * t)).length()
+		if perp < best_perp:
+			best_perp = perp
+			best_index = i
+
+	if best_index < 0:
+		return
+	var target: Array = _path_waypoints[best_index]
+	_autopilot_active = true
+	_autopilot_accum = _AUTOPILOT_TICK  # tick immediately next frame
+	_ws.send_shape_intent(true, target)
+	print("[Main] click autopilot -> waypoint %d/%d %s" % [
+		best_index + 1, _path_waypoints.size(), str(target)])
+	_hud.set_view_mode("%s · 自动导航" % CAM_MODE_NAMES.get(_cam_mode, "?"))
+
+
+# Cancel click autopilot and hand control back to manual push/rotate.
+func _disengage_autopilot() -> void:
+	if not _autopilot_active:
+		return
+	_autopilot_active = false
+	_autopilot_accum = 0.0
+	if _ws != null and is_instance_valid(_ws):
+		_ws.send_shape_intent(false)
+	print("[Main] click autopilot disengaged")
+	_hud.set_view_mode(CAM_MODE_NAMES.get(_cam_mode, "?"))
+
+
+# Any manual W/S/A/D tick cancels click autopilot so the operator regains control.
+func _on_manual_control(_push: float, _rotate: float) -> void:
+	_disengage_autopilot()
+
+
+func _on_shape_intent(result: Dictionary) -> void:
+	print("[Main] shape_intent ack: %s" % str(result))
 
 
 func _feed_rig(tip: Dictionary) -> void:
@@ -509,6 +604,8 @@ func _cycle_model() -> void:
 	_branch_targets = []
 	_branch_index = 0
 	_logged_first_batch = false
+	_path_waypoints = []
+	_disengage_autopilot()
 	_load_model_scene()
 	_ws.restart_session(phantom, target, case_id, start_position, end_position)
 	_session_id = "none"

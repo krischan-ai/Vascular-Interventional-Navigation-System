@@ -18,6 +18,7 @@ signal batch_received(batch: Dictionary)        ## state_batch payload
 signal path_received(path: Dictionary)          ## path_response payload
 signal error_received(error: Dictionary)        ## error payload
 signal engine_params_received(effective: Dictionary)  ## engine_params echo (live deform panel)
+signal shape_intent_received(result: Dictionary)      ## shape_intent echo {active, mode}
 
 @export var server_url: String = "ws://localhost:9000/ws/session"
 @export var phantom: String = "low_tort"
@@ -163,6 +164,8 @@ func _handle_packet(packet: String) -> void:
 			path_received.emit(data)
 		"engine_params":
 			engine_params_received.emit(data.get("effective", {}))
+		"shape_intent":
+			shape_intent_received.emit(data)
 		"error":
 			# SESSION_EXISTS can occur from a benign session_start retry after the
 			# session was already created; ignore it.
@@ -211,6 +214,26 @@ func send_reset() -> void:
 func send_engine_params(params: Dictionary) -> void:
 	if _was_open and session_id != "":
 		_send("engine_params", params)
+
+
+## Engage/adjust ShapeIntent (autopilot) control of push/rotate (doc/09).
+## ``active`` false disengages (manual control). With active true and no target
+## the wire follows the planned centerline; a ``waypoint`` [x,y,z] (backend meter
+## frame, e.g. a click projected onto the route) or ``direction`` [x,y,z]
+## redirects the aim. ``intensity`` in [0,1] scales the push. The backend echoes
+## the resulting {active, mode} via shape_intent_received.
+func send_shape_intent(active: bool, waypoint: Array = [], direction: Array = [],
+		intensity: float = 1.0) -> void:
+	if not (_was_open and session_id != ""):
+		return
+	var data := {"active": active, "intensity": clampf(intensity, 0.0, 1.0)}
+	if waypoint.size() == 3:
+		data["target_waypoint"] = waypoint
+	if direction.size() == 3:
+		data["target_direction"] = direction
+	# A fresh state stream follows; release any in-flight control lock.
+	_awaiting = false
+	_send("shape_intent", data)
 
 
 ## Switch the active session's navigation target to a branch route (multi-branch

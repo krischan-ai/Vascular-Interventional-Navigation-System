@@ -104,9 +104,33 @@ class PhysicsAutopilot:
 
     # -- control law -------------------------------------------------------
     def compute(
-        self, tip_pos, tip_dir, contact_force: float = 0.0
+        self,
+        tip_pos,
+        tip_dir,
+        contact_force: float = 0.0,
+        *,
+        aim_override=None,
+        desired_override=None,
+        push_scale: float = 1.0,
     ) -> tuple[float, float]:
-        """Return ``(delta_push, delta_rotate)`` for the current physical state."""
+        """Return ``(delta_push, delta_rotate)`` for the current physical state.
+
+        By default the controller aims at a look-ahead point on its planned
+        centerline. The keyword-only overrides let a higher layer (the
+        :class:`~services.shape_intent.ShapeIntentController`) redirect the aim
+        without duplicating this control law:
+
+        * ``desired_override`` -- aim the tip along this world-space direction
+          (an unnormalized vector is fine); takes precedence over ``aim_override``.
+        * ``aim_override`` -- aim the tip at this world-space point instead of
+          the centerline look-ahead point.
+        * ``push_scale`` -- scale the alignment-gated insertion push (intent
+          intensity); the ``min_push`` floor and stall/force recovery are
+          unaffected.
+
+        With all overrides at their defaults this is byte-for-byte the original
+        centerline-following behaviour (regression-guaranteed).
+        """
         cfg = self.config
         tip = np.asarray(tip_pos, dtype=np.float64)
         d = np.asarray(tip_dir, dtype=np.float64)
@@ -114,10 +138,17 @@ class PhysicsAutopilot:
         d = d / nd if nd > 1e-9 else np.array([0.0, 0.0, 1.0])
 
         s_now, _ = self._arclen_at(tip)
-        aim = self._point_at(s_now + cfg.lookahead_m)
-        to_aim = aim - tip
-        n_aim = float(np.linalg.norm(to_aim))
-        desired = to_aim / n_aim if n_aim > 1e-9 else d
+        if desired_override is not None:
+            od = np.asarray(desired_override, dtype=np.float64)
+            n_od = float(np.linalg.norm(od))
+            desired = od / n_od if n_od > 1e-9 else d
+        else:
+            aim = np.asarray(aim_override, dtype=np.float64) \
+                if aim_override is not None \
+                else self._point_at(s_now + cfg.lookahead_m)
+            to_aim = aim - tip
+            n_aim = float(np.linalg.norm(to_aim))
+            desired = to_aim / n_aim if n_aim > 1e-9 else d
 
         cos_err = float(np.clip(np.dot(d, desired), -1.0, 1.0))
         heading = float(np.arccos(cos_err))  # 0 = aimed down the lumen
@@ -151,8 +182,8 @@ class PhysicsAutopilot:
         self._prev_heading = heading
         rotate = self._rotate_sign * min(cfg.rotate_gain * heading, cfg.max_rotate)
 
-        # Push gating on alignment, then attenuate on contact force.
-        push = self._push_from_alignment(heading)
+        # Push gating on alignment, then intent intensity, then contact force.
+        push = self._push_from_alignment(heading) * float(push_scale)
         push *= self._force_attenuation(contact_force)
         push = max(push, cfg.min_push)
 

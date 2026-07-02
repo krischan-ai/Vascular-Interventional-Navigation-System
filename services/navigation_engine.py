@@ -252,6 +252,17 @@ class NavigationEngine:
         self._previous_tip_pos = None
         self._tip_history: deque[list[float]] = deque(maxlen=self.TIP_HISTORY_LEN)
 
+        # Control abstraction (doc/09 ShapeIntent). When intent mode is engaged a
+        # ShapeIntentController drives push/rotate from a high-level intent instead
+        # of the caller's manual values. Lazily built from the planned path;
+        # physics mode only (guided already follows the centerline kinematically).
+        self._controller = None
+        self._intent = None
+        self._intent_active = False
+        self._last_tip_pos: list[float] | None = None
+        self._last_tip_dir: list[float] | None = None
+        self._last_contact_force = 0.0
+
         from services.risk_assessor import RiskAssessor
 
         self._risk_assessor = RiskAssessor()
@@ -426,6 +437,73 @@ class NavigationEngine:
             return engine.set_deform_params(**params)
         return None
 
+    def set_shape_intent(self, intent: dict | None, active: bool = True) -> dict:
+        """Engage/adjust ShapeIntent (autopilot) control of push/rotate.
+
+        The physics stays pure force-driven (doc/09 §一): this only decides where
+        the tip aims. While engaged, :meth:`step` ignores its manual push/rotate
+        and instead has a :class:`~services.shape_intent.ShapeIntentController`
+        resolve the current intent against the live tip pose.
+
+        Args:
+            intent: Intent fields (``target_waypoint`` / ``target_direction`` /
+                    ``intensity``), or ``None`` for plain centerline autopilot.
+            active: ``False`` disengages and hands control back to manual
+                    push/rotate.
+
+        Returns:
+            ``{"active": bool, "mode": "centerline"|"waypoint"|"direction"|"off"}``
+            describing the resulting control state.
+        """
+        if not active or not self._ensure_controller():
+            self._intent_active = False
+            self._intent = None
+            return {"active": False, "mode": "off"}
+
+        self._intent = self._build_intent(intent)
+        self._intent_active = True
+        if self._intent is None:
+            mode = "centerline"
+        elif self._intent.target_direction is not None:
+            mode = "direction"
+        elif self._intent.target_waypoint is not None:
+            mode = "waypoint"
+        else:
+            mode = "centerline"
+        return {"active": True, "mode": mode}
+
+    def _build_intent(self, intent: dict | None):
+        """Turn a raw intent dict into a :class:`ShapeIntent` (or None)."""
+        if not intent:
+            return None
+        from services.shape_intent import ShapeIntent
+
+        kwargs: dict[str, Any] = {}
+        if intent.get("target_waypoint") is not None:
+            kwargs["target_waypoint"] = intent["target_waypoint"]
+        if intent.get("target_direction") is not None:
+            kwargs["target_direction"] = intent["target_direction"]
+        if intent.get("intensity") is not None:
+            kwargs["intensity"] = intent["intensity"]
+        if not kwargs:
+            return None
+        return ShapeIntent(**kwargs)
+
+    def _ensure_controller(self) -> bool:
+        """Lazily build the ShapeIntentController from the planned path.
+
+        Returns False (intent control unavailable) in guided/kinematic mode or
+        when there is no planned path to follow/bookkeep against.
+        """
+        if self._is_guided() or self._path is None:
+            return False
+        if self._controller is None:
+            from services.shape_intent import ShapeIntentController
+
+            self._controller = ShapeIntentController(self._path.points)
+            self._controller.reset()
+        return True
+
     def set_planned_path(
         self, planned_path: Sequence[Sequence[float]] | None, radii: Sequence[float] | None = None
     ) -> None:
@@ -445,6 +523,10 @@ class NavigationEngine:
             self._path = None
         else:
             self._path = PlannedPath(planned_path, radii=radii)
+
+        # The ShapeIntentController is bound to the path geometry; drop it so the
+        # next intent request rebuilds it against the new route.
+        self._controller = None
 
         if getattr(self, "_engine", None) is not None:
             # Backends keep path-derived state; let engines that cache geometry
@@ -549,6 +631,8 @@ class NavigationEngine:
         self._episode_length = 0
         self._previous_tip_pos = None
         self._tip_history.clear()
+        if self._controller is not None:
+            self._controller.reset()
         return self._assemble_state(raw)
 
     def step(self, delta_push: float, delta_rotate: float) -> NavigationState:
@@ -561,6 +645,17 @@ class NavigationEngine:
         Returns:
             NavigationState after the step
         """
+        # ShapeIntent (autopilot) mode: resolve the high-level intent against the
+        # live tip pose into real push/rotate, overriding the caller's manual
+        # values. The physics engine is still driven purely by (push, rotate).
+        if self._intent_active and self._controller is not None and self._last_tip_pos is not None:
+            delta_push, delta_rotate = self._controller.compute(
+                self._intent,
+                self._last_tip_pos,
+                self._last_tip_dir,
+                self._last_contact_force,
+            )
+
         delta_push = float(np.clip(delta_push, -1.0, 1.0))
         delta_rotate = float(np.clip(delta_rotate, -1.0, 1.0))
 
@@ -588,6 +683,11 @@ class NavigationEngine:
         """
         tip_pos = raw.tip_position
         self._tip_history.append(tip_pos)
+
+        # Cache the raw pose the ShapeIntentController steers on next step.
+        self._last_tip_pos = tip_pos
+        self._last_tip_dir = raw.tip_direction
+        self._last_contact_force = float(raw.contact_force)
 
         velocity = self._compute_velocity(tip_pos)
         curvature = self._compute_curvature()
