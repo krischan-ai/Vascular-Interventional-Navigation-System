@@ -267,10 +267,11 @@ class NavigationEngine:
             self.set_planned_path(planned_path)
         else:
             default_path = self._route_waypoints(route_target)
+            default_radii = self._route_radii(route_target) if default_path is not None else None
             if default_path is None:
                 default_path = self._default_centerline_points()
             if default_path is not None:
-                self.set_planned_path(default_path)
+                self.set_planned_path(default_path, radii=default_radii)
 
         # Resolve the entry pose (needs the path) then construct the one backend.
         entry_pt, entry_dir = self._resolve_entry()
@@ -375,6 +376,20 @@ class NavigationEngine:
             return waypoints
         return None
 
+    def _route_radii(self, target: str | None) -> list[float] | None:
+        """Per-waypoint lumen radii (m) of route ``target``, if it carries them.
+
+        Multi-branch routes ship real VMTK inscribed radii (``radius_m``); the
+        Newton backend uses them to build a variable-radius vessel wall.
+        """
+        if not self._routes or not target:
+            return None
+        route = self._routes.get("routes", {}).get(target)
+        if not route:
+            return None
+        radii = route.get("radius_m")
+        return radii if isinstance(radii, list) and len(radii) >= 2 else None
+
     @property
     def available_routes(self) -> dict[str, list[float]]:
         """Selectable branch targets as ``{endpoint_id: [x, y, z] target}`` (m)."""
@@ -390,7 +405,7 @@ class NavigationEngine:
         waypoints = self._route_waypoints(target)
         if waypoints is None:
             return False
-        self.set_planned_path(waypoints)
+        self.set_planned_path(waypoints, radii=self._route_radii(target))
         self._route_target = target
         self._episode_length = 0
         self._previous_tip_pos = None
@@ -399,7 +414,9 @@ class NavigationEngine:
             self._engine._s = 0.0
         return True
 
-    def set_planned_path(self, planned_path: Sequence[Sequence[float]] | None) -> None:
+    def set_planned_path(
+        self, planned_path: Sequence[Sequence[float]] | None, radii: Sequence[float] | None = None
+    ) -> None:
         """Set or clear the planned path used for progress/deviation tracking.
 
         When the engine already exists (e.g. an interactive re-plan via
@@ -415,7 +432,7 @@ class NavigationEngine:
         if planned_path is None or len(planned_path) < 2:
             self._path = None
         else:
-            self._path = PlannedPath(planned_path)
+            self._path = PlannedPath(planned_path, radii=radii)
 
         if getattr(self, "_engine", None) is not None:
             # Backends keep path-derived state; let engines that cache geometry

@@ -118,12 +118,20 @@ class PlannedPath:
     orchestrator so the geometry lives in exactly one place.
     """
 
-    def __init__(self, points) -> None:
+    def __init__(self, points, radii=None) -> None:
         pts = np.asarray(points, dtype=np.float64)
         segment_len = np.linalg.norm(np.diff(pts, axis=0), axis=1)
         self.points = pts
         self.cumlen = np.concatenate([[0.0], np.cumsum(segment_len)])
         self.total_len = float(self.cumlen[-1])
+        # Optional per-point lumen radius (meters), e.g. real VMTK inscribed radii
+        # carried by multi-branch routes. Consumed by NewtonEngine to build a
+        # variable-radius vessel wall; ignored by other engines. None when absent.
+        if radii is None:
+            self.radii = None
+        else:
+            r = np.asarray(radii, dtype=np.float64).reshape(-1)
+            self.radii = r if len(r) == len(pts) else None
 
         try:
             from scipy.spatial import cKDTree
@@ -145,6 +153,12 @@ class PlannedPath:
         s0, s1 = cum[idx - 1], cum[idx]
         t = 0.0 if s1 <= s0 else (s - s0) / (s1 - s0)
         return pts[idx - 1] + t * (pts[idx] - pts[idx - 1])
+
+    def radius_at_arclen(self, s: float) -> float | None:
+        """Interpolate the lumen radius at arc length ``s`` (meters), or None."""
+        if self.radii is None:
+            return None
+        return float(np.interp(float(np.clip(s, 0.0, self.total_len)), self.cumlen, self.radii))
 
     def tangent_at_arclen(self, s: float) -> np.ndarray:
         """Unit tangent of the path at arc length ``s`` (meters)."""

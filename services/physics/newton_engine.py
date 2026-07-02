@@ -126,18 +126,31 @@ class NewtonEngine:
         self._entry_point = entry_point
         self._entry_direction = entry_direction
         self._control_dt = float(os.environ.get("CATHSIM_NEWTON_CONTROL_DT", "0.0333333333"))
-        self._substeps = int(os.environ.get("CATHSIM_NEWTON_SUBSTEPS", str(n_substeps or 20)))
+        # D3 (doc/08) validated config: variable-radius tube wall + graded soft-anchor
+        # drive at 6 substeps x 2 VBD iterations ~= 60fps, contained on aorta_tree.
+        self._substeps = int(os.environ.get("CATHSIM_NEWTON_SUBSTEPS", str(n_substeps or 6)))
+        self._iterations = int(os.environ.get("CATHSIM_NEWTON_ITERS", "2"))
         self._sim_dt = self._control_dt / self._substeps
         self._rod_length = float(os.environ.get("CATHSIM_NEWTON_ROD_LENGTH", "0.06"))
         self._rod_radius = float(os.environ.get("CATHSIM_NEWTON_ROD_RADIUS", "0.0004"))
         self._rod_seg_len = float(os.environ.get("CATHSIM_NEWTON_SEG_LEN", "0.003"))
+        # Fallback lumen radius when a route ships no per-point radii.
         self._lumen_radius = float(os.environ.get("CATHSIM_NEWTON_LUMEN_RADIUS", "0.0025"))
-        self._wall_thickness = float(os.environ.get("CATHSIM_NEWTON_WALL_THICKNESS", "0.01"))
-        self._push_speed = float(os.environ.get("CATHSIM_NEWTON_PUSH_SPEED", "0.03"))
-        self._bend = float(os.environ.get("CATHSIM_NEWTON_BEND", "1.0"))
+        self._min_radius = float(os.environ.get("CATHSIM_NEWTON_MIN_RADIUS", "0.0015"))
+        self._wall_thickness = float(os.environ.get("CATHSIM_NEWTON_WALL_THICKNESS", "0.006"))
+        self._sdf_voxel = float(os.environ.get("CATHSIM_NEWTON_SDF_VOXEL", "0.0005"))
+        self._lumen_band = float(os.environ.get("CATHSIM_NEWTON_LUMEN_BAND", "0.015"))
+        self._push_speed = float(os.environ.get("CATHSIM_NEWTON_PUSH_SPEED", "0.05"))
+        self._bend = float(os.environ.get("CATHSIM_NEWTON_BEND", "50.0"))
         self._contact_ke = float(os.environ.get("CATHSIM_NEWTON_CONTACT_KE", "1000000"))
+        # Graded soft-anchor: proximal inserted bodies glued to the centered route,
+        # a distal ramp of `free_span` bodies kept soft (tip_alpha) so the tip
+        # deflects without whipping through the wall.
+        self._free_span = int(os.environ.get("CATHSIM_NEWTON_FREE_SPAN", "6"))
+        self._tip_alpha = float(os.environ.get("CATHSIM_NEWTON_TIP_ALPHA", "0.3"))
 
         self._centerline = _resample(self._path.points, 0.002)
+        self._radii = self._centerline_radii()
         self._insert_s = 0.0
         self._initialized = False
         self._model = None
@@ -147,6 +160,9 @@ class NewtonEngine:
         self._control = None
         self._contacts = None
         self._rod_bodies: list[int] = []
+        self._alpha = None
+        self._base_arc = None
+        self._max_s_ins = 0.0
 
     def set_path(self, path: PlannedPath | None) -> None:
         """Replace the planned path and force the Newton scene to be rebuilt.
@@ -160,7 +176,24 @@ class NewtonEngine:
         self.close()
         self._path = path
         self._centerline = _resample(self._path.points, 0.002)
+        self._radii = self._centerline_radii()
         self._insert_s = 0.0
+
+    def _centerline_radii(self) -> np.ndarray:
+        """Per-node lumen radius along the resampled centerline.
+
+        Uses the route's real per-point radii (VMTK inscribed radius) when the
+        path carries them, interpolated by arc length onto ``self._centerline``;
+        falls back to a constant lumen radius otherwise.
+        """
+        n = len(self._centerline)
+        path_radii = getattr(self._path, "radii", None)
+        if path_radii is None:
+            return np.full(n, self._lumen_radius, dtype=np.float64)
+        seg = np.linalg.norm(np.diff(self._centerline, axis=0), axis=1)
+        cl_cum = np.concatenate([[0.0], np.cumsum(seg)])
+        radii = np.interp(cl_cum, self._path.cumlen, np.asarray(path_radii, dtype=np.float64))
+        return np.maximum(radii, self._min_radius)
 
     @property
     def is_initialized(self) -> bool:
@@ -171,11 +204,19 @@ class NewtonEngine:
         return self._control_dt
 
     def _build_tube_mesh(self, newton):
+        """Variable-radius thick-wall annulus tube swept along the centerline.
+
+        The lumen (inner ring at the local radius) is the free/positive SDF region
+        and the wall (out to +wall_thickness) is solid; a single lumen surface would
+        instead make the lumen solid and expel the rod (doc/08 D2 finding). The
+        ``lumen_band`` must cover the widest local radius or a wide lumen's tip
+        tunnels the SDF's central no-band region.
+        """
         _, nrm, binm = _parallel_frames(self._centerline)
         angles = np.linspace(0.0, 2.0 * math.pi, 24, endpoint=False)
         verts = []
-        for p, n, b in zip(self._centerline, nrm, binm):
-            for radius in (self._lumen_radius, self._lumen_radius + self._wall_thickness):
+        for p, r, n, b in zip(self._centerline, self._radii, nrm, binm):
+            for radius in (r, r + self._wall_thickness):
                 for a in angles:
                     d = math.cos(a) * n + math.sin(a) * b
                     verts.append(p + radius * d)
@@ -201,7 +242,10 @@ class NewtonEngine:
                 tris += [a, c, b, a, d, c] if flip else [a, b, c, a, c, d]
 
         mesh = newton.Mesh(np.asarray(verts, dtype=np.float32), np.asarray(tris, dtype=np.int32), is_solid=True)
-        mesh.build_sdf(target_voxel_size=0.001, narrow_band_range=(-self._wall_thickness, self._lumen_radius))
+        mesh.build_sdf(
+            target_voxel_size=self._sdf_voxel,
+            narrow_band_range=(-self._wall_thickness, self._lumen_band),
+        )
         return mesh
 
     def _ensure_initialized(self) -> None:
@@ -244,12 +288,25 @@ class NewtonEngine:
         builder.color(balance_colors=False)
         self._model = builder.finalize()
         self._model.set_gravity((0.0, 0.0, 0.0))
-        self._solver = newton.solvers.SolverVBD(self._model, iterations=8)
+        self._solver = newton.solvers.SolverVBD(self._model, iterations=self._iterations)
         self._s0 = self._model.state()
         self._s1 = self._model.state()
         self._control = self._model.control()
         self._contacts = self._model.contacts()
         self._rod_bodies = list(rod_bodies)
+
+        # Graded soft-anchor arrays over the rod bodies (proximal glued -> soft tip).
+        nb = len(self._rod_bodies)
+        self._base_arc = np.arange(nb) * self._rod_seg_len
+        alpha = np.ones(nb)
+        for i in range(self._free_span):
+            j = nb - 1 - i
+            if j >= 0:
+                frac = (i + 1) / self._free_span
+                alpha[j] = max(self._tip_alpha, 1.0 - frac * (1.0 - self._tip_alpha))
+        self._alpha = alpha
+        cl_seg = float(np.sum(np.linalg.norm(np.diff(self._centerline, axis=0), axis=1)))
+        self._max_s_ins = max(0.0, cl_seg - float(self._base_arc[-1]) - 1e-3)
         self._initialized = True
 
     def reset(self) -> RawPose:
@@ -260,29 +317,32 @@ class NewtonEngine:
 
     def step(self, push: float, rotate: float) -> RawPose:
         self._ensure_initialized()
-        import numpy as _np
 
         direction = 1.0 if push >= 0.0 else -1.0
         prev_insert_s = self._insert_s
         self._insert_s = float(
-            _np.clip(
+            np.clip(
                 self._insert_s + direction * abs(push) * self._push_speed * self._control_dt,
                 0.0,
-                self._path.total_len,
+                self._max_s_ins,
             )
         )
-        root_body = self._rod_bodies[0]
+        rb = np.asarray(self._rod_bodies)
+        alpha = self._alpha[:, None]
 
         for sub in range(self._substeps):
             frac = (sub + 1) / self._substeps
-            root_pos = _point_at_s(self._centerline, prev_insert_s + (self._insert_s - prev_insert_s) * frac)
-            bq = self._s0.body_q.numpy()
-            bq[root_body, :3] = root_pos
-            self._s0.body_q.assign(bq)
+            s_ins = prev_insert_s + (self._insert_s - prev_insert_s) * frac
+            # Physics substep, then softly pull each body toward its centered-route
+            # target: proximal inserted bodies are glued, the distal tip stays soft.
             self._s0.clear_forces()
             self._model.collide(self._s0, self._contacts)
             self._solver.step(self._s0, self._s1, self._control, self._contacts, self._sim_dt)
             self._s0, self._s1 = self._s1, self._s0
+            target = np.asarray([_point_at_s(self._centerline, a + s_ins) for a in self._base_arc])
+            bq = self._s0.body_q.numpy()
+            bq[rb, :3] = (1.0 - alpha) * bq[rb, :3] + alpha * target
+            self._s0.body_q.assign(bq)
 
         return self._raw_pose()
 
@@ -298,11 +358,18 @@ class NewtonEngine:
         else:
             direction = direction / norm
 
-        radial = max(_point_to_polyline_distance(p, self._centerline) + self._rod_radius for p in xyz)
-        wall_distance = max(0.0, self._lumen_radius - radial)
-        contact_force = max(0.0, radial - self._lumen_radius) * self._contact_ke
+        # Per-body breach against the local (variable) lumen radius via nearest node.
+        d2 = np.sum((xyz[:, None, :] - self._centerline[None, :, :]) ** 2, axis=2)
+        nearest = np.argmin(d2, axis=1)
+        dist = np.sqrt(d2[np.arange(len(xyz)), nearest])
+        breach = dist + self._rod_radius - self._radii[nearest]  # >0 => poking past wall
+        worst = float(breach.max())
+        wall_distance = max(0.0, -worst)
+        contact_force = max(0.0, worst) * self._contact_ke
         target = self._path.points[-1].tolist()
-        done = bool(self._insert_s >= self._path.total_len)
+        # Exact inserted arc length of the distal tip along the path -> exact progress.
+        tip_arclen = float(min(self._insert_s + self._base_arc[-1], self._path.total_len))
+        done = bool(self._insert_s >= self._max_s_ins - 1e-9)
         return RawPose(
             tip_position=[float(v) for v in tip],
             tip_direction=[float(v) for v in direction],
@@ -314,7 +381,7 @@ class NewtonEngine:
             joint_velocities=[],
             reward=0.0,
             done=done,
-            arclen=None,
+            arclen=tip_arclen,
         )
 
     def render_bodies(self) -> list[dict[str, list[float]]]:
