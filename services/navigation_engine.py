@@ -414,6 +414,18 @@ class NavigationEngine:
             self._engine._s = 0.0
         return True
 
+    def set_engine_params(self, params: dict) -> dict | None:
+        """Live-tune backend deformation params (interactive parameter panel).
+
+        Forwards to the physics engine's ``set_deform_params`` when it exposes one
+        (the Newton backend does); returns the effective param state, or ``None``
+        for engines without live tuning. Engine-agnostic: no-op on kinematic/MuJoCo.
+        """
+        engine = getattr(self, "_engine", None)
+        if engine is not None and hasattr(engine, "set_deform_params"):
+            return engine.set_deform_params(**params)
+        return None
+
     def set_planned_path(
         self, planned_path: Sequence[Sequence[float]] | None, radii: Sequence[float] | None = None
     ) -> None:

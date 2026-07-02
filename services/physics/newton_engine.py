@@ -102,6 +102,41 @@ def _point_to_polyline_distance(point: np.ndarray, points: np.ndarray) -> float:
     return float(np.sqrt(np.min(np.sum((point - proj) ** 2, axis=1))))
 
 
+def _nearest_arclen(points: np.ndarray, cum: np.ndarray, xyz: np.ndarray) -> float:
+    """Arc length of the nearest point on the polyline to ``xyz`` (scalar)."""
+    a, b = points[:-1], points[1:]
+    ab = b - a
+    denom = np.einsum("ij,ij->i", ab, ab) + 1e-18
+    ap = xyz - a
+    t = np.clip(np.einsum("ij,ij->i", ap, ab) / denom, 0.0, 1.0)
+    proj = a + t[:, None] * ab
+    d2 = np.sum((xyz - proj) ** 2, axis=1)
+    i = int(np.argmin(d2))
+    return float(cum[i] + t[i] * (cum[i + 1] - cum[i]))
+
+
+def _quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Hamilton product of two [x, y, z, w] quaternions."""
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return np.array([
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+        aw * bw - ax * bx - ay * by - az * bz,
+    ])
+
+
+def _quat_axis_angle(axis: np.ndarray, angle: float) -> np.ndarray:
+    """[x, y, z, w] quaternion of a rotation ``angle`` (rad) about unit-ish ``axis``."""
+    n = float(np.linalg.norm(axis))
+    if n < 1e-12:
+        return np.array([0.0, 0.0, 0.0, 1.0])
+    u = axis / n
+    s = math.sin(angle / 2.0)
+    return np.array([u[0] * s, u[1] * s, u[2] * s, math.cos(angle / 2.0)])
+
+
 class NewtonEngine:
     """Opt-in Newton physics demo backend.
 
@@ -141,11 +176,39 @@ class NewtonEngine:
         self._sdf_voxel = float(os.environ.get("CATHSIM_NEWTON_SDF_VOXEL", "0.0005"))
         self._lumen_band = float(os.environ.get("CATHSIM_NEWTON_LUMEN_BAND", "0.015"))
         self._push_speed = float(os.environ.get("CATHSIM_NEWTON_PUSH_SPEED", "0.05"))
-        self._bend = float(os.environ.get("CATHSIM_NEWTON_BEND", "50.0"))
-        self._contact_ke = float(os.environ.get("CATHSIM_NEWTON_CONTACT_KE", "1000000"))
-        # Graded soft-anchor: proximal inserted bodies glued to the centered route,
-        # a distal ramp of `free_span` bodies kept soft (tip_alpha) so the tip
-        # deflects without whipping through the wall.
+        # D4 drive model: "force" = real force transmission (proximal sheath fed,
+        # distal free physics, push carried by the cable stretch constraint,
+        # `rotate` twists the J-tip); "anchor" = D3 graded soft-anchor fallback.
+        self._drive = os.environ.get("CATHSIM_NEWTON_DRIVE", "force").strip().lower()
+        _force = self._drive == "force"
+        # Conforming shaft (bend~20) hugs vessel curvature and stays contained;
+        # a stiff shaft (bend~50, the D3 anchor default) chords through outer walls
+        # on sharp bends. See spikes/D4_RESULTS.md.
+        self._bend = float(os.environ.get("CATHSIM_NEWTON_BEND", "20.0" if _force else "50.0"))
+        # Force drive needs a near-inextensible rod so the push transmits instead
+        # of the stretch constraint being shocked into 80-240% strain (D4a finding).
+        self._stretch = float(os.environ.get("CATHSIM_NEWTON_STRETCH", "3.0e7" if _force else "1.0e5"))
+        self._contact_ke = float(os.environ.get("CATHSIM_NEWTON_CONTACT_KE", "3000000" if _force else "1000000"))
+        # 软头硬身: distal `soft_tip` joints ramp from `bend` down to `tip_bend`.
+        self._soft_tip = int(os.environ.get("CATHSIM_NEWTON_SOFT_TIP", "10" if _force else "0"))
+        self._tip_bend = float(os.environ.get("CATHSIM_NEWTON_TIP_BEND", "2.0"))
+        # Force drive: proximal bodies glued to the centered route (the sheath/
+        # introducer + already-traversed wire) and fed forward; everything distal
+        # is free physics. sheath_bodies=1 => only the driven root is glued.
+        self._sheath_bodies = int(os.environ.get("CATHSIM_NEWTON_SHEATH_BODIES", "1"))
+        # Torsion steering: rotate input integrated (rad/s at rotate=1) into a
+        # twist applied to the root anchor frame about the local tangent (D4c).
+        self._rotate_speed = float(os.environ.get("CATHSIM_NEWTON_ROTATE_SPEED", "3.0"))
+        # Pre-bent J-tip rest shape: the distal `jtip_bodies` segments curve off
+        # the tangent by `jtip_deg` total, giving `rotate` real branch-selecting
+        # authority at sharp bends (incidental curvature alone is too weak). 0 deg
+        # = straight tip (behaves like the pre-J-tip build).
+        self._jtip_deg = float(os.environ.get("CATHSIM_NEWTON_JTIP_DEG", "35.0" if _force else "0.0"))
+        self._jtip_bodies = int(os.environ.get("CATHSIM_NEWTON_JTIP_BODIES", "3"))
+        self._settle_steps = int(os.environ.get("CATHSIM_NEWTON_SETTLE_STEPS", "20"))
+        self._twist = 0.0
+        # Graded soft-anchor (anchor mode): proximal glued, distal ramp of
+        # `free_span` bodies kept soft (tip_alpha) so the tip deflects.
         self._free_span = int(os.environ.get("CATHSIM_NEWTON_FREE_SPAN", "6"))
         self._tip_alpha = float(os.environ.get("CATHSIM_NEWTON_TIP_ALPHA", "0.3"))
 
@@ -248,6 +311,102 @@ class NewtonEngine:
         )
         return mesh
 
+    def _apply_jtip(self, rod_pts: np.ndarray) -> np.ndarray:
+        """Curve the distal `jtip_bodies` segments into a pre-bent J-tip rest shape.
+
+        The straight-sampled tip is rebuilt as an arc bending `jtip_deg` off the
+        local tangent (in an arbitrary plane -- torsion rotates it at runtime).
+        The baked curvature is held by bend stiffness, so `rotate` twisting the
+        shaft reorients this J to select branches (D4c steering authority).
+        """
+        if self._jtip_deg <= 0.0 or self._jtip_bodies <= 0 or len(rod_pts) < self._jtip_bodies + 2:
+            return rod_pts
+        pts = np.asarray(rod_pts, dtype=np.float64).copy()
+        n = len(pts)
+        k = min(self._jtip_bodies, n - 2)
+        i0 = n - 1 - k  # last shaft node = base of the J
+        tang = pts[i0] - pts[i0 - 1]
+        tn = float(np.linalg.norm(tang))
+        tang = tang / tn if tn > 1e-9 else np.array([0.0, 0.0, 1.0])
+        ref = np.array([0.0, 1.0, 0.0]) if abs(tang[1]) < 0.9 else np.array([1.0, 0.0, 0.0])
+        axis = np.cross(tang, ref)
+        axis /= np.linalg.norm(axis) + 1e-12
+        dphi = math.radians(self._jtip_deg) / k
+        c, s = math.cos(dphi), math.sin(dphi)
+        d = tang.copy()
+        p = pts[i0].copy()
+        for j in range(1, k + 1):
+            # Rodrigues rotation of the heading about `axis` by dphi per segment.
+            d = d * c + np.cross(axis, d) * s + axis * float(np.dot(axis, d)) * (1.0 - c)
+            p = p + self._rod_seg_len * d
+            pts[i0 + j] = p
+        return pts
+
+    def _apply_joint_stiffness(self) -> None:
+        """Write stretch/bend/soft-tip into ``joint_target_ke`` (no rebuild).
+
+        Cable-joint DOF layout is ``[stretch, bend]`` per joint: even indices are
+        stretch, odd are bend. The distal ``soft_tip`` joints ramp from ``bend``
+        down to ``tip_bend`` (软头硬身). Reusable so the live parameter panel can
+        re-tune shaft/tip stiffness on the fly.
+        """
+        if self._model is None or not self._rod_bodies:
+            return
+        ke = self._model.joint_target_ke.numpy()
+        nj = len(self._rod_bodies) - 1
+        for j in range(nj):
+            ke[2 * j] = self._stretch
+            ke[2 * j + 1] = self._bend
+        for i in range(min(self._soft_tip, nj)):
+            j = nj - 1 - i
+            frac = (i + 1) / self._soft_tip
+            ke[2 * j + 1] = self._bend * (1.0 - frac) + self._tip_bend * frac
+        self._model.joint_target_ke.assign(ke)
+
+    # Deformation params that live-update (no scene rebuild) vs. those baked into
+    # the model geometry at build time (rebuild required).
+    _LIVE_PARAMS = ("bend", "tip_bend", "soft_tip", "stretch", "push_speed", "rotate_speed")
+    _REBUILD_PARAMS = ("jtip_deg", "jtip_bodies", "contact_ke", "wall_thickness", "rod_length")
+
+    def set_deform_params(self, **params) -> dict:
+        """Live-tune guidewire deformation for the interactive parameter panel.
+
+        Accepts any of: ``bend``, ``tip_bend``, ``soft_tip``, ``stretch``,
+        ``push_speed``, ``rotate_speed`` (applied immediately via joint stiffness /
+        drive gains), and ``jtip_deg``/``jtip_bodies``/``contact_ke`` (geometry,
+        which force a scene rebuild on the next step). Returns the effective
+        deform-param state so the client HUD can reflect clamps.
+        """
+        rebuild = False
+        for key, val in params.items():
+            attr = f"_{key}"
+            if not hasattr(self, attr):
+                continue
+            setattr(self, attr, type(getattr(self, attr))(val))
+            if key in self._REBUILD_PARAMS:
+                rebuild = True
+        if rebuild:
+            # Geometry changed: drop the cached model so the next step rebuilds
+            # it (and re-settles) with the new shape, preserving insertion depth.
+            self.close()
+        elif self._initialized:
+            self._apply_joint_stiffness()
+        return self.deform_params
+
+    @property
+    def deform_params(self) -> dict:
+        return {
+            "bend": self._bend,
+            "tip_bend": self._tip_bend,
+            "soft_tip": self._soft_tip,
+            "stretch": self._stretch,
+            "push_speed": self._push_speed,
+            "rotate_speed": self._rotate_speed,
+            "jtip_deg": self._jtip_deg,
+            "jtip_bodies": self._jtip_bodies,
+            "contact_ke": self._contact_ke,
+        }
+
     def _ensure_initialized(self) -> None:
         if self._initialized:
             return
@@ -267,12 +426,13 @@ class NewtonEngine:
         builder.add_shape_mesh(body=-1, mesh=self._build_tube_mesh(newton), cfg=wall_cfg, label="vessel")
 
         rod_pts = _sample_along(self._centerline, self._rod_length, self._rod_seg_len)
+        rod_pts = self._apply_jtip(rod_pts)
         quats = newton.utils.create_parallel_transport_cable_quaternions([wp.vec3(*p) for p in rod_pts], twist_total=0.0)
-        rod_bodies, _ = builder.add_rod(
+        rod_bodies, rod_joints = builder.add_rod(
             positions=[wp.vec3(*p) for p in rod_pts],
             quaternions=quats,
             radius=self._rod_radius,
-            stretch_stiffness=1.0e5,
+            stretch_stiffness=self._stretch,
             stretch_damping=0.0,
             bend_stiffness=self._bend,
             bend_damping=1.0e-1,
@@ -288,32 +448,86 @@ class NewtonEngine:
         builder.color(balance_colors=False)
         self._model = builder.finalize()
         self._model.set_gravity((0.0, 0.0, 0.0))
+        self._rod_bodies = list(rod_bodies)
+        self._apply_joint_stiffness()
+
         self._solver = newton.solvers.SolverVBD(self._model, iterations=self._iterations)
         self._s0 = self._model.state()
         self._s1 = self._model.state()
         self._control = self._model.control()
         self._contacts = self._model.contacts()
-        self._rod_bodies = list(rod_bodies)
 
-        # Graded soft-anchor arrays over the rod bodies (proximal glued -> soft tip).
         nb = len(self._rod_bodies)
         self._base_arc = np.arange(nb) * self._rod_seg_len
-        alpha = np.ones(nb)
-        for i in range(self._free_span):
-            j = nb - 1 - i
-            if j >= 0:
-                frac = (i + 1) / self._free_span
-                alpha[j] = max(self._tip_alpha, 1.0 - frac * (1.0 - self._tip_alpha))
+        # Glue mask: which bodies are kinematically fed along the centered route.
+        # force (D4): only the proximal `sheath_bodies` glued, rest free physics.
+        # anchor (D3): proximal glued + distal soft ramp.
+        alpha = np.zeros(nb)
+        if self._drive == "force":
+            alpha[: max(1, self._sheath_bodies)] = 1.0
+        else:
+            alpha[:] = 1.0
+            for i in range(self._free_span):
+                j = nb - 1 - i
+                if j >= 0:
+                    frac = (i + 1) / self._free_span
+                    alpha[j] = max(self._tip_alpha, 1.0 - frac * (1.0 - self._tip_alpha))
         self._alpha = alpha
-        cl_seg = float(np.sum(np.linalg.norm(np.diff(self._centerline, axis=0), axis=1)))
+        seg = np.linalg.norm(np.diff(self._centerline, axis=0), axis=1)
+        self._cl_cum = np.concatenate([[0.0], np.cumsum(seg)])
+        cl_seg = float(self._cl_cum[-1])
         self._max_s_ins = max(0.0, cl_seg - float(self._base_arc[-1]) - 1e-3)
+        self._twist = 0.0
         self._initialized = True
+
+        # Let the free rod relax into the lumen before driving (force mode), so
+        # the first push does not fight an off-lumen initial pose.
+        if self._drive == "force" and self._settle_steps > 0:
+            self._settle(self._settle_steps)
 
     def reset(self) -> RawPose:
         self._initialized = False
         self._insert_s = 0.0
+        self._twist = 0.0
         self._ensure_initialized()
         return self._raw_pose()
+
+    def _tangent_at_s(self, s: float) -> np.ndarray:
+        eps = max(self._rod_seg_len, 1e-4)
+        d = _point_at_s(self._centerline, s + eps) - _point_at_s(self._centerline, s - eps)
+        n = float(np.linalg.norm(d))
+        return d / n if n > 1e-9 else np.array([0.0, 0.0, 1.0])
+
+    def _apply_glue(self, s_ins: float) -> None:
+        """Feed the glued (sheath/proximal) bodies along the centered route and, in
+        force mode, apply the accumulated torsion to the driven root frame.
+
+        Force mode glues only the proximal ``sheath_bodies`` and twists the root
+        anchor about the local tangent (D4c steering); the free distal length and
+        tip emerge from physics. Anchor mode glues per the graded soft-anchor mask.
+        """
+        rb = np.asarray(self._rod_bodies)
+        glued = self._alpha > 0.0
+        if not glued.any():
+            return
+        alpha = self._alpha[glued][:, None]
+        target = np.asarray([_point_at_s(self._centerline, a + s_ins) for a in self._base_arc[glued]])
+        bq = self._s0.body_q.numpy()
+        bq[rb[glued], :3] = (1.0 - alpha) * bq[rb[glued], :3] + alpha * target
+        if self._drive == "force":
+            tangent = self._tangent_at_s(s_ins)
+            base_q = np.asarray(quat_from_direction(tangent), dtype=np.float64)
+            root_q = _quat_mul(_quat_axis_angle(tangent, self._twist), base_q)
+            bq[rb[0], 3:7] = root_q
+        self._s0.body_q.assign(bq)
+
+    def _settle(self, steps: int) -> None:
+        for _ in range(steps):
+            self._s0.clear_forces()
+            self._model.collide(self._s0, self._contacts)
+            self._solver.step(self._s0, self._s1, self._control, self._contacts, self._sim_dt)
+            self._s0, self._s1 = self._s1, self._s0
+            self._apply_glue(self._insert_s)
 
     def step(self, push: float, rotate: float) -> RawPose:
         self._ensure_initialized()
@@ -327,22 +541,17 @@ class NewtonEngine:
                 self._max_s_ins,
             )
         )
-        rb = np.asarray(self._rod_bodies)
-        alpha = self._alpha[:, None]
+        # Integrate rotate into the root-frame twist that steers the J-tip (D4c).
+        self._twist += float(rotate) * self._rotate_speed * self._control_dt
 
         for sub in range(self._substeps):
             frac = (sub + 1) / self._substeps
             s_ins = prev_insert_s + (self._insert_s - prev_insert_s) * frac
-            # Physics substep, then softly pull each body toward its centered-route
-            # target: proximal inserted bodies are glued, the distal tip stays soft.
             self._s0.clear_forces()
             self._model.collide(self._s0, self._contacts)
             self._solver.step(self._s0, self._s1, self._control, self._contacts, self._sim_dt)
             self._s0, self._s1 = self._s1, self._s0
-            target = np.asarray([_point_at_s(self._centerline, a + s_ins) for a in self._base_arc])
-            bq = self._s0.body_q.numpy()
-            bq[rb, :3] = (1.0 - alpha) * bq[rb, :3] + alpha * target
-            self._s0.body_q.assign(bq)
+            self._apply_glue(s_ins)
 
         return self._raw_pose()
 
@@ -367,8 +576,12 @@ class NewtonEngine:
         wall_distance = max(0.0, -worst)
         contact_force = max(0.0, worst) * self._contact_ke
         target = self._path.points[-1].tolist()
-        # Exact inserted arc length of the distal tip along the path -> exact progress.
-        tip_arclen = float(min(self._insert_s + self._base_arc[-1], self._path.total_len))
+        # Anchor mode rides the route so inserted arc is exact; force mode lets the
+        # tip physically lag, so report its actual projected arc along the route.
+        if self._drive == "force":
+            tip_arclen = float(min(_nearest_arclen(self._centerline, self._cl_cum, tip), self._path.total_len))
+        else:
+            tip_arclen = float(min(self._insert_s + self._base_arc[-1], self._path.total_len))
         done = bool(self._insert_s >= self._max_s_ins - 1e-9)
         return RawPose(
             tip_position=[float(v) for v in tip],

@@ -268,13 +268,58 @@ GPU 自检:    python -c "import warp; warp.init(); print(warp.get_cuda_devices(
 
 ---
 
-## 八、当前状态与下一步
+## 八、当前状态：D0–D3 全部完成并上线（更新 2026-07-01）
 
-- **分支**：`feat/warp-xpbd-guidewire`（基于 `f19954c` = 全部 aorta/实时/PhysicsEngine 抽象 + segment_part 平滑）。
-- **未开工**：`warp-lang`/`newton[sim]` 均未安装（`import warp` 当前失败）。
-- **下一步**：执行 **D0 gate** —— 装 `newton[sim]`，写最小"粒子链弯曲杆"脚本验证 60Hz + 细杆刚度。这是 B 成不成立的第一个关口；通过即一路 B，受阻当天切 A。
-- **gate 跑在哪**：Newton 是 Linux 一等公民，**建议 D0–D2 直接在 Linux + A6000 服务器上跑**（pip 轮子/CUDA 最顺、显存充裕），3060 本地用于改代码；避免 Win11 上趟 Newton 轮子兼容。这也与最终部署环境一致。
+> 本文原 §八"未开工"已过时。§五 的 D0→D3 分阶段计划**已全部落地并上线**，选型结论（B：Newton 独立版）已被验证成立。详细记录见 doc/07 §9、doc/05 §30，实机全程在 A6000（`cathsim-newton` 环境）验证。
+
+- **分支**：`feat/warp-xpbd-guidewire`。
+- **D0 gate ✅（2026-06-29）**：Newton **1.3.0**（非文中预估的 1.2.1）搭出亚毫米细杆，A6000 上 **255 control-fps**（4.3× 于 60Hz 判据），弯曲刚度单调可控、接触稳定。**判据成立 → 一路走 B，A（手写 Warp）未启用。**
+- **D1/D2 ✅**：真腔碰撞打通。aorta_tree 用 `routes.json` 携带的 VMTK `radius_m` 建**变半径厚壁环管**；segment_part 用干净水密网格环管 + 分割体 signed field 居中（离线 GT breach −0.41mm）。
+- **D3 ✅（上层零改）**：`services/physics/newton_engine.py` 实现 `PhysicsEngine` 协议，`factory`/`NavigationEngine` 接入，`PlannedPath` 携带 `radii`。NavigationEngine(aorta_tree) 各 endpoint **contact_force=0（无穿管）**、~46–51 control-fps、换支重建正常；WebSocket 全链路通过；远端后端已用该配置重启上线。
+
+**两处对原文技术判断的实践订正**（后续开发须以此为准）：
+
+1. **求解器：细杆用 `SolverVBD`，不是 `SolverXPBD`**。§二.1 / §三"SolverXPBD 标称 cables/ropes"这一条**经实测不成立**——XPBD 不驱动 cable-joint 的弯曲 `target_ke`；细杆走 VBD 才对。且 **`stretch_damping` 必须为 0**（>0 会把杆拉散），是最大的假失败陷阱。
+2. **穿管根因是"驱动"不是"墙"**。§一.4 预期"SDF 天然密封即可解决穿管"只对**静置**成立；穿管发生在**推进过程**，属阶段 D 驱动/导丝模型问题。当前用 **graded soft-anchor**（近端贴合居中路线、远端 `free_span` 节软锚坡道）消除穿管，但这是**偏运动学的过渡驱动**，未建模真实推送传导。
 
 ---
 
-> 关联文档：[05-开发进度记录.md](05-开发进度记录.md)（§28 物理攻关、§29 抽象+实时）、[07-物理引擎抽象与实时性能架构.md](07-物理引擎抽象与实时性能架构.md)（阶段 A–D 规划）。
+## 九、D3 之后的后续开发规划
+
+D0–D3 证明了"单根连续体导丝能在真腔里 60Hz 跟手、不穿管"。但当前驱动是 graded soft-anchor（运动学过渡方案），且只在 aorta_tree 主路线验证。后续沿两条轨道推进：**物理轨道**（把导丝驱动做真、推广到全体模）与**平台轨道**（doc/05 §27 的训练/视图/评估能力，与物理并行）。
+
+### 9.1 物理轨道（doc/08 的直接续接）
+
+| 阶段 | 做什么 | 验收判据 | 备注 |
+|---|---|---|---|
+| **D4 真实力驱动** | 用**真实力/位移驱动**替代 graded soft-anchor：近端推力经 Newton cable-joint 的拉伸+弯曲约束传导到远端（真实 tip 滞后/屈曲）；**软头硬身分段刚度**（远端软 tip / 近端硬身，`bend_stiffness` 分段标定）；**Cosserat 扭转约束**让 `rotate` 真正扭转 J-tip 实现主动转向（doc/08 §七原将扭转延后，现到点）；**导管/sheath 约束**约束近端减少整根屈曲 | tip 不再长期滞后而 root 单独前进；转弯出现合理贴壁/滑动/回弹；`contact_force`/`wall_distance` 反映真实接触 | 从"运动学过渡"进到"真物理驱动"，是消除 graded anchor 保真度欠账的核心 |
+| **D5 主动导航 autopilot** | graded anchor 靠贴中心线**绕过了转向**；真实力驱动后需把闭环转向控制器接回——复用 doc/05 §28.3 `PhysicsAutopilot`（look-ahead 朝向误差 + J-tip 方位不可观测下的爬山符号搜索 + 力门控推速 + stall 扫掠/回拉），在真实物理上把 tip 导到目标 | 主路线自动到达目标；宽腔不甩打（§28.9 遗留的宽腔调参：抗屈曲/降增益/收敛 stall） | 控制层，与物理解耦；可人工 push/rotate 或 autopilot 二选一 |
+| **D6 推广全体模 + 分支树** | 用真半径回攻 **segment_part 细管**（当年 V-HACD 封不住的腔，SDF/环管天然密封）；aorta_tree **分支树多目标**全覆盖验证（换支已支持）；与平台轨道 P0（segment_part graph 连通性）联动 | 各体模主要目标在真物理下可达、无穿管；换支稳定 | |
+| **D7 容器化部署固化** | 落地 doc/08 §六：`Dockerfile`（`nvidia/cuda` + 依赖 + `newton[sim]`）、`docker-compose.yml`、`.devcontainer/`；本地 3060 与 A6000 同镜像 | 一键 `docker compose up` 起后端；Godot 只改 WS 地址 | 与 Isaac Sim 演进走同一条容器化路 |
+
+### 9.2 演进预留触发（doc/08 §3.4）
+
+底层是同一个 Newton，因此以下能力是"提升(promote)"不是"重写"。**触发点**：当 RTX 合成数据 / RL 训练 / ROS 桥中任意一项成为**现行开发目标**时，才启动 `Newton 场景 → USD → isaacsim.physics.newton` 的提升。现阶段只保证：物理与渲染解耦、场景尽量 USD 可表达（`newton-usd-schemas`）、碰撞数据用标准网格/体（`visual.stl`/`seg.nrrd`）。
+
+- **RTX 渲染 / 拟真传感器**：Newton 物理不变，场景加载进 Isaac Sim 用 RTX 出图，或仍走流式。
+- **RL 训练（Isaac Lab）**：Isaac Lab 底座即 Newton；模型进 Isaac Lab 起千环境并行。
+- **ROS 桥 / 数字孪生**：场景进 Isaac Sim 后用其 ROS2 桥。
+
+### 9.3 平台轨道（与物理并行，源自 doc/05 §27.5）
+
+物理轨道把"导丝像真的"做到位；平台轨道把系统从"能演示"做成"能训练能评估"：
+
+- **P0 — segment_part graph 连通性**：补孤立分支虚边，任意目标 A* 可达，`plan_to_target()` 稳定（与 D6 细管推广互为前置）。
+- **P1 — 模式显式化**：API/HUD 明确区分 guided(演示/可达性) 与 physics(训练/算法验证)，避免保真度语义混淆。
+- **P1 — 第三人称相机可视性修复**：当前第三人称跟踪视角下多层半透明血管壁叠加、糊成一片，看不清导丝在哪段管腔。纯客户端（Godot）、与物理解耦、成本低。做法：相机近裁剪面 / 只显示导丝局部一段血管（远段淡出或隐藏）+ 按到相机距离做 opacity 衰减 + 相机与导丝之间的遮挡壁穿透剔除。**建议紧贴/并行 D4**——调真实力驱动形变时正需要一个能看清导丝弯曲的视角（与 X-ray 分屏互补）。
+- **P1 — X-ray 荧光透视视图**：Godot X-ray Shader（灰白负片、血管半透明、导丝高亮）+ 3D/X-ray 分屏。
+- **P1 — 训练闭环**：会话录制（控制输入/状态/风险/碰撞）+ 回放 + 基础评分（用时、偏离、最大接触力、危险次数、完成度）。
+- **P2 — RL 推理评估 / 手柄映射 / 部署产品化**（与 D7、9.2 的 Isaac Lab 收敛）。
+
+### 9.4 建议下一步切入点
+
+物理轨道最自然的续接是 **D4 真实力驱动**——它直接偿还 graded soft-anchor 的运动学欠账，是 doc/08 判据（"手感"）之后"像真导丝"这一目标的核心。建议：先在 A6000 spike 里把 **D4（分段刚度 + 扭转转向 + sheath 约束的力驱动）** 与 **D5（autopilot 接回）** 一起验证（二者耦合：真实力驱动必须配主动转向才能推进），通过后再按 D3 的"上层零改"方式接入 `newton_engine.py`。
+
+---
+
+> 关联文档：[05-开发进度记录.md](05-开发进度记录.md)（§28 物理攻关、§29 抽象+实时、§30 Newton D2/D3 完成）、[07-Newton导丝物理仿真开发记录与规划.md](07-Newton导丝物理仿真开发记录与规划.md)（§6 阶段 A–E 规划、§9 D2/D3 完成记录）。

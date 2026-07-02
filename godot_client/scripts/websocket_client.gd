@@ -17,6 +17,7 @@ signal state_received(state: Dictionary)        ## state_update payload
 signal batch_received(batch: Dictionary)        ## state_batch payload
 signal path_received(path: Dictionary)          ## path_response payload
 signal error_received(error: Dictionary)        ## error payload
+signal engine_params_received(effective: Dictionary)  ## engine_params echo (live deform panel)
 
 @export var server_url: String = "ws://localhost:9000/ws/session"
 @export var phantom: String = "low_tort"
@@ -160,6 +161,8 @@ func _handle_packet(packet: String) -> void:
 			batch_received.emit(data)
 		"path_response":
 			path_received.emit(data)
+		"engine_params":
+			engine_params_received.emit(data.get("effective", {}))
 		"error":
 			# SESSION_EXISTS can occur from a benign session_start retry after the
 			# session was already created; ignore it.
@@ -198,6 +201,16 @@ func send_control(delta_push: float, delta_rotate: float) -> void:
 func send_reset() -> void:
 	if _was_open:
 		_send("reset", {})
+
+
+## Live-tune backend guidewire deformation (interactive parameter panel).
+## ``params`` is a flat dict of {name: value}, any of: bend, tip_bend, soft_tip,
+## stretch, push_speed, rotate_speed (applied instantly) or jtip_deg/jtip_bodies/
+## contact_ke (trigger a scene rebuild). The backend echoes the effective state
+## via engine_params_received so sliders can sync to any clamping.
+func send_engine_params(params: Dictionary) -> void:
+	if _was_open and session_id != "":
+		_send("engine_params", params)
 
 
 ## Switch the active session's navigation target to a branch route (multi-branch

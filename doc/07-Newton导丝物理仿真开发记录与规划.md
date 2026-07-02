@@ -410,3 +410,42 @@ Godot 连接后有时需要等待控制输入才拿到完整 body/path 渲染数
 当前最重要的工程边界是：
 
 短期可以把 Newton demo 调到“可观察、可定位、失败可控”；但要让转弯不穿管、导丝运动像真实导丝，必须进入真实血管碰撞和导丝约束建模阶段。
+
+## 9. D2/D3 完成记录（真实腔碰撞 + 最小阶段 D 驱动 + 集成上线）
+
+更新时间：2026-07-01。全程在 A6000 服务器（`cathsim-newton` 环境，Newton 1.3.0）验证。对应 `doc/08` 的 D2/D3 阶段。§4.3 的“转弯穿管”本轮已根治并集成上线。
+
+### 9.1 诊断：穿管的真正根源是“驱动”，不是“墙”
+
+对真实 `segment_part` 腔（`Segmentation.seg.nrrd` 做 ground-truth signed field）与 `aorta_tree` 路线逐项实验后确认：
+
+- **静置**时真实腔壁能稳定接住导丝（segment_part 离线验证 breach −0.41mm）。
+- **穿管发生在推进过程**：原来“沿弯曲中心线瞬移单根 root 刚体 + 其余自由”的粗糙驱动，会在弯道把推送吸收成关节转动、把自由尖端甩出或隧穿。这正是 §4.1“红色 tip 卡住、root 先动”的同一问题，属**阶段 D（sheath/导管-导丝耦合 + 软头硬身）**，非碰撞墙问题。
+- 加硬身管刚度（bend 50→5000）对推送传导**无改善**，进一步印证是驱动模型问题。
+
+### 9.2 攻下的可行配方
+
+- **碰撞墙（真实腔）**
+  - `aorta_tree`：其 `visual.stl` 粗糙（7.5k 面）且末端开口，不适合直接做 SDF。改用各路线 `routes.json` 自带的真实 VMTK 内切半径 `radius_m`，沿路线构造**变半径厚壁环管**（内/外双环，`newton.Mesh(is_solid=True).build_sdf`）——水密、真实、已居中。
+  - `segment_part`：有干净水密 `visual.stl`（180k 面）+ 分割体，可用**真实网格厚壁环管**并用 signed field 梯度上升把中心线居中。
+  - 踩坑：单面网格 `is_solid=True` 会把“腔内”当实体、把导丝挤出（与绕序无关）；必须构造有界厚壁环管（腔=自由/正、壁=实体/负）。`lumen_band` 需覆盖满局部最大半径，否则宽腔（如主动脉根部 12mm）中心处 SDF 未定义，尖端隧穿。
+- **驱动（最小阶段 D 模型）**：**graded soft-anchor**。近端“已插入段”贴合居中路线（权重 alpha=1），远端 `free_span=6` 节做软锚坡道（alpha→`tip_alpha=0.3`）；每 substep 物理步进后 `pos = (1-alpha)*phys + alpha*target`，target 为路线上 `base_arc[j] + insert_s` 处的点。插入行程封顶到路线末端。既消除穿管、又保留软头物理。
+- **吞吐**：profiling 定位瓶颈是 `solver.step`（VBD，占 79%），**不是 numpy 同步（仅 2%）**。graded anchor 使 VBD 在 **6 substeps × 2 iterations** 即稳定，从 ~4fps 提到 **~58fps**（跨 4 条路线，2× 推速仍不穿管）。
+
+### 9.3 集成（D3，上层零改写）
+
+- `services/physics/base.py`：`PlannedPath` 携带可选 `radii`，新增 `radius_at_arclen`。
+- `services/navigation_engine.py`：新增 `_route_radii` 取 `radius_m`，经 `set_planned_path(..., radii=)` 注入（构造默认路线 + `select_route` 换支）。
+- `services/physics/newton_engine.py`：`_build_tube_mesh` 改为变半径环管（无半径时回退常半径）；`step()` 改为 insert_s 推进 + 6-substep graded soft-anchor；`set_path` 换路重建；`_raw_pose` 按局部变半径算 wall_distance/contact_force，`arclen` 报告尖端精确弧长。
+- 新增环境变量：`CATHSIM_NEWTON_{ITERS,SDF_VOXEL,LUMEN_BAND,MIN_RADIUS,FREE_SPAN,TIP_ALPHA}`；默认即 D3 验证配置。
+
+### 9.4 验证结果
+
+- **引擎直测 / NavigationEngine（aorta_tree）**：endpoint_9/6/0 全部 **contact_force=0（无穿管）**、wall_distance>0、**~46–51 control-fps**、tip 推进到目标、换支重建正常。
+- **WebSocket 全链路**：`engine=NewtonEngine`、20 节 body、`path/safety/episode` 协议完整、tip 推进 68.5mm、无穿管。
+- **segment_part 常半径回退**：正常渲染、无回归。
+- **上线**：远端后端已用该配置重启（`start_newton_demo.sh`：`SUBSTEPS=6`、`PUSH_SPEED=0.05`），经 `run_bg.sh` 脱离会话运行。
+
+### 9.5 仍属阶段 D 的后续
+
+graded anchor 是消除穿管的**偏运动学过渡方案**，未建模真实推送传导（tip 滞后/屈曲、软头硬身分段刚度、推进轮/sheath 动力学）。后续阶段 D 用真实力驱动 + 导管约束替代软锚，才能让导丝“推得像真的”。相关配方与踩坑见记忆 `d2-d3-newton-lumen-recipe` 与 `spikes/D2_RESULTS.md`。

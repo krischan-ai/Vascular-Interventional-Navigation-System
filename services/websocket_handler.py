@@ -66,6 +66,7 @@ class MessageType(str, Enum):
     SESSION_STOP = "session_stop"
     PATH_REQUEST = "path_request"
     SELECT_ROUTE = "select_route"
+    ENGINE_PARAMS = "engine_params"
     RESET = "reset"
     PONG = "pong"
 
@@ -305,6 +306,9 @@ class WebSocketHandler:
 
         elif msg_type == MessageType.SELECT_ROUTE:
             await self._handle_select_route(conn_state, message.data)
+
+        elif msg_type == MessageType.ENGINE_PARAMS:
+            await self._handle_engine_params(conn_state, message.data)
 
         elif msg_type == MessageType.RESET:
             await self._handle_reset(conn_state, message.data)
@@ -594,6 +598,39 @@ class WebSocketHandler:
 
         await self._send_message(
             conn_state, msg_type, session_id=conn_state.session_id, data=payload
+        )
+
+    async def _handle_engine_params(
+        self, conn_state: ConnectionState, data: dict
+    ) -> None:
+        """Live-tune backend guidewire deformation params (interactive panel).
+
+        ``data`` is a flat dict of param -> value (bend / tip_bend / soft_tip /
+        stretch / push_speed / rotate_speed / jtip_deg / ...). Applied to the live
+        engine; the effective (clamped) state is echoed back so the client HUD can
+        sync its sliders. No step is run -- the next control frame reflects it.
+        """
+        if not conn_state.session_id:
+            await self._send_error(conn_state, "NO_SESSION", "No active session")
+            return
+        try:
+            engine = self._session_manager.get_session(conn_state.session_id)
+        except KeyError:
+            conn_state.session_id = None
+            await self._send_error(conn_state, "SESSION_EXPIRED", "Session no longer exists")
+            return
+
+        try:
+            effective = await self._run_blocking(engine.set_engine_params, dict(data))
+        except Exception as e:  # noqa: BLE001 - surface any tuning error to the client
+            await self._send_error(conn_state, "PARAM_ERROR", f"{type(e).__name__}: {e}")
+            return
+
+        await self._send_message(
+            conn_state,
+            MessageType.ENGINE_PARAMS,
+            session_id=conn_state.session_id,
+            data={"effective": effective or {}},
         )
 
     async def _handle_reset(

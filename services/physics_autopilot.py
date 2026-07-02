@@ -42,6 +42,7 @@ class AutopilotConfig:
     max_rotate: float = 1.0
     force_soft: float = 1.5             # contact force where push starts easing
     force_hard: float = 6.0            # contact force where push is fully cut
+    force_emergency: float = 24.0       # while stalled, back off (no sweep) above this
     stall_window: int = 12              # steps of no progress -> declare stall
     stall_advance_m: float = 0.002      # min arc-length gain counted as progress
     sweep_rotate: float = 1.0           # rotation magnitude during a stall sweep
@@ -129,7 +130,18 @@ class PhysicsAutopilot:
             self._stall_steps += 1
 
         if self._stall_steps >= cfg.stall_window:
-            return self._stall_action()
+            # Emergency: deeply breaching while wedged. Spinning a jammed tip hard
+            # against the wall augers it through (endpoint_3 perforated at 10mm),
+            # so back straight off with no sweep instead of ramming/augering.
+            if abs(float(contact_force)) >= cfg.force_emergency:
+                return float(cfg.retract_push), 0.0
+            push, rotate = self._stall_action()
+            # Force-gate the forward sweep push too: a stall against a wall must
+            # not keep ramming. Retraction (push < 0) is left un-gated -- backing
+            # off is exactly what we want when the contact force is high.
+            if push > 0.0:
+                push *= self._force_attenuation(contact_force)
+            return float(np.clip(push, -1.0, 1.0)), float(np.clip(rotate, -1.0, 1.0))
 
         # Steering: rotation spins the J-tip bend azimuth; we cannot observe that
         # azimuth, so hill-climb -- keep rotating one way while heading error

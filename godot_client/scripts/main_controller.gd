@@ -82,6 +82,7 @@ const CAM_MODE_NAMES := {
 var _ws  # WebSocketClient node
 var _input  # InputHandler node
 var _hud  # HUD CanvasLayer
+var _deform  # DeformPanel CanvasLayer (live guidewire deformation sliders)
 var _guidewire  # GuidewireRenderer node
 var _path  # PathRenderer node
 var _entry_marker  # EntryMarker node (vessel entry + target highlights)
@@ -348,6 +349,13 @@ func _setup_network_and_input() -> void:
 	_ws.routes_received.connect(_on_routes)
 	_ws.batch_received.connect(_on_batch)
 	_ws.state_received.connect(_on_state)
+
+	# Interactive deformation panel: live-tune the Newton force-drive params.
+	_deform = preload("res://scripts/deform_panel.gd").new()
+	add_child(_deform)
+	_deform.param_changed.connect(_ws.send_engine_params)
+	_ws.engine_params_received.connect(_deform.sync_effective)
+
 	_input.control.connect(_ws.send_control)
 	_input.input_state.connect(_hud.update_input)
 	_input.reset_requested.connect(_ws.send_reset)
