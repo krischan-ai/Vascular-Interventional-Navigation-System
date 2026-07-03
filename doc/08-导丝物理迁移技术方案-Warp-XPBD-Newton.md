@@ -292,7 +292,7 @@ D0–D3 证明了"单根连续体导丝能在真腔里 60Hz 跟手、不穿管"�
 
 | 阶段 | 做什么 | 验收判据 | 备注 |
 |---|---|---|---|
-| **D4 真实力驱动** | 用**真实力/位移驱动**替代 graded soft-anchor：近端推力经 Newton cable-joint 的拉伸+弯曲约束传导到远端（真实 tip 滞后/屈曲）；**软头硬身分段刚度**（远端软 tip / 近端硬身，`bend_stiffness` 分段标定）；**Cosserat 扭转约束**让 `rotate` 真正扭转 J-tip 实现主动转向（doc/08 §七原将扭转延后，现到点）；**导管/sheath 约束**约束近端减少整根屈曲 | tip 不再长期滞后而 root 单独前进；转弯出现合理贴壁/滑动/回弹；`contact_force`/`wall_distance` 反映真实接触 | 从"运动学过渡"进到"真物理驱动"，是消除 graded anchor 保真度欠账的核心 |
+| **D4 真实力驱动** | 用**真实力/位移驱动**替代 graded soft-anchor：近端推力经 Newton cable-joint 的拉伸+弯曲约束传导到远端（真实 tip 滞后/屈曲）；**软头硬身分段刚度**（远端软 tip / 近端硬身，`bend_stiffness` 分段标定）；**Cosserat 扭转约束**让 `rotate` 真正扭转 J-tip 实现主动转向（doc/08 §七原将扭转延后，现到点）；**导管/sheath 约束**约束近端减少整根屈曲 | tip 不再长期滞后而 root 单独前进；转弯出现合理贴壁/滑动/回弹；`contact_force`/`wall_distance` 反映真实接触 | 从"运动学过渡"进到"真物理驱动"，是消除 graded anchor 保真度欠账的核心。**sheath 约束/抗屈曲子项 ✅ 见 §9.6** |
 | **D5 主动导航 autopilot** | graded anchor 靠贴中心线**绕过了转向**；真实力驱动后需把闭环转向控制器接回——复用 doc/05 §28.3 `PhysicsAutopilot`（look-ahead 朝向误差 + J-tip 方位不可观测下的爬山符号搜索 + 力门控推速 + stall 扫掠/回拉），在真实物理上把 tip 导到目标 | 主路线自动到达目标；宽腔不甩打（§28.9 遗留的宽腔调参：抗屈曲/降增益/收敛 stall） | 控制层，与物理解耦；可人工 push/rotate 或 autopilot 二选一 |
 | **D6 推广全体模 + 分支树** | 用真半径回攻 **segment_part 细管**（当年 V-HACD 封不住的腔，SDF/环管天然密封）；aorta_tree **分支树多目标**全覆盖验证（换支已支持）；与平台轨道 P0（segment_part graph 连通性）联动 | 各体模主要目标在真物理下可达、无穿管；换支稳定 | |
 | **D7 容器化部署固化** | 落地 doc/08 §六：`Dockerfile`（`nvidia/cuda` + 依赖 + `newton[sim]`）、`docker-compose.yml`、`.devcontainer/`；本地 3060 与 A6000 同镜像 | 一键 `docker compose up` 起后端；Godot 只改 WS 地址 | 与 Isaac Sim 演进走同一条容器化路 |
@@ -339,6 +339,26 @@ D4/D5 已上线（真实力驱动 + autopilot，commit `c1e0651`）。其上按 
 3. **点击导航暂无强反馈**：无目标标记 / HUD 提示，导丝又走得慢，易误以为无反应 → 待补（与 §9.3 P1 训练闭环/HUD 一并做）。
 
 **未提交**：以上后端（3 改 + 1 新 + 2 测试）+ Godot（3 个 `.gd`）改动在 `feat/warp-xpbd-guidewire` 未提交；A6000 后端当前以同步的未提交文件运行。
+
+### 9.6 演示硬化 + 抗屈曲（更新 2026-07-03，已实机验证）
+
+承接 §9.5 三条诚实边界与 §9.1 D4「sheath 约束减少整根屈曲」/ §28.9「抗屈曲」欠账，本轮做了三件事并全部在 A6000（`cathsim-newton`）实机验证通过。**均在 `feat/warp-xpbd-guidewire`，仍未提交；A6000 以 scp 同步的未提交文件运行。**
+
+| 项 | 做了什么 | 偿还的欠账 |
+|---|---|---|
+| **① 按模式安全阈值** | `NewtonEngine.is_force_drive`/`contact_ke` 属性 + `NavigationEngine._is_force_physics()`；`_compute_safety_status` 分支：force 模式按**穿透量** `contact_force/contact_ke`（`BREACH_WARN=0.05mm`/`BREACH_STOP=0.30mm`，正常贴壁=SAFE_NAV）判定，guided 保留原 `wall_distance` 带；`RiskAssessor.assess(force_mode, contact_ke)` 同步（穿透量替换贴壁间距指标） | §9.5 边界#2 `COLLISION_STOP` 误报（force 模式正常贴壁过敏） |
+| **② 点击导航反馈** | `entry_marker.gd` 青色目标球 `set_goal/clear_goal`；`hud_controller.gd` `set_nav` 导航行 + 图例；`main_controller.gd` 点击时挂目标球 + HUD「自动 Auto → waypoint k/n · NN%」实时进度 | §9.5 边界#3 点击导航无强反馈 |
+| **③ 抗屈曲** | **脱垂保护**：`_feed_budget(requested, slack, max_slack)` + `_tip_arclen()`，force 模式下当 `slack=已喂弧长−tip实际弧长` 超过 `max_slack`（默认 12mm）即钳停前向喂线（回拉不限）；**sheath 自动模式**：`CATHSIM_NEWTON_SHEATH_BODIES` 默认 `1→−1`（自动=粘住除远端 `free_len`≈30mm 外的全部近端，缩短会屈曲的无支撑柱）。三参数经 `engine_params` 通道在线可调 | §9.1 D4「sheath 约束」+ §28.9「抗屈曲」 |
+
+**根因认定**：缠绕=自由段**柱屈曲**——`sheath_bodies=1` 时只有根节被支撑，tip 顶死后持续推进把喂入长度堆成环，且导丝**无自碰撞**使环互相穿过（视觉打结）。①中"碰壁误报"与③"缠绕"实为同一现象的两面：屈曲把节压进壁 → 真实 breach → 合理告警；纯误报只出在正常贴壁。
+
+**实机验证**：
+- **安全阈值**（`spikes/smoke2.py`，endpoint_9 autopilot 700 步）：progress **0.429→0.991**（保护未妨碍推进），安全状态 **SAFE_NAV 672 / DANGER_WARNING 26 / COLLISION_STOP 2**（此前几乎全程 COLLISION_STOP）。
+- **抗屈曲**（`spikes/verify_antibuckle.py`，endpoint_3 盲推 push=1.0 顶死，OLD `sheath=1,guard off` vs NEW 默认）：`pile_ratio` **9.27→1.27**（OLD 折叠进 1/9 中心线跨度=盘绕，NEW 平铺）、`slack` **50.8→12.0mm**（保护钳顶）、`breach` **0.99→0.78mm**。**PASS**。
+
+**两条诚实边界（后续须知）**：
+1. **盲推 reach 75→54% 是保护按设计工作，非退化**：`verify_antibuckle` 里 OLD 的 75% 是屈曲伪影（盘绕 tip 的最近弧长投影窜高）；NEW 在 slack 到顶时**故意停喂**。真实导航靠 D5 转向穿弯（endpoint_9 autopilot 已达 0.99），不靠盲推。
+2. **`max_slack=12mm`/`free_len=30mm` 是估值**：急弯处自由线弦切会吃 slack 预算，太紧可能误停正常推进 → 经 `engine_params` 在线调；Godot 编辑器手感实测（青色目标球/HUD + 顶死不缠绕）仍待做（需 Win Godot）。
 
 ---
 

@@ -19,6 +19,14 @@ extends Node3D
 @export var start_position: Array = []
 @export var end_position: Array = []
 
+# Surgical-view wall fade (meters). In the follow ("手术视图") view the vessel wall
+# is fully opaque within `surgical_fade_near` of the guidewire tip and fully
+# transparent beyond `surgical_fade_far`, so only the local lumen segment shows
+# instead of many overlapping translucent walls糊成一片 (doc/08 §9.3 P1 可视性修复).
+# The overview stays the whole-tree translucent 演示视图.
+@export var surgical_fade_near: float = 0.03
+@export var surgical_fade_far: float = 0.11
+
 # Switchable phantom models, cycled at runtime with the M key. The exported
 # phantom above selects which entry is active on launch (matched by phantom
 # name); each entry is the single source of truth for that model's navigation
@@ -90,8 +98,9 @@ var _rig  # CameraRig node (follow + endoscope cameras)
 var _camera: Camera3D  # overview camera
 var _cam_mode: int = CamMode.OVERVIEW
 var _vessel_meshes: Array = []  # MeshInstance3D nodes of the vessel
-var _vessel_mat_overlay: StandardMaterial3D  # translucent (overview/follow)
+var _vessel_mat_overlay: ShaderMaterial  # cyan fresnel-glow whole-tree (overview/demo)
 var _vessel_mat_interior: StandardMaterial3D  # opaque inner wall (endoscope)
+var _vessel_mat_surgical: ShaderMaterial  # cyan fresnel + tip-proximity fade (follow/surgical)
 var _env: Environment  # world environment; endoscope toggles its depth fog
 var _vessel: Node3D  # current vessel scene root (freed/rebuilt on model switch)
 var _model_index: int = 0  # index into MODELS of the active phantom
@@ -113,6 +122,9 @@ const _AUTOPILOT_TICK: float = 0.05
 # "waypoint k/n" label for the engaged click goal, shown in the HUD nav line
 # alongside live progress so the (slow) autopilot reads as responsive.
 var _autopilot_wp_text: String = ""
+# Last clicked navigation goal (backend meter frame), so the 恢复导航 button can
+# re-engage the autopilot toward it after a 人工接管 / 急停.
+var _last_click_target: Array = []
 
 # On-screen diagnostics.
 var _session_id: String = "none"
@@ -178,7 +190,7 @@ func _load_model_scene() -> void:
 	# fog) and auto-follows again once its first tip pose streams in.
 	_auto_followed = false
 	_cam_mode = CamMode.OVERVIEW
-	_set_vessel_interior(false)
+	_set_vessel_view_material(CamMode.OVERVIEW)
 	if _env:
 		_env.fog_enabled = false
 	if vessel != null:
@@ -276,36 +288,93 @@ func _setup_vessel() -> Node3D:
 
 
 func _apply_vessel_material(node: Node) -> void:
-	# Overlay material (overview/follow): translucent so the guidewire shows
-	# through from outside.
-	_vessel_mat_overlay = StandardMaterial3D.new()
-	_vessel_mat_overlay.albedo_color = Color(0.8, 0.3, 0.3, 0.28)
-	_vessel_mat_overlay.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	_vessel_mat_overlay.cull_mode = BaseMaterial3D.CULL_DISABLED
+	# Overview/demo material: a Fresnel edge-glow shader (设计图右上角"青蓝发光血管").
+	# The old translucent red material made N overlapping walls α-sum into a uniform
+	# red haze (红雾) with no readable structure. Fresnel fixes this at the root: the
+	# lumen CENTRE is near-transparent (so overlapping walls no longer accumulate)
+	# while the silhouette EDGE glows opaque cyan — the tube boundary defines the
+	# structure instead of alpha stacking. Unshaded so it cannot clip to white and
+	# keeps the same even glow from any camera angle.
+	_vessel_mat_overlay = _make_fresnel_material(false)
 
 	# Interior material (endoscope): opaque so the lumen wall is visible from
 	# inside instead of see-through. Double-sided so Godot flips back-face
-	# normals for correct shading. A flat emission keeps every wall an even red
-	# (it cannot clip to white like a close light does); the endoscope's depth
+	# normals for correct shading. A flat teal emission keeps every wall an even
+	# tone (it cannot clip to white like a close light does); the endoscope's depth
 	# fog supplies the near/far gradient so the tunnel does not read as one solid
-	# field.
+	# field. Retinted from red to teal to match the cyan glow vessel palette.
 	_vessel_mat_interior = StandardMaterial3D.new()
-	_vessel_mat_interior.albedo_color = Color(0.7, 0.28, 0.26)
+	_vessel_mat_interior.albedo_color = Color(0.16, 0.42, 0.5)
 	_vessel_mat_interior.cull_mode = BaseMaterial3D.CULL_DISABLED
 	_vessel_mat_interior.roughness = 0.85
 	_vessel_mat_interior.metallic = 0.0
 	_vessel_mat_interior.emission_enabled = true
-	_vessel_mat_interior.emission = Color(0.45, 0.16, 0.15)
+	_vessel_mat_interior.emission = Color(0.10, 0.30, 0.36)
 	_vessel_mat_interior.emission_energy_multiplier = 0.3
 
+	# Surgical (follow) material: the same Fresnel glow, additionally faded by
+	# distance from the guidewire tip. Fragments within `fade_near` of the tip keep
+	# full glow; past `fade_far` they vanish, so the follow view shows only the local
+	# glowing lumen segment and the distant tree no longer piles up. `tip_world_pos`
+	# is refreshed each frame in _feed_rig.
+	_vessel_mat_surgical = _make_fresnel_material(true)
+	_vessel_mat_surgical.set_shader_parameter("fade_near", surgical_fade_near)
+	_vessel_mat_surgical.set_shader_parameter("fade_far", surgical_fade_far)
+	_vessel_mat_surgical.set_shader_parameter("tip_world_pos", Vector3.ZERO)
+
 	_vessel_meshes = node.find_children("*", "MeshInstance3D", true, false)
-	_set_vessel_interior(false)
+	_set_vessel_view_material(CamMode.OVERVIEW)
 
 
-func _set_vessel_interior(interior: bool) -> void:
-	# Swap the vessel material so the lumen is opaque in endoscope view but
-	# translucent (guidewire visible) in overview/follow.
-	var mat: StandardMaterial3D = _vessel_mat_interior if interior else _vessel_mat_overlay
+# Build the青蓝菲涅尔发光 vessel shader. `with_fade` adds a tip-proximity term
+# (follow/surgical view) so only the local lumen segment glows; without it the
+# whole tree glows evenly (overview/demo view). Alpha-blended, unshaded, and
+# depth_draw_never so the transparent cores never occlude each other or the wire.
+func _make_fresnel_material(with_fade: bool) -> ShaderMaterial:
+	var fade_decl := ""
+	var fade_apply := ""
+	if with_fade:
+		fade_decl = "uniform vec3 tip_world_pos;\n" \
+			+ "uniform float fade_near = 0.03;\n" \
+			+ "uniform float fade_far = 0.11;\n"
+		fade_apply = "	float prox = 1.0 - smoothstep(fade_near, fade_far, distance(tip_world_pos, world_pos));\n" \
+			+ "	rim *= prox;\n"
+	var shader := Shader.new()
+	shader.code = "shader_type spatial;\n" \
+		+ "render_mode cull_disabled, unshaded, depth_draw_never, blend_mix;\n" \
+		+ "uniform vec3 rim_color : source_color = vec3(0.35, 0.85, 1.0);\n" \
+		+ "uniform vec3 core_color : source_color = vec3(0.10, 0.40, 0.55);\n" \
+		+ "uniform float rim_power = 2.2;\n" \
+		+ "uniform float core_alpha = 0.10;\n" \
+		+ "uniform float glow = 1.6;\n" \
+		+ fade_decl \
+		+ "varying vec3 world_pos;\n" \
+		+ "void vertex() { world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz; }\n" \
+		+ "void fragment() {\n" \
+		+ "	float f = pow(1.0 - clamp(dot(normalize(NORMAL), normalize(VIEW)), 0.0, 1.0), rim_power);\n" \
+		+ "	float rim = f;\n" \
+		+ fade_apply \
+		+ "	ALBEDO = mix(core_color, rim_color, rim);\n" \
+		+ "	EMISSION = rim_color * rim * glow;\n" \
+		+ "	ALPHA = clamp(core_alpha + rim * 0.9, 0.0, 1.0);\n" \
+		+ "}\n"
+	var mat := ShaderMaterial.new()
+	mat.shader = shader
+	return mat
+
+
+# Select the vessel wall material for the active camera mode: whole-tree translucent
+# in overview (演示视图), tip-proximity fade in follow (手术视图), opaque inner wall
+# in endoscope.
+func _set_vessel_view_material(mode: int) -> void:
+	var mat: Material
+	match mode:
+		CamMode.ENDOSCOPE:
+			mat = _vessel_mat_interior
+		CamMode.FOLLOW:
+			mat = _vessel_mat_surgical
+		_:
+			mat = _vessel_mat_overlay
 	if mat == null:
 		return
 	for child in _vessel_meshes:
@@ -378,6 +447,17 @@ func _setup_network_and_input() -> void:
 	_input.navigate_click.connect(_on_navigate_click)
 	_input.autopilot_off.connect(_disengage_autopilot)
 	_ws.shape_intent_received.connect(_on_shape_intent)
+
+	# Dashboard control buttons (设计图 仪表盘): mouse equivalents of the safety
+	# actions and view/model/branch/reset shortcuts, so the platform is operable
+	# without the keyboard.
+	_hud.emergency_stop.connect(_on_emergency_stop)
+	_hud.manual_takeover.connect(_disengage_autopilot)
+	_hud.resume_nav.connect(_on_resume_nav)
+	_hud.view_cycle_requested.connect(_cycle_camera_mode)
+	_hud.model_cycle_requested.connect(_cycle_model)
+	_hud.branch_cycle_requested.connect(_cycle_branch)
+	_hud.reset_requested.connect(_on_reset_button)
 
 
 func _on_connected() -> void:
@@ -501,39 +581,42 @@ func _process(delta: float) -> void:
 	_ws.send_control(0.0, 0.0)
 
 
-# Left click -> pick the route waypoint nearest the click ray and drive the tip
-# there via the backend autopilot. Robust to coordinate frames: the waypoints are
-# in the backend meter frame and rendered under the path node, so we compare in
-# world space via that node's transform and send back the exact backend waypoint
-# (no inverse transform needed).
+# Left click -> pick the route waypoint whose ON-SCREEN position is nearest the
+# click, and drive the tip there via the backend autopilot. Robust to coordinate
+# frames: the waypoints are in the backend meter frame and rendered under the path
+# node, so we project them to screen via that node's world transform + the camera
+# and send back the exact backend waypoint (no inverse transform needed).
+#
+# NB: we score by 2D screen distance, NOT perpendicular distance to the pick ray.
+# Ray-perpendicular distance is depth-biased — a point near the camera origin has a
+# tiny perpendicular distance for any ray, so in the close-up follow view (camera
+# sitting on the tip ≈ waypoint 0) every click degenerated to selecting waypoint 0.
 func _on_navigate_click(screen_pos: Vector2) -> void:
 	if _path_waypoints.is_empty() or _path == null or not is_instance_valid(_path):
 		return
 	var cam := get_viewport().get_camera_3d()
 	if cam == null:
 		return
-	var origin := cam.project_ray_origin(screen_pos)
-	var dir := cam.project_ray_normal(screen_pos)
 	var xform: Transform3D = _path.global_transform
 
 	var best_index := -1
-	var best_perp := INF
+	var best_screen_dist := INF
 	for i in _path_waypoints.size():
 		var wp: Variant = _path_waypoints[i]
 		if typeof(wp) != TYPE_ARRAY or (wp as Array).size() < 3:
 			continue
 		var world: Vector3 = xform * Vector3(float(wp[0]), float(wp[1]), float(wp[2]))
-		var t := (world - origin).dot(dir)
-		if t <= 0.0:
-			continue  # behind the camera
-		var perp := (world - (origin + dir * t)).length()
-		if perp < best_perp:
-			best_perp = perp
+		if cam.is_position_behind(world):
+			continue
+		var screen_dist := cam.unproject_position(world).distance_to(screen_pos)
+		if screen_dist < best_screen_dist:
+			best_screen_dist = screen_dist
 			best_index = i
 
 	if best_index < 0:
 		return
 	var target: Array = _path_waypoints[best_index]
+	_last_click_target = target.duplicate()
 	_autopilot_active = true
 	_autopilot_accum = _AUTOPILOT_TICK  # tick immediately next frame
 	_autopilot_wp_text = "waypoint %d/%d" % [best_index + 1, _path_waypoints.size()]
@@ -566,6 +649,39 @@ func _on_manual_control(_push: float, _rotate: float) -> void:
 	_disengage_autopilot()
 
 
+# 急停 button: halt immediately — drop autopilot and send a neutral control frame so
+# the backend stops advancing the tip.
+func _on_emergency_stop() -> void:
+	_disengage_autopilot()
+	if _ws != null and is_instance_valid(_ws):
+		_ws.send_control(0.0, 0.0)
+	_hud.set_nav("急停 STOP", false)
+	print("[Main] EMERGENCY STOP")
+
+
+# 恢复导航 button: re-engage the autopilot toward the last clicked goal (if any),
+# after a 人工接管 / 急停 handed control back.
+func _on_resume_nav() -> void:
+	if _last_click_target.size() < 3 or _autopilot_active:
+		return
+	_autopilot_active = true
+	_autopilot_accum = _AUTOPILOT_TICK
+	_ws.send_shape_intent(true, _last_click_target)
+	if _entry_marker != null and is_instance_valid(_entry_marker):
+		_entry_marker.set_goal(Vector3(
+			float(_last_click_target[0]), float(_last_click_target[1]), float(_last_click_target[2])))
+	_hud.set_nav("自动 Auto → %s" % _autopilot_wp_text, true)
+	print("[Main] resume nav -> %s" % str(_last_click_target))
+
+
+# 重置 button: cancel autopilot and reset the episode.
+func _on_reset_button() -> void:
+	_disengage_autopilot()
+	if _ws != null and is_instance_valid(_ws):
+		_ws.send_reset()
+	print("[Main] reset (button)")
+
+
 func _on_shape_intent(result: Dictionary) -> void:
 	print("[Main] shape_intent ack: %s" % str(result))
 
@@ -577,6 +693,11 @@ func _feed_rig(tip: Dictionary) -> void:
 	var dir := _to_vec3(tip.get("direction", []))
 	var quat := _to_quat(tip.get("quaternion", []))
 	_rig.update_tip(pos, dir, quat)
+	# Refresh the surgical-view fade origin: the tip in world space (the path node
+	# shares the vessel frame, so its transform maps the frame-local tip to world,
+	# matching how click-nav projects waypoints).
+	if _vessel_mat_surgical != null and _path != null and is_instance_valid(_path):
+		_vessel_mat_surgical.set_shader_parameter("tip_world_pos", _path.global_transform * pos)
 	# First real pose: drop the operator into the close-up follow view.
 	if not _auto_followed:
 		_auto_followed = true
@@ -641,9 +762,9 @@ func _set_camera_mode(mode: int) -> void:
 			_rig.follow_cam.make_current()
 		CamMode.ENDOSCOPE:
 			_rig.endoscope_cam.make_current()
-	# Opaque inner wall only in endoscope; translucent otherwise so the
-	# guidewire stays visible from outside.
-	_set_vessel_interior(mode == CamMode.ENDOSCOPE)
+	# Whole-tree translucent in overview (演示视图), tip-proximity fade in follow
+	# (手术视图), opaque inner wall in endoscope.
+	_set_vessel_view_material(mode)
 	# Depth fog on only in endoscope so the lumen reads with depth (near wall red,
 	# far lumen fades dark) without darkening the overview/follow scene.
 	if _env:

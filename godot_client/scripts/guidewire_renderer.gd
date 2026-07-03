@@ -89,6 +89,12 @@ func _ready() -> void:
 	_wire_material.metallic = 0.6
 	_wire_material.roughness = 0.35
 	_wire_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	# Faint self-emission so the wire stays a crisp bright line against the cyan
+	# fresnel-glow vessel and dark background (设计图: 亮白导丝), instead of dimming
+	# into the wall when scene lighting is low.
+	_wire_material.emission_enabled = true
+	_wire_material.emission = wire_color
+	_wire_material.emission_energy_multiplier = 0.25
 	_wire.material_override = _wire_material
 	_wire.layers = GUIDEWIRE_RENDER_LAYER
 	add_child(_wire)
