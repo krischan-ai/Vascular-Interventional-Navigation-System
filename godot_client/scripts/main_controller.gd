@@ -110,6 +110,9 @@ var _path_waypoints: Array = []
 var _autopilot_active: bool = false
 var _autopilot_accum: float = 0.0
 const _AUTOPILOT_TICK: float = 0.05
+# "waypoint k/n" label for the engaged click goal, shown in the HUD nav line
+# alongside live progress so the (slow) autopilot reads as responsive.
+var _autopilot_wp_text: String = ""
 
 # On-screen diagnostics.
 var _session_id: String = "none"
@@ -466,6 +469,11 @@ func _on_batch(batch: Dictionary) -> void:
 		"path_progress": batch.get("path", {}).get("progress", 0.0),
 		"risk_score": safety.get("risk_score", 0.0),
 	})
+	# While click autopilot is engaged, keep the nav line live with progress so the
+	# slow tip advance is legible as motion, not a hang.
+	if _autopilot_active:
+		var prog := float(batch.get("path", {}).get("progress", 0.0)) * 100.0
+		_hud.set_nav("自动 Auto → %s · %.0f%%" % [_autopilot_wp_text, prog], true)
 	_msg_count += 1
 	_last_msg = "state_batch"
 	_update_debug()
@@ -528,10 +536,14 @@ func _on_navigate_click(screen_pos: Vector2) -> void:
 	var target: Array = _path_waypoints[best_index]
 	_autopilot_active = true
 	_autopilot_accum = _AUTOPILOT_TICK  # tick immediately next frame
+	_autopilot_wp_text = "waypoint %d/%d" % [best_index + 1, _path_waypoints.size()]
 	_ws.send_shape_intent(true, target)
-	print("[Main] click autopilot -> waypoint %d/%d %s" % [
-		best_index + 1, _path_waypoints.size(), str(target)])
-	_hud.set_view_mode("%s · 自动导航" % CAM_MODE_NAMES.get(_cam_mode, "?"))
+	print("[Main] click autopilot -> %s %s" % [_autopilot_wp_text, str(target)])
+	# Visual + HUD feedback so the slow autopilot reads as engaged: a cyan goal
+	# marker at the clicked waypoint and a nav status line (doc/09 §9.5 boundary 3).
+	if _entry_marker != null and is_instance_valid(_entry_marker):
+		_entry_marker.set_goal(Vector3(float(target[0]), float(target[1]), float(target[2])))
+	_hud.set_nav("自动 Auto → %s" % _autopilot_wp_text, true)
 
 
 # Cancel click autopilot and hand control back to manual push/rotate.
@@ -540,10 +552,13 @@ func _disengage_autopilot() -> void:
 		return
 	_autopilot_active = false
 	_autopilot_accum = 0.0
+	_autopilot_wp_text = ""
 	if _ws != null and is_instance_valid(_ws):
 		_ws.send_shape_intent(false)
 	print("[Main] click autopilot disengaged")
-	_hud.set_view_mode(CAM_MODE_NAMES.get(_cam_mode, "?"))
+	if _entry_marker != null and is_instance_valid(_entry_marker):
+		_entry_marker.clear_goal()
+	_hud.set_nav("手动 Manual", false)
 
 
 # Any manual W/S/A/D tick cancels click autopilot so the operator regains control.

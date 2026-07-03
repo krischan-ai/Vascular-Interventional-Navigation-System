@@ -16,12 +16,15 @@ extends Node3D
 
 @export var entry_color: Color = Color(0.15, 1.0, 0.4)   ## green = access / go
 @export var target_color: Color = Color(1.0, 0.2, 0.2)   ## red = target
+@export var goal_color: Color = Color(0.2, 1.0, 0.9)     ## cyan = clicked goal
 @export var entry_radius: float = 0.006                  ## meters
 @export var target_radius: float = 0.006                 ## meters
+@export var goal_radius: float = 0.008                   ## meters (slightly bigger)
 @export var arrow_length: float = 0.02                   ## meters
 
 var _entry: MeshInstance3D
 var _target: MeshInstance3D
+var _goal: MeshInstance3D
 var _arrow: MeshInstance3D
 var _arrow_mesh: ImmediateMesh
 var _arrow_material: StandardMaterial3D
@@ -36,6 +39,13 @@ func _ready() -> void:
 	_target = _make_sphere(target_radius, target_color)
 	_target.visible = false
 	add_child(_target)
+
+	# Clicked navigation goal (ShapeIntent waypoint). Hidden until a left click
+	# engages autopilot; cleared on disengage. Shares the vessel/guidewire frame,
+	# so the backend waypoint (meters) is used directly with no conversion.
+	_goal = _make_sphere(goal_radius, goal_color)
+	_goal.visible = false
+	add_child(_goal)
 
 	_arrow_mesh = ImmediateMesh.new()
 	_arrow = MeshInstance3D.new()
@@ -57,6 +67,17 @@ func update_from_batch(batch: Dictionary) -> void:
 	if typeof(target) == TYPE_ARRAY and target.size() >= 3:
 		_target.position = _to_vec3(target)
 		_target.visible = true
+
+
+# Show the clicked navigation goal at ``pos`` (backend meter frame, same frame
+# as this node). Called by main_controller when click autopilot engages.
+func set_goal(pos: Vector3) -> void:
+	_goal.position = pos
+	_goal.visible = true
+
+
+func clear_goal() -> void:
+	_goal.visible = false
 
 
 func _set_entry(pos: Vector3, dir: Vector3) -> void:

@@ -63,6 +63,12 @@ class RiskAssessor:
     # Metrics where a lower value indicates higher risk.
     _LOWER_IS_WORSE = frozenset({"wall_distance"})
 
+    # Force-mode wall penetration bands (meters). Mirror
+    # NavigationEngine.BREACH_WARN/STOP: <WARN is numerical noise (SAFE), >=STOP
+    # is a sustained breach (CRITICAL). risk ramps linearly between the two.
+    PENETRATION_WARN = 0.00005
+    PENETRATION_STOP = 0.0003
+
     def __init__(
         self,
         weights: dict[str, float] | None = None,
@@ -74,7 +80,13 @@ class RiskAssessor:
             for name, values in (thresholds or self.DEFAULT_THRESHOLDS).items()
         }
 
-    def assess(self, state: NavigationState) -> dict:
+    def assess(
+        self,
+        state: NavigationState,
+        *,
+        force_mode: bool = False,
+        contact_ke: float = 0.0,
+    ) -> dict:
         """Assess the risk of a navigation state.
 
         Returns a dict with:
@@ -82,6 +94,12 @@ class RiskAssessor:
             - ``risk_level``: worst per-metric level (SAFE/WARNING/CRITICAL)
             - ``safety_status``: protocol safety status mapped from risk_level
             - ``metrics``: per-metric {value, risk, level}
+
+        In force-drive physics mode (``force_mode=True``) the wire legitimately
+        rides against the wall, so the ``wall_distance`` clearance metric is
+        replaced by wall *penetration* (contact_force / contact_ke): hugging the
+        wall carries no risk, only a real breach does. This keeps risk_score
+        consistent with the mode-aware safety status (doc/09 §9.5).
         """
         if state.episode_length == 0:
             return {
@@ -91,8 +109,15 @@ class RiskAssessor:
                 "metrics": {},
             }
 
+        wall_value = state.wall_distance
+        wall_penetration = (
+            state.contact_force / contact_ke
+            if force_mode and contact_ke > 0.0
+            else 0.0
+        )
+
         metric_values = {
-            "wall_distance": state.wall_distance,
+            "wall_distance": wall_value,
             "curvature": state.curvature,
             "velocity": state.velocity,
             "deviation": state.path_deviation,
@@ -106,8 +131,13 @@ class RiskAssessor:
 
         for name, value in metric_values.items():
             thr = self.thresholds[name]
-            risk = self._metric_risk(name, value, thr)
-            level = self._metric_level(name, value, thr)
+            if name == "wall_distance" and force_mode:
+                # Force mode: risk from penetration, not clearance.
+                risk = self._penetration_risk(wall_penetration)
+                level = self._penetration_level(wall_penetration)
+            else:
+                risk = self._metric_risk(name, value, thr)
+                level = self._metric_level(name, value, thr)
 
             weight = self.weights.get(name, 0.0)
             weighted_sum += weight * risk
@@ -161,6 +191,21 @@ class RiskAssessor:
         if value <= safe:
             return "SAFE"
         if value <= warning:
+            return "WARNING"
+        return "CRITICAL"
+
+    def _penetration_risk(self, penetration: float) -> float:
+        """Normalize wall penetration (m) to [0, 1] risk (force mode)."""
+        span = self.PENETRATION_STOP - self.PENETRATION_WARN
+        if span <= 0:
+            return 0.0
+        return _clip01((penetration - self.PENETRATION_WARN) / span)
+
+    def _penetration_level(self, penetration: float) -> RiskLevel:
+        """Classify wall penetration (m) into SAFE/WARNING/CRITICAL (force mode)."""
+        if penetration < self.PENETRATION_WARN:
+            return "SAFE"
+        if penetration < self.PENETRATION_STOP:
             return "WARNING"
         return "CRITICAL"
 

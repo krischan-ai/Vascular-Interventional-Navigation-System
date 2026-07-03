@@ -115,6 +115,21 @@ def _nearest_arclen(points: np.ndarray, cum: np.ndarray, xyz: np.ndarray) -> flo
     return float(cum[i] + t[i] * (cum[i + 1] - cum[i]))
 
 
+def _feed_budget(requested: float, slack: float, max_slack: float) -> float:
+    """Forward-feed advance allowed under the prolapse guard (force mode).
+
+    ``slack`` is how much fed wire has NOT translated into tip advance along the
+    route (fed arclen - actual tip arclen). Once it reaches ``max_slack`` the
+    budget is exhausted -- pushing harder would only pile wire into a buckle
+    (缠绕), so the feed stops until the tip catches up or the wire is pulled
+    back. Backward feed (requested<=0) and a disabled guard (max_slack<=0) pass
+    through untouched.
+    """
+    if requested <= 0.0 or max_slack <= 0.0:
+        return requested
+    return min(requested, max(0.0, max_slack - slack))
+
+
 def _quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """Hamilton product of two [x, y, z, w] quaternions."""
     ax, ay, az, aw = a
@@ -194,8 +209,20 @@ class NewtonEngine:
         self._tip_bend = float(os.environ.get("CATHSIM_NEWTON_TIP_BEND", "2.0"))
         # Force drive: proximal bodies glued to the centered route (the sheath/
         # introducer + already-traversed wire) and fed forward; everything distal
-        # is free physics. sheath_bodies=1 => only the driven root is glued.
-        self._sheath_bodies = int(os.environ.get("CATHSIM_NEWTON_SHEATH_BODIES", "1"))
+        # is free physics. sheath_bodies=-1 (default) resolves automatically so
+        # only the distal ``free_len`` of wire is free -- a long unsupported
+        # column buckles into loops under blocked push (doc/08 §9.1 sheath
+        # constraint / §28.9 抗屈曲). Explicit >0 forces that exact glue count
+        # (sheath_bodies=1 reproduces the original root-only D4 behavior).
+        self._sheath_bodies = int(os.environ.get("CATHSIM_NEWTON_SHEATH_BODIES", "-1"))
+        # Distal wire length (m) left free beyond the sheath in auto mode.
+        self._free_len = float(os.environ.get("CATHSIM_NEWTON_FREE_LEN", "0.03"))
+        # Prolapse guard (force mode): stop feeding wire when the tip stops
+        # advancing. slack = fed arclen - actual tip arclen along the route; once
+        # it exceeds max_slack the forward feed budget is exhausted and holding
+        # W no longer piles wire into a buckle. Pull-back always allowed (it is
+        # the recovery move). <=0 disables the guard.
+        self._max_slack = float(os.environ.get("CATHSIM_NEWTON_MAX_SLACK", "0.012"))
         # Torsion steering: rotate input integrated (rad/s at rotate=1) into a
         # twist applied to the root anchor frame about the local tangent (D4c).
         self._rotate_speed = float(os.environ.get("CATHSIM_NEWTON_ROTATE_SPEED", "3.0"))
@@ -265,6 +292,21 @@ class NewtonEngine:
     @property
     def control_timestep(self) -> float:
         return self._control_dt
+
+    @property
+    def is_force_drive(self) -> bool:
+        """True when driving via real force transmission (D4), not the D3 anchor.
+
+        In force mode the wire legitimately rides against the lumen wall, so the
+        orchestrator must judge safety on penetration (``contact_force``) rather
+        than on raw wall clearance (see ``NavigationEngine._compute_safety_status``).
+        """
+        return self._drive == "force"
+
+    @property
+    def contact_ke(self) -> float:
+        """Wall contact stiffness (N/m); ``contact_force = penetration_m * ke``."""
+        return self._contact_ke
 
     def _build_tube_mesh(self, newton):
         """Variable-radius thick-wall annulus tube swept along the centerline.
@@ -365,8 +407,13 @@ class NewtonEngine:
 
     # Deformation params that live-update (no scene rebuild) vs. those baked into
     # the model geometry at build time (rebuild required).
-    _LIVE_PARAMS = ("bend", "tip_bend", "soft_tip", "stretch", "push_speed", "rotate_speed")
+    _LIVE_PARAMS = (
+        "bend", "tip_bend", "soft_tip", "stretch", "push_speed", "rotate_speed",
+        "sheath_bodies", "free_len", "max_slack",
+    )
     _REBUILD_PARAMS = ("jtip_deg", "jtip_bodies", "contact_ke", "wall_thickness", "rod_length")
+    # Live params that change the glue mask (recomputed in place, no rebuild).
+    _GLUE_PARAMS = ("sheath_bodies", "free_len")
 
     def set_deform_params(self, **params) -> dict:
         """Live-tune guidewire deformation for the interactive parameter panel.
@@ -378,6 +425,7 @@ class NewtonEngine:
         deform-param state so the client HUD can reflect clamps.
         """
         rebuild = False
+        reglue = False
         for key, val in params.items():
             attr = f"_{key}"
             if not hasattr(self, attr):
@@ -385,12 +433,17 @@ class NewtonEngine:
             setattr(self, attr, type(getattr(self, attr))(val))
             if key in self._REBUILD_PARAMS:
                 rebuild = True
+            if key in self._GLUE_PARAMS:
+                reglue = True
         if rebuild:
             # Geometry changed: drop the cached model so the next step rebuilds
             # it (and re-settles) with the new shape, preserving insertion depth.
             self.close()
         elif self._initialized:
             self._apply_joint_stiffness()
+            if reglue:
+                # Sheath length changed: refresh the glue mask in place.
+                self._alpha = self._glue_alpha(len(self._rod_bodies))
         return self.deform_params
 
     @property
@@ -405,6 +458,9 @@ class NewtonEngine:
             "jtip_deg": self._jtip_deg,
             "jtip_bodies": self._jtip_bodies,
             "contact_ke": self._contact_ke,
+            "sheath_bodies": self._sheath_bodies,
+            "free_len": self._free_len,
+            "max_slack": self._max_slack,
         }
 
     def _ensure_initialized(self) -> None:
@@ -459,20 +515,7 @@ class NewtonEngine:
 
         nb = len(self._rod_bodies)
         self._base_arc = np.arange(nb) * self._rod_seg_len
-        # Glue mask: which bodies are kinematically fed along the centered route.
-        # force (D4): only the proximal `sheath_bodies` glued, rest free physics.
-        # anchor (D3): proximal glued + distal soft ramp.
-        alpha = np.zeros(nb)
-        if self._drive == "force":
-            alpha[: max(1, self._sheath_bodies)] = 1.0
-        else:
-            alpha[:] = 1.0
-            for i in range(self._free_span):
-                j = nb - 1 - i
-                if j >= 0:
-                    frac = (i + 1) / self._free_span
-                    alpha[j] = max(self._tip_alpha, 1.0 - frac * (1.0 - self._tip_alpha))
-        self._alpha = alpha
+        self._alpha = self._glue_alpha(nb)
         seg = np.linalg.norm(np.diff(self._centerline, axis=0), axis=1)
         self._cl_cum = np.concatenate([[0.0], np.cumsum(seg)])
         cl_seg = float(self._cl_cum[-1])
@@ -497,6 +540,38 @@ class NewtonEngine:
         d = _point_at_s(self._centerline, s + eps) - _point_at_s(self._centerline, s - eps)
         n = float(np.linalg.norm(d))
         return d / n if n > 1e-9 else np.array([0.0, 0.0, 1.0])
+
+    def _sheath_count(self, nb: int) -> int:
+        """Number of proximal bodies glued to the route (force mode).
+
+        Explicit ``sheath_bodies>0`` wins; otherwise (auto, -1) support all but
+        the distal ``free_len`` of wire, so the unsupported column stays short
+        enough not to buckle under normal push. Always in [1, nb].
+        """
+        if self._sheath_bodies > 0:
+            n = self._sheath_bodies
+        else:
+            free_bodies = int(round(self._free_len / self._rod_seg_len))
+            n = nb - free_bodies
+        return int(np.clip(n, 1, nb))
+
+    def _glue_alpha(self, nb: int) -> np.ndarray:
+        """Glue mask: which bodies are kinematically fed along the centered route.
+
+        force (D4): the proximal sheath (see ``_sheath_count``) glued, rest free
+        physics. anchor (D3): proximal glued + distal soft ramp.
+        """
+        alpha = np.zeros(nb)
+        if self._drive == "force":
+            alpha[: self._sheath_count(nb)] = 1.0
+        else:
+            alpha[:] = 1.0
+            for i in range(self._free_span):
+                j = nb - 1 - i
+                if j >= 0:
+                    frac = (i + 1) / self._free_span
+                    alpha[j] = max(self._tip_alpha, 1.0 - frac * (1.0 - self._tip_alpha))
+        return alpha
 
     def _apply_glue(self, s_ins: float) -> None:
         """Feed the glued (sheath/proximal) bodies along the centered route and, in
@@ -529,17 +604,25 @@ class NewtonEngine:
             self._s0, self._s1 = self._s1, self._s0
             self._apply_glue(self._insert_s)
 
+    def _tip_arclen(self) -> float:
+        """Actual tip arc length along the route from the current sim state."""
+        tip = self._s0.body_q.numpy()[self._rod_bodies[-1], :3]
+        return float(_nearest_arclen(self._centerline, self._cl_cum, tip))
+
     def step(self, push: float, rotate: float) -> RawPose:
         self._ensure_initialized()
 
         direction = 1.0 if push >= 0.0 else -1.0
         prev_insert_s = self._insert_s
+        advance = direction * abs(push) * self._push_speed * self._control_dt
+        if self._drive == "force" and advance > 0.0:
+            # Prolapse guard: budget the forward feed by how far the tip actually
+            # is behind the fed wire. A blocked tip exhausts the budget instead of
+            # buckling the free span into loops; pulling back restores it.
+            slack = (prev_insert_s + float(self._base_arc[-1])) - self._tip_arclen()
+            advance = _feed_budget(advance, slack, self._max_slack)
         self._insert_s = float(
-            np.clip(
-                self._insert_s + direction * abs(push) * self._push_speed * self._control_dt,
-                0.0,
-                self._max_s_ins,
-            )
+            np.clip(prev_insert_s + advance, 0.0, self._max_s_ins)
         )
         # Integrate rotate into the root-frame twist that steers the J-tip (D4c).
         self._twist += float(rotate) * self._rotate_speed * self._control_dt

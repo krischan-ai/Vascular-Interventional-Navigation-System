@@ -16,6 +16,7 @@ var _metrics_label: Label
 var _input_label: Label
 var _view_label: Label
 var _model_label: Label
+var _nav_label: Label
 var _debug_label: Label
 
 
@@ -88,8 +89,16 @@ func _ready() -> void:
 	_model_label.text = "模型 Model  —"
 	vbox.add_child(_model_label)
 
+	# Click-to-navigate (ShapeIntent) status. Idle by default; engage/disengage
+	# and live progress are pushed by main_controller while autopilot is active.
+	_nav_label = Label.new()
+	_nav_label.add_theme_font_size_override("font_size", 15)
+	_nav_label.add_theme_color_override("font_color", Color(0.4, 0.9, 1.0))
+	_nav_label.text = "导航 Nav    手动 Manual"
+	vbox.add_child(_nav_label)
+
 	var hint := Label.new()
-	hint.text = "W/S 推进·后退   A/D 旋转   C 切换视角   M 切换模型   R 重置"
+	hint.text = "W/S 推进·后退   A/D 旋转   左键 点击导航   ESC 脱离   C 视角   M 模型   R 重置"
 	hint.add_theme_font_size_override("font_size", 13)
 	hint.add_theme_color_override("font_color", Color(0.65, 0.65, 0.7))
 	vbox.add_child(hint)
@@ -99,6 +108,7 @@ func _ready() -> void:
 	legend.add_child(_legend_item("● 入口 Entry", Color(0.15, 1.0, 0.4)))
 	legend.add_child(_legend_item("● 目标 Target", Color(1.0, 0.2, 0.2)))
 	legend.add_child(_legend_item("● 路径 Path", Color(0.2, 0.8, 1.0)))
+	legend.add_child(_legend_item("● 点击 Goal", Color(0.2, 1.0, 0.9)))
 	vbox.add_child(legend)
 
 	vbox.add_child(_separator())
@@ -152,6 +162,13 @@ func set_view_mode(mode_name: String) -> void:
 
 func set_model(model_name: String) -> void:
 	_model_label.text = "模型 Model  %s" % model_name
+
+
+# Click-to-navigate status line. Cyan while engaged, dimmed when manual.
+func set_nav(text: String, active: bool = true) -> void:
+	_nav_label.text = "导航 Nav    %s" % text
+	var color := Color(0.4, 0.9, 1.0) if active else Color(0.55, 0.6, 0.65)
+	_nav_label.add_theme_color_override("font_color", color)
 
 
 func set_debug(text: String) -> void:

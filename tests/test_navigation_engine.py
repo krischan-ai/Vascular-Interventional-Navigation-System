@@ -192,6 +192,38 @@ class TestNavigationEngineHelpers:
         assert engine._compute_safety_status(5, 0.0007) == "DANGER_WARNING"
         assert engine._compute_safety_status(5, 0.0001) == "COLLISION_STOP"
 
+    def test_safety_status_guided_bands_unchanged(self):
+        # Non-force backend (low_tort -> MuJoCo) keeps the clearance bands: a
+        # sub-0.5mm wall distance is a collision because the wire rides centered.
+        engine = self._engine()
+        assert engine._is_force_physics() is False
+        assert engine._compute_safety_status(5, 0.0001) == "COLLISION_STOP"
+
+    def test_safety_status_force_mode_wall_hug_is_safe(self):
+        # Force-drive: the wire legitimately hugs the wall, so a tiny wall_distance
+        # with NO contact force is normal, not a collision. Regression for the
+        # D5/ShapeIntent smoke's false COLLISION_STOP (doc/09 §9.5).
+        from types import SimpleNamespace
+
+        engine = self._engine()
+        engine._engine = SimpleNamespace(is_force_drive=True, contact_ke=3.0e6, close=lambda: None)
+        assert engine._is_force_physics() is True
+        assert engine._compute_safety_status(5, 0.0001, 0.0) == "SAFE_NAV"
+
+    def test_safety_status_force_mode_penetration_bands(self):
+        # Force-drive safety keys on penetration = contact_force / contact_ke.
+        from types import SimpleNamespace
+
+        ke = 3.0e6
+        engine = self._engine()
+        engine._engine = SimpleNamespace(is_force_drive=True, contact_ke=ke, close=lambda: None)
+        # 0.02mm penetration < BREACH_WARN (0.05mm) -> numerical noise, safe.
+        assert engine._compute_safety_status(5, 0.0, 0.00002 * ke) == "SAFE_NAV"
+        # 0.10mm penetration in [WARN, STOP) -> warning.
+        assert engine._compute_safety_status(5, 0.0, 0.0001 * ke) == "DANGER_WARNING"
+        # 0.50mm penetration >= BREACH_STOP (0.30mm) -> collision stop.
+        assert engine._compute_safety_status(5, 0.0, 0.0005 * ke) == "COLLISION_STOP"
+
     def test_resolve_entry_none_without_path(self):
         engine = self._engine()
         point, direction = engine._resolve_entry()

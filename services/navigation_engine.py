@@ -148,8 +148,16 @@ class NavigationEngine:
     # Distance reported when the guidewire is not in contact with any wall (m).
     MAX_WALL_DISTANCE = MAX_WALL_DISTANCE
     # Safety thresholds on wall distance, in MuJoCo meters (1.0mm / 0.5mm).
+    # These assume a *centered* wire (guided/kinematic mode): clearance to the
+    # wall is the risk. In force-drive physics the wire legitimately hugs the
+    # wall, so proximity alone is not danger -- see BREACH_* below.
     WALL_DISTANCE_SAFE = 0.001
     WALL_DISTANCE_DANGER = 0.0005
+    # Force-drive safety thresholds on wall *penetration* (meters), derived from
+    # contact_force / contact_ke. Hugging the wall (penetration ~0) is normal;
+    # only real breach counts. Sub-BREACH_WARN penetration is numerical noise.
+    BREACH_WARN = 0.00005   # 0.05 mm: past here, warn
+    BREACH_STOP = 0.0003    # 0.30 mm: sustained breach, collision stop
     # Number of recent tip samples kept for curvature estimation.
     TIP_HISTORY_LEN = 5
 
@@ -671,6 +679,15 @@ class NavigationEngine:
         """
         return isinstance(self._engine, KinematicEngine)
 
+    def _is_force_physics(self) -> bool:
+        """Whether the active backend is a real force-drive physics engine.
+
+        Force-drive lets the wire physically ride against the lumen wall, so
+        safety/risk must key on penetration (contact_force), not clearance.
+        False for kinematic/MuJoCo/anchor backends (they keep the wire centered).
+        """
+        return bool(getattr(self._engine, "is_force_drive", False))
+
     def _assemble_state(self, raw) -> NavigationState:
         """Assemble a NavigationState from an engine RawPose plus derived terms.
 
@@ -698,7 +715,10 @@ class NavigationEngine:
         else:
             path_progress, path_deviation = self._compute_path_progress(tip_pos)
 
-        safety_status = self._compute_safety_status(self._episode_length, raw.wall_distance)
+        force_mode = self._is_force_physics()
+        safety_status = self._compute_safety_status(
+            self._episode_length, raw.wall_distance, raw.contact_force
+        )
 
         state = NavigationState(
             tip_position=tip_pos,
@@ -718,7 +738,10 @@ class NavigationEngine:
             reward=float(raw.reward),
             done=raw.done,
         )
-        state.risk_score = self._risk_assessor.assess(state)["risk_score"]
+        contact_ke = float(getattr(self._engine, "contact_ke", 0.0)) if force_mode else 0.0
+        state.risk_score = self._risk_assessor.assess(
+            state, force_mode=force_mode, contact_ke=contact_ke
+        )["risk_score"]
         return state
 
     def _compute_curvature(self) -> float:
@@ -758,10 +781,35 @@ class NavigationEngine:
             return 0.0, 0.0
         return self._path.progress_deviation(tip_pos)
 
-    def _compute_safety_status(self, episode_length: int, wall_distance: float) -> SafetyStatus:
-        """Derive the safety status from episode state and wall distance."""
+    def _compute_safety_status(
+        self,
+        episode_length: int,
+        wall_distance: float,
+        contact_force: float = 0.0,
+    ) -> SafetyStatus:
+        """Derive the safety status, mode-aware.
+
+        Guided/kinematic (default): the wire rides the centerline, so clearance to
+        the wall (``wall_distance``) is the risk -- the original mm bands apply.
+
+        Force-drive physics: the wire legitimately hugs the wall, so a tiny
+        ``wall_distance`` is *normal*, not a collision. The real breach signal is
+        penetration = contact_force / contact_ke (>0 only when poking past the
+        wall). This is the fix for the D5/ShapeIntent smoke's COLLISION_STOP
+        false alarms (doc/09 §9.5) -- normal wall-hugging now reads SAFE_NAV.
+        """
         if episode_length == 0:
             return "STANDBY"
+
+        if self._is_force_physics():
+            ke = float(getattr(self._engine, "contact_ke", 0.0)) or 0.0
+            penetration = contact_force / ke if ke > 0.0 else 0.0
+            if penetration < self.BREACH_WARN:
+                return "SAFE_NAV"
+            if penetration < self.BREACH_STOP:
+                return "DANGER_WARNING"
+            return "COLLISION_STOP"
+
         if wall_distance >= self.WALL_DISTANCE_SAFE:
             return "SAFE_NAV"
         if wall_distance >= self.WALL_DISTANCE_DANGER:
