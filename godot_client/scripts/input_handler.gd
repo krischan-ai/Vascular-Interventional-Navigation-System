@@ -21,15 +21,25 @@ signal model_cycle
 ## Emitted on each B keypress to cycle the navigation target branch
 ## (multi-branch phantoms like aorta_tree; ignored when only one route exists).
 signal branch_cycle
-## Emitted on left mouse click with the viewport screen position, for click-to-
-## navigate (project onto the route -> waypoint -> ShapeIntent autopilot).
-signal navigate_click(screen_pos: Vector2)
+## Emitted on each X keypress to swap the DSA 实时影像 and 3D 血管导航 panes
+## between the big left region and the small right-top region.
+signal pane_swap
+## Raw pointer stream (root-window coords). The main controller decides what a
+## gesture means per pane: a short left press-release is click-to-navigate, a
+## left drag orbits the 3D camera, a middle drag pans it, the wheel zooms.
+signal pointer_down(screen_pos: Vector2)
+signal pointer_drag(screen_pos: Vector2, relative: Vector2)
+signal pointer_up(screen_pos: Vector2)
+signal pan_drag(screen_pos: Vector2, relative: Vector2)
+signal wheel_zoom(steps: int, screen_pos: Vector2)
 ## Emitted on ESC to disengage click autopilot and return to manual control.
 signal autopilot_off
 
 @export var send_interval: float = 0.05  ## seconds (~20 Hz)
 
 var _accum: float = 0.0
+var _left_held: bool = false
+var _mid_held: bool = false
 
 
 func _input(event: InputEvent) -> void:
@@ -42,11 +52,31 @@ func _input(event: InputEvent) -> void:
 			model_cycle.emit()
 		elif event.physical_keycode == KEY_B:
 			branch_cycle.emit()
+		elif event.physical_keycode == KEY_X:
+			pane_swap.emit()
 		elif event.physical_keycode == KEY_ESCAPE:
 			autopilot_off.emit()
-	elif event is InputEventMouseButton and event.pressed \
-			and event.button_index == MOUSE_BUTTON_LEFT:
-		navigate_click.emit(event.position)
+	elif event is InputEventMouseButton:
+		match event.button_index:
+			MOUSE_BUTTON_LEFT:
+				_left_held = event.pressed
+				if event.pressed:
+					pointer_down.emit(event.position)
+				else:
+					pointer_up.emit(event.position)
+			MOUSE_BUTTON_MIDDLE:
+				_mid_held = event.pressed
+			MOUSE_BUTTON_WHEEL_UP:
+				if event.pressed:
+					wheel_zoom.emit(1, event.position)
+			MOUSE_BUTTON_WHEEL_DOWN:
+				if event.pressed:
+					wheel_zoom.emit(-1, event.position)
+	elif event is InputEventMouseMotion:
+		if _left_held:
+			pointer_drag.emit(event.position, event.relative)
+		elif _mid_held:
+			pan_drag.emit(event.position, event.relative)
 
 
 func _process(delta: float) -> void:

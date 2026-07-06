@@ -101,6 +101,51 @@ var _camera: Camera3D  # overview camera
 # the dashboard UI + a dark backdrop, matching the设计图 multi-pane layout.
 var _world: SubViewport
 var _pane_3d_container: SubViewportContainer  # the 3D pane rect (for click coord translation)
+# Pane swap (DSA 实时影像 ⇄ 3D 血管导航): when true the 3D pane takes the big left
+# region and the DSA pane the small right-top one. Toggled by the 互换 buttons on
+# both panes or the X key; overlays inside each pane are anchored so they adapt.
+var _dsa_pane: PanelContainer
+var _panes_swapped: bool = false
+# Overview orbit camera (参考图视角): the external camera is a pivot-orbit rig —
+# spherical (yaw/pitch/dist) around a pan-able pivot. Left-drag orbits, middle-drag
+# pans, wheel or the 放大/缩小 tools zoom, 复位 reframes the vessel AABB. Only the
+# OVERVIEW camera is orbit-driven; follow/endoscope stay rig-driven.
+var _orbit_pivot := Vector3.ZERO
+var _orbit_yaw: float = 0.0
+var _orbit_pitch: float = 0.0
+var _orbit_dist: float = 2.0
+var _orbit_min: float = 0.05
+var _orbit_max: float = 20.0
+var _last_aabb := AABB()  # last framed vessel AABB, for the 复位 tool
+const _ORBIT_SPEED := 0.008     # rad per drag px
+const _PAN_SPEED := 0.0012      # pivot m per drag px per m of distance
+const _WHEEL_STEP := 0.88       # dist multiplier per wheel notch
+# 3D-pane pointer gesture state: a left press inside the pane is a pending click;
+# once cumulative travel exceeds the threshold it becomes an orbit drag instead of
+# a click-to-navigate on release.
+var _press_in_pane: bool = false
+var _press_travel: float = 0.0
+const _CLICK_TRAVEL_MAX := 6.0  # px
+# Right tool strip mode: 旋转 (drag orbits, default) vs 选择 (drags inert, clicks
+# navigate — both modes keep short-click navigation).
+var _tool_orbit: bool = true
+# Direction cube (§11): wireframe cube in its own SubViewport, counter-rotated
+# against the active 3D camera every frame so it always shows world orientation.
+var _cube_root: Node3D
+# Route risk display: the route line itself carries a continuous curvature/danger
+# color gradient (computed in path_renderer); the controller only supplies the
+# red-override 禁入段 range — MOCK at 60% of the route until the backend streams
+# real no_go_zones.
+# Entry-focused default view: once a route streams in, the orbit camera pivots to
+# the route start (起始点) at close range instead of framing the whole tree.
+var _entry_world := Vector3.ZERO
+var _entry_known: bool = false
+# 跟随 (follow) toolbar toggle + the last known tip world position, so exiting
+# follow (clicking any non-button area) drops into the free orbit view pivoted on
+# the wire instead of jumping away.
+var _follow_btn: Button
+var _tip_world_last := Vector3.ZERO
+var _tip_world_known: bool = false
 var _cam_mode: int = CamMode.OVERVIEW
 var _vessel_meshes: Array = []  # MeshInstance3D nodes of the vessel
 var _vessel_mat_overlay: ShaderMaterial  # cyan fresnel-glow whole-tree (overview/demo)
@@ -206,9 +251,8 @@ func _load_model_scene() -> void:
 		_frame_camera(aabb)
 	else:
 		# No vessel mesh: still place the camera somewhere sane so the HUD and
-		# guidewire tip are visible.
-		_camera.position = Vector3(0, 0, 1.5)
-		_camera.look_at(Vector3.ZERO, Vector3.UP)
+		# guidewire tip are visible (zero AABB -> orbit defaults around origin).
+		_frame_camera(AABB())
 	_camera.make_current()
 
 
@@ -226,6 +270,8 @@ func _teardown_model_scene() -> void:
 		_vessel.queue_free()
 	_vessel = null
 	_vessel_meshes = []
+	_entry_known = false  # the next route re-focuses the camera on its entry
+	_tip_world_known = false
 
 
 # Build the windowed pane layout (设计图 局部窗口视图): a dark backdrop, a left DSA
@@ -263,6 +309,7 @@ func _build_dsa_pane(rootc: Control) -> void:
 	dsa.add_theme_stylebox_override("panel", UiStyle.panel_box(0.95, 8))
 	UiStyle.place(dsa, UiStyle.dsa_rect())
 	rootc.add_child(dsa)
+	_dsa_pane = dsa
 
 	# Grayscale "X-ray" placeholder texture (§5: 灰度、低饱和、医学透视感).
 	var img := TextureRect.new()
@@ -301,13 +348,17 @@ func _build_dsa_pane(rootc: Control) -> void:
 	info.add_child(UiStyle.label("LAO: 12°\nCRA: 2°\nZoom: 100%", UiStyle.TEXT_MID, 14))
 	ov.add_child(info)
 
-	# 左侧悬浮工具栏 (§7: 48x48).
+	# 左侧悬浮工具栏 (§7: 48x48). Starts right below the info float so the 5-button
+	# strip also fits the small right-top region when the panes are swapped.
 	var tools := VBoxContainer.new()
 	tools.add_theme_constant_override("separation", 8)
-	tools.position = Vector2(14, 150)
+	tools.position = Vector2(14, 122)
 	for t in ["视图", "增强", "标记", "测量", "截图"]:
 		tools.add_child(_pane_tool(t, Vector2(48, 48)))
 	ov.add_child(tools)
+
+	# 互换 button (top-right): swap this pane with the 3D 血管导航 pane.
+	_add_swap_button(ov, 12)
 
 	# 图例盒 (§8: 面板底 + 边框, 右下角, 文字 #D8E6F3 14px + 彩色标记).
 	var legend_panel := PanelContainer.new()
@@ -366,32 +417,245 @@ func _build_3d_pane(rootc: Control) -> void:
 
 	_corner_label(frame, "3D 血管导航", UiStyle.TEXT, Vector2(12, 8), 16)
 
-	# 左侧竖向工具栏 (§10: 36x36, 选择/旋转/平移/放大/缩小).
+	# 右侧竖向图标工具栏 (参考图): 选择/旋转 are a toggle pair gating what a left
+	# drag does; 放大/缩小 step the orbit zoom; 复位 reframes the vessel.
 	var tools := VBoxContainer.new()
 	tools.add_theme_constant_override("separation", 6)
-	tools.position = Vector2(10, 42)
-	for t in ["选择", "旋转", "平移", "放大", "缩小"]:
-		tools.add_child(_pane_tool(t, Vector2(36, 36)))
+	tools.anchor_left = 1.0
+	tools.anchor_right = 1.0
+	tools.offset_left = -50
+	tools.offset_top = 132
+	tools.offset_right = -14
+	tools.grow_horizontal = Control.GROW_DIRECTION_BEGIN
 	frame.add_child(tools)
 
-	# 方向立方体 (§11: 70x70, #2F8CFF 70%, 线框风, S/I/L/R/A).
-	var cube := Panel.new()
-	var cube_sb := UiStyle.flat(Color(UiStyle.BLUE.r, UiStyle.BLUE.g, UiStyle.BLUE.b, 0.10), 6)
-	cube_sb.border_color = Color(UiStyle.BLUE.r, UiStyle.BLUE.g, UiStyle.BLUE.b, 0.7)
-	cube_sb.set_border_width_all(1)
-	cube.add_theme_stylebox_override("panel", cube_sb)
-	cube.anchor_left = 1.0
-	cube.anchor_right = 1.0
-	cube.offset_left = -82
-	cube.offset_top = 12
-	cube.offset_right = -12
-	cube.offset_bottom = 82
-	var cube_lbl := UiStyle.label("S\nR A L\nI", Color(UiStyle.BLUE.r, UiStyle.BLUE.g, UiStyle.BLUE.b, 0.9), 12)
-	cube_lbl.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	cube_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	cube_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	cube.add_child(cube_lbl)
-	frame.add_child(cube)
+	var mode_group := ButtonGroup.new()
+	var select_btn := _icon_tool("select", "选择：单击路径点导航")
+	select_btn.toggle_mode = true
+	select_btn.button_group = mode_group
+	var orbit_btn := _icon_tool("orbit", "旋转：左键拖拽环绕视角")
+	orbit_btn.toggle_mode = true
+	orbit_btn.button_group = mode_group
+	orbit_btn.button_pressed = true
+	orbit_btn.toggled.connect(func(on: bool) -> void: _tool_orbit = on)
+	_follow_btn = _icon_tool("follow", "跟随：视角自动跟随导丝（点击其他区域退出）")
+	_follow_btn.toggle_mode = true
+	_follow_btn.toggled.connect(_on_follow_toggled)
+	var zin_btn := _icon_tool("zoom_in", "放大 (滚轮)")
+	zin_btn.pressed.connect(func() -> void: _zoom_by(2.0))
+	var zout_btn := _icon_tool("zoom_out", "缩小 (滚轮)")
+	zout_btn.pressed.connect(func() -> void: _zoom_by(-2.0))
+	var reset_btn := _icon_tool("frame", "复位视角")
+	reset_btn.pressed.connect(_reset_view)
+	for b in [select_btn, orbit_btn, _follow_btn, zin_btn, zout_btn, reset_btn]:
+		tools.add_child(b)
+
+	# 方向立方体 (§11 / 参考图右上): a real wireframe cube in its own transparent
+	# SubViewport; _sync_direction_cube counter-rotates it against the active 3D
+	# camera each frame so its faces always show the world (patient) orientation.
+	var cube_vpc := SubViewportContainer.new()
+	cube_vpc.stretch = true
+	cube_vpc.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	cube_vpc.anchor_left = 1.0
+	cube_vpc.anchor_right = 1.0
+	cube_vpc.offset_left = -82
+	cube_vpc.offset_top = 12
+	cube_vpc.offset_right = -12
+	cube_vpc.offset_bottom = 82
+	frame.add_child(cube_vpc)
+
+	var cube_vp := SubViewport.new()
+	cube_vp.own_world_3d = true
+	cube_vp.transparent_bg = true
+	cube_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	cube_vpc.add_child(cube_vp)
+
+	_cube_root = Node3D.new()
+	cube_vp.add_child(_cube_root)
+	_cube_root.add_child(_wireframe_cube())
+	# Anatomical face labels. Axis mapping assumes the LPS→glTF export convention
+	# (tools/export_godot_assets.py): +X=L/-X=R, +Y=S/-Y=I, +Z=A/-Z=P. If实机
+	# anatomy reads flipped, adjust the axis signs here only.
+	for face in [["L", Vector3.RIGHT], ["R", Vector3.LEFT], ["S", Vector3.UP],
+			["I", Vector3.DOWN], ["A", Vector3.BACK], ["P", Vector3.FORWARD]]:
+		var lbl := Label3D.new()
+		lbl.text = face[0]
+		lbl.font_size = 96
+		lbl.pixel_size = 0.004
+		lbl.modulate = Color(UiStyle.BLUE.r, UiStyle.BLUE.g, UiStyle.BLUE.b, 0.95)
+		lbl.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		lbl.no_depth_test = true
+		lbl.position = (face[1] as Vector3) * 0.72
+		_cube_root.add_child(lbl)
+
+	var cube_cam := Camera3D.new()
+	cube_cam.projection = Camera3D.PROJECTION_ORTHOGONAL
+	cube_cam.size = 2.3
+	cube_cam.position = Vector3(0, 0, 3)
+	cube_vp.add_child(cube_cam)
+
+	# 互换 button (below the direction cube): swap this pane with the DSA pane.
+	_add_swap_button(frame, 90)
+
+
+# A 36x36 icon tool button for the 3D pane's right strip (§10 sizes, hover
+# #1A2A3A, 选中/按下 #2F8CFF).
+func _icon_tool(kind: String, tip: String) -> Button:
+	var b := Button.new()
+	b.custom_minimum_size = Vector2(36, 36)
+	b.tooltip_text = tip
+	b.add_theme_stylebox_override("normal", UiStyle.card_box(0.8, 6))
+	b. add_theme_stylebox_override("hover", UiStyle.flat(Color(0.102, 0.165, 0.227), 6))
+	b.add_theme_stylebox_override("pressed", UiStyle.flat(UiStyle.BLUE, 6))
+	b.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
+	var ic: Control = preload("res://scripts/ui/pane_tool_icon.gd").new(kind, UiStyle.TEXT)
+	ic.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	ic.offset_left = 7
+	ic.offset_top = 7
+	ic.offset_right = -7
+	ic.offset_bottom = -7
+	b.add_child(ic)
+	return b
+
+
+# Unit wireframe cube (12 edges) in the pane's accent blue, unshaded.
+func _wireframe_cube() -> MeshInstance3D:
+	var corners: Array = []
+	for x in [-0.5, 0.5]:
+		for y in [-0.5, 0.5]:
+			for z in [-0.5, 0.5]:
+				corners.append(Vector3(x, y, z))
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.albedo_color = Color(UiStyle.BLUE.r, UiStyle.BLUE.g, UiStyle.BLUE.b, 0.85)
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	var im := ImmediateMesh.new()
+	im.surface_begin(Mesh.PRIMITIVE_LINES, mat)
+	for i in corners.size():
+		for j in range(i + 1, corners.size()):
+			var a: Vector3 = corners[i]
+			var b: Vector3 = corners[j]
+			# An edge joins corners differing in exactly one axis.
+			var diff := int(a.x != b.x) + int(a.y != b.y) + int(a.z != b.z)
+			if diff == 1:
+				im.surface_add_vertex(a)
+				im.surface_add_vertex(b)
+	im.surface_end()
+	var mi := MeshInstance3D.new()
+	mi.mesh = im
+	return mi
+
+
+# Counter-rotate the direction cube against the active 3D camera so the cube's
+# world-axis faces always match what the operator sees in the pane.
+func _sync_direction_cube() -> void:
+	if _cube_root == null or not is_instance_valid(_cube_root) or _world == null:
+		return
+	var cam := _world.get_camera_3d()
+	if cam == null:
+		return
+	_cube_root.transform.basis = cam.global_transform.basis.inverse()
+
+
+# ── Route risk + entry-focused default view ───────────────────────────────────
+# Called whenever route waypoints stream in (first batch / reset / branch switch).
+# The route line's curvature/danger gradient is computed inside path_renderer from
+# the polyline itself; here we only supply the red-override 禁入段 (MOCK at 60% of
+# the route until the backend streams no_go_zones) and drop the orbit camera onto
+# the route start — the default view is an external orbit around 起始点, not the
+# whole-tree framing.
+func _apply_route_features() -> void:
+	if _path == null or not is_instance_valid(_path) or not _path.is_inside_tree():
+		return
+	var pts: Array = []  # Vector3, path-local frame
+	for wp in _path_waypoints:
+		if typeof(wp) == TYPE_ARRAY and (wp as Array).size() >= 3:
+			pts.append(Vector3(float(wp[0]), float(wp[1]), float(wp[2])))
+	if pts.size() < 8:
+		return
+
+	# MOCK 禁入段 at 60% of the route.
+	var nogo_lo: int = clampi(int(float(pts.size()) * 0.6) - 3, 0, pts.size() - 2)
+	_path.set_risk_ranges([
+		{"lo": nogo_lo, "hi": mini(nogo_lo + 6, pts.size() - 2)},
+	])
+
+	# Default view: external orbit around the route start (起始点).
+	_entry_world = _path.global_transform * (pts[0] as Vector3)
+	_entry_known = true
+	_focus_entry()
+
+
+# Pivot the overview orbit camera onto the vessel entry at close range. Keeps the
+# current yaw/pitch so a re-focus (reset / branch switch) does not jerk the
+# viewing angle; distance scales with the model so every phantom frames sanely.
+func _focus_entry() -> void:
+	if not _entry_known:
+		return
+	var radius := _last_aabb.size.length() * 0.5
+	_orbit_pivot = _entry_world
+	_orbit_dist = clampf(radius * 0.3 if radius > 0.0 else 0.15, _orbit_min, _orbit_max)
+	_update_orbit_camera()
+
+
+# 跟随 toolbar toggle: on -> chase-follow the wire; off -> free orbit at the tip.
+func _on_follow_toggled(on: bool) -> void:
+	if on:
+		_set_camera_mode(CamMode.FOLLOW)
+	elif _cam_mode == CamMode.FOLLOW:
+		_exit_follow_to_free()
+
+
+# Leave 跟随 into the free orbit view, pivoted on the wire tip so the view stays
+# where the operator was looking; from here left-drag orbits (查看不同方向的血管
+# 和导丝) and the wheel zooms.
+func _exit_follow_to_free() -> void:
+	if _tip_world_known:
+		_orbit_pivot = _tip_world_last
+		var radius := _last_aabb.size.length() * 0.5
+		if radius > 0.0:
+			_orbit_dist = clampf(radius * 0.3, _orbit_min, _orbit_max)
+	_set_camera_mode(CamMode.OVERVIEW)
+	_update_orbit_camera()
+
+
+# Add a right-anchored 互换 (swap) button to a pane overlay at `top` px from the
+# pane's top edge. Both panes get one so the swap is always reachable from the
+# pane the operator is looking at; X key does the same via the input handler.
+func _add_swap_button(parent: Control, top: float) -> void:
+	var b := _pane_tool("互换", Vector2(56, 32))
+	b.anchor_left = 1.0
+	b.anchor_right = 1.0
+	b.offset_left = -70
+	b.offset_top = top
+	b.offset_right = -14
+	b.offset_bottom = top + 32
+	b.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	b.grow_vertical = Control.GROW_DIRECTION_END
+	b.tooltip_text = "互换 DSA 实时影像与 3D 血管导航窗口 (X)"
+	b.pressed.connect(_swap_panes)
+	parent.add_child(b)
+
+
+# Swap the DSA 实时影像 and 3D 血管导航 panes between the big left region and the
+# small right-top region (doc/11 §2 layout). Both panes keep their full subtree
+# (overlays, tool strips, legend, viewport); only their placement rects change —
+# anchored overlays adapt and the SubViewportContainer (stretch=true) resizes the
+# 3D render target automatically. Click-to-navigate keeps working because it
+# translates clicks via the container's live global rect.
+func _swap_panes() -> void:
+	_panes_swapped = not _panes_swapped
+	_apply_pane_layout()
+	print("[Main] panes %s" % ("swapped: 3D main / DSA aside" if _panes_swapped
+			else "restored: DSA main / 3D aside"))
+
+
+func _apply_pane_layout() -> void:
+	if _dsa_pane == null or _pane_3d_container == null:
+		return
+	UiStyle.place(_dsa_pane, UiStyle.pane3d_rect() if _panes_swapped else UiStyle.dsa_rect())
+	UiStyle.place(_pane_3d_container,
+			UiStyle.dsa_rect() if _panes_swapped else UiStyle.pane3d_rect())
 
 
 func _corner_label(parent: Control, text: String, color: Color, pos: Vector2,
@@ -432,6 +696,15 @@ func _setup_environment() -> void:
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	env.ambient_light_color = Color(0.4, 0.4, 0.45)
 	env.ambient_light_energy = 0.6
+	# Bloom/glow: the "通电发光" look of the reference view. Only fragments whose
+	# EMISSION exceeds 1.0 spill light (hdr_threshold), so the fresnel rims (glow
+	# uniform > 1), the white route line and the marker spheres halo while the flat
+	# UI/backdrop stays crisp.
+	env.glow_enabled = true
+	env.glow_intensity = 0.7
+	env.glow_bloom = 0.1
+	env.glow_hdr_threshold = 1.0
+	env.tonemap_mode = Environment.TONE_MAPPER_ACES
 	# Depth fog for the endoscope tunnel cue: near wall keeps its red, the far
 	# lumen fades toward the (near-black) fog color, giving depth WITHOUT any
 	# light that could clip a mm-close wall to white. High density because the
@@ -491,12 +764,12 @@ func _setup_vessel() -> Node3D:
 
 
 func _apply_vessel_material(node: Node) -> void:
-	# Overview/demo material: a Fresnel edge shader in the doc/11 §9 palette (棕红/暗红/
-	# 半透明粉 anatomical vessel, replacing the earlier cyan glow). The fresnel still
-	# fixes the α-stacking haze at the root: the lumen CENTRE is near-transparent (so
-	# overlapping walls no longer accumulate) while the silhouette EDGE is a defined
-	# pink-red rim — the tube boundary defines the structure instead of alpha stacking.
-	# Unshaded so it cannot clip to white from any camera angle.
+	# Overview/demo material: cyan-blue fresnel glass (参考图 三维导航视图 look,
+	# superseding the doc/11 §9 暗红 palette by user decision). The fresnel fixes
+	# the α-stacking haze at the root: the lumen CENTRE is near-transparent (so
+	# overlapping walls no longer accumulate) while the silhouette EDGE is a thin
+	# blooming rim — the tube boundary defines the structure instead of alpha
+	# stacking. Unshaded so it cannot clip to white from any camera angle.
 	_vessel_mat_overlay = _make_fresnel_material(false)
 
 	# Interior material (endoscope): opaque so the lumen wall is visible from
@@ -528,39 +801,43 @@ func _apply_vessel_material(node: Node) -> void:
 	_set_vessel_view_material(CamMode.OVERVIEW)
 
 
-# Build the青蓝菲涅尔发光 vessel shader.
+# Build the 青蓝菲涅尔发光 vessel shader (参考图 glass-tree look).
 #
-# Overview/demo (with_fade=false): FRESNEL drives alpha — the silhouette edge is
-# opaque cyan and the lumen centre near-transparent, so the vessel tree reads as a
-# glowing glass structure viewed from OUTSIDE (设计图右上角). No red-haze α-stacking
-# because the centres don't accumulate.
+# Shared behaviour:
+#   - FRESNEL edge: near-transparent lumen centre (core_alpha ≈ 0, so overlapping
+#     walls never stack into fog) with a thin cyan rim whose EMISSION exceeds 1.0
+#     (glow uniform) so the environment bloom halos it.
+#   - CAMERA-PROXIMITY fade: fragments within cam_fade_near..far of the camera
+#     dissolve, so a branch sweeping the lens (orbit zoom-in, follow view) can
+#     never shroud the view — the structural fix for the 红雾/笼罩 problem.
 #
-# Follow/surgical (with_fade=true): the camera sits INSIDE / on the wire, so almost
-# every wall is seen at a grazing angle where fresnel saturates → the whole view
-# would go solid cyan. So here alpha is a CAPPED constant translucency multiplied by
-# a tip-proximity fade (near the tip stays visible, distant walls vanish), and
-# fresnel is used only as an emission edge accent — never to drive opacity. This
-# keeps the local lumen see-through to the guidewire instead of a solid blob.
+# Overview (with_fade=false): alpha is fresnel-driven — silhouette rims define the
+# tree viewed from outside.
+#
+# Follow/surgical (with_fade=true): almost every wall is at a grazing angle where
+# fresnel saturates, so alpha is CAPPED (0.6) and multiplied by a tip-proximity
+# fade: only the local lumen segment near the wire stays visible.
 func _make_fresnel_material(with_fade: bool) -> ShaderMaterial:
 	var fade_decl := ""
 	var alpha_line: String
 	if with_fade:
 		fade_decl = "uniform vec3 tip_world_pos;\n" \
 			+ "uniform float fade_near = 0.03;\n" \
-			+ "uniform float fade_far = 0.11;\n" \
-			+ "uniform float base_alpha = 0.30;\n"
+			+ "uniform float fade_far = 0.11;\n"
 		alpha_line = "	float prox = 1.0 - smoothstep(fade_near, fade_far, distance(tip_world_pos, world_pos));\n" \
-			+ "	ALPHA = (base_alpha + f * 0.3) * prox;\n"
+			+ "	ALPHA = clamp(core_alpha + f * 0.5, 0.0, 0.6) * prox * cam_fade;\n"
 	else:
-		alpha_line = "	ALPHA = clamp(core_alpha + f * 0.9, 0.0, 1.0);\n"
+		alpha_line = "	ALPHA = clamp(core_alpha + f * 0.9, 0.0, 1.0) * cam_fade;\n"
 	var shader := Shader.new()
 	shader.code = "shader_type spatial;\n" \
 		+ "render_mode cull_disabled, unshaded, depth_draw_never, blend_mix;\n" \
-		+ "uniform vec3 rim_color : source_color = vec3(0.85, 0.42, 0.40);\n" \
-		+ "uniform vec3 core_color : source_color = vec3(0.38, 0.11, 0.11);\n" \
-		+ "uniform float rim_power = 2.2;\n" \
-		+ "uniform float core_alpha = 0.14;\n" \
-		+ "uniform float glow = 0.9;\n" \
+		+ "uniform vec3 rim_color : source_color = vec3(0.35, 0.75, 1.0);\n" \
+		+ "uniform vec3 core_color : source_color = vec3(0.05, 0.11, 0.22);\n" \
+		+ "uniform float rim_power = 2.6;\n" \
+		+ "uniform float core_alpha = 0.05;\n" \
+		+ "uniform float glow = 2.2;\n" \
+		+ "uniform float cam_fade_near = 0.012;\n" \
+		+ "uniform float cam_fade_far = 0.045;\n" \
 		+ fade_decl \
 		+ "varying vec3 world_pos;\n" \
 		+ "void vertex() { world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz; }\n" \
@@ -568,6 +845,7 @@ func _make_fresnel_material(with_fade: bool) -> ShaderMaterial:
 		+ "	float f = pow(1.0 - clamp(dot(normalize(NORMAL), normalize(VIEW)), 0.0, 1.0), rim_power);\n" \
 		+ "	ALBEDO = mix(core_color, rim_color, f);\n" \
 		+ "	EMISSION = rim_color * f * glow;\n" \
+		+ "	float cam_fade = smoothstep(cam_fade_near, cam_fade_far, distance(CAMERA_POSITION_WORLD, world_pos));\n" \
 		+ alpha_line \
 		+ "}\n"
 	var mat := ShaderMaterial.new()
@@ -659,7 +937,12 @@ func _setup_network_and_input() -> void:
 	_input.view_cycle.connect(_cycle_camera_mode)
 	_input.model_cycle.connect(_cycle_model)
 	_input.branch_cycle.connect(_cycle_branch)
-	_input.navigate_click.connect(_on_navigate_click)
+	_input.pane_swap.connect(_swap_panes)
+	_input.pointer_down.connect(_on_pointer_down)
+	_input.pointer_drag.connect(_on_pointer_drag)
+	_input.pointer_up.connect(_on_pointer_up)
+	_input.pan_drag.connect(_on_pan_drag)
+	_input.wheel_zoom.connect(_on_wheel_zoom)
 	_input.autopilot_off.connect(_disengage_autopilot)
 	_ws.shape_intent_received.connect(_on_shape_intent)
 
@@ -751,6 +1034,7 @@ func _on_batch(batch: Dictionary) -> void:
 	var path_wps: Array = batch.get("path", {}).get("waypoints", [])
 	if not path_wps.is_empty():
 		_path_waypoints = path_wps
+		_apply_route_features()
 	_guidewire.update_from_batch(batch)
 	_path.update_from_batch(batch)
 	_entry_marker.update_from_batch(batch)
@@ -794,10 +1078,12 @@ func _on_state(state: Dictionary) -> void:
 	_update_debug()
 
 
-# While click autopilot is engaged, tick the backend at ~20 Hz with a neutral
-# control frame; the server overrides it with the ShapeIntentController output,
-# so the tip keeps advancing toward the clicked waypoint without keyboard input.
+# Per-frame: keep the direction cube counter-rotated to the active camera; while
+# click autopilot is engaged, tick the backend at ~20 Hz with a neutral control
+# frame (the server overrides it with the ShapeIntentController output, so the
+# tip keeps advancing toward the clicked waypoint without keyboard input).
 func _process(delta: float) -> void:
+	_sync_direction_cube()
 	if not _autopilot_active:
 		return
 	_autopilot_accum += delta
@@ -819,6 +1105,12 @@ func _process(delta: float) -> void:
 # sitting on the tip ≈ waypoint 0) every click degenerated to selecting waypoint 0.
 func _on_navigate_click(screen_pos: Vector2) -> void:
 	if _path_waypoints.is_empty() or _path == null or not is_instance_valid(_path):
+		return
+	# Clicks that land on a UI button (pane tools / 互换 / dashboard) are button
+	# presses, not navigation intents — the input handler emits before GUI
+	# delivery, so filter them here via the hovered control.
+	var hovered := get_viewport().gui_get_hovered_control()
+	if hovered is BaseButton:
 		return
 	# The 3D now renders inside the pane's SubViewport, so query THAT camera (not the
 	# root viewport's). Clicks arrive in root-window coords: ignore clicks outside the
@@ -948,8 +1240,11 @@ func _feed_rig(tip: Dictionary) -> void:
 	if _vessel_mat_surgical != null and _path != null and is_instance_valid(_path):
 		var tip_world: Vector3 = _path.global_transform * pos
 		_vessel_mat_surgical.set_shader_parameter("tip_world_pos", tip_world)
-		# §2.6 bottom status bar: tip world coordinate.
+		# §2.6 bottom status bar: tip world coordinate. Also the pivot the free
+		# orbit view drops onto when 跟随 is exited.
 		_hud.set_coord(tip_world)
+		_tip_world_last = tip_world
+		_tip_world_known = true
 	# Keep the 3D assistant pane in the external OVERVIEW angle (VPP §2.3). An inside
 	# follow/endoscope camera sees the lumen wall at grazing angles where the 半透 walls
 	# stack into a solid cyan blob; OVERVIEW shows the whole vessel tree cleanly (the
@@ -1026,8 +1321,14 @@ func _set_camera_mode(mode: int) -> void:
 	if _env:
 		_env.fog_enabled = (mode == CamMode.ENDOSCOPE)
 	# Thin guidewire in the close-up views; thicker in the wide overview so it
-	# stays visible at low magnification.
+	# stays visible at low magnification. The route line likewise: visible white
+	# line outside, hair-thin on-centerline guide in the endoscope.
 	_guidewire.set_close_up(mode != CamMode.OVERVIEW)
+	if _path != null and is_instance_valid(_path):
+		_path.set_endoscope(mode == CamMode.ENDOSCOPE)
+	# Keep the 跟随 toolbar toggle in sync (the C key also cycles into FOLLOW).
+	if _follow_btn != null and is_instance_valid(_follow_btn):
+		_follow_btn.set_pressed_no_signal(mode == CamMode.FOLLOW)
 	_hud.set_view_mode(CAM_MODE_NAMES.get(mode, "?"))
 	print("[Main] camera mode -> %s" % CAM_MODE_NAMES.get(mode, "?"))
 
@@ -1058,16 +1359,110 @@ func _scene_aabb(node: Node) -> AABB:
 	return result
 
 
+# Frame the vessel AABB by (re)initializing the orbit rig: pivot at the AABB
+# centre, distance for ~70-80% occupancy (doc/11 §9 "不要让模型占满窗口"), yaw/pitch
+# giving the 3/4 anatomical angle. Also the 复位 tool's target state.
 func _frame_camera(aabb: AABB) -> void:
+	_last_aabb = aabb
 	if aabb.size == Vector3.ZERO:
-		_camera.position = Vector3(0, 0, 2)
-		_camera.look_at(Vector3.ZERO, Vector3.UP)
+		_orbit_pivot = Vector3.ZERO
+		_orbit_yaw = 0.0
+		_orbit_pitch = 0.0
+		_orbit_dist = 2.0
+		_orbit_min = 0.05
+		_orbit_max = 20.0
+		_update_orbit_camera()
 		return
 	var center := aabb.position + aabb.size * 0.5
 	var radius := aabb.size.length() * 0.5
-	# Pull back further than the exact fit so the model keeps ~70-80% area occupancy
-	# with UI space around it (doc/11 §9 "不要让模型占满窗口"), and offset in x/y for a
-	# 3/4 anatomical angle instead of a flat front-on shot.
 	var distance := radius / tan(deg_to_rad(_camera.fov * 0.5)) * 1.35
-	_camera.position = center + Vector3(radius * 0.7, aabb.size.y * 0.5, distance)
-	_camera.look_at(center, Vector3.UP)
+	var offset := Vector3(radius * 0.7, aabb.size.y * 0.5, distance)
+	_orbit_pivot = center
+	_orbit_dist = offset.length()
+	_orbit_yaw = atan2(offset.x, offset.z)
+	_orbit_pitch = asin(clampf(offset.y / _orbit_dist, -1.0, 1.0))
+	_orbit_min = radius * 0.15
+	_orbit_max = radius * 8.0
+	_update_orbit_camera()
+
+
+# Apply the spherical orbit state to the overview camera: yaw about world up,
+# pitch (elevation, +up) about the local right, at _orbit_dist from the pivot.
+func _update_orbit_camera() -> void:
+	if _camera == null or not is_instance_valid(_camera):
+		return
+	var rot := Basis(Vector3.UP, _orbit_yaw) * Basis(Vector3.RIGHT, -_orbit_pitch)
+	_camera.position = _orbit_pivot + rot * Vector3(0.0, 0.0, _orbit_dist)
+	_camera.look_at(_orbit_pivot, Vector3.UP)
+
+
+func _zoom_by(steps: float) -> void:
+	if _cam_mode != CamMode.OVERVIEW:
+		return
+	_orbit_dist = clampf(_orbit_dist * pow(_WHEEL_STEP, steps), _orbit_min, _orbit_max)
+	_update_orbit_camera()
+
+
+# 复位 tool: back to the default view — the stock angle around the vessel entry
+# (起始点) when a route is known, otherwise the whole-tree framing.
+func _reset_view() -> void:
+	if _cam_mode != CamMode.OVERVIEW:
+		_set_camera_mode(CamMode.OVERVIEW)
+	_frame_camera(_last_aabb)  # resets yaw/pitch + zoom limits
+	if _entry_known:
+		_focus_entry()
+
+
+# ── 3D-pane pointer gestures (from input_handler's raw pointer stream) ────────
+# A left press inside the pane starts a pending gesture; small total travel on
+# release = click-to-navigate, larger travel = orbit drag (旋转 mode). Presses on
+# UI buttons or outside the pane are ignored entirely.
+func _on_pointer_down(pos: Vector2) -> void:
+	_press_in_pane = false
+	_press_travel = 0.0
+	if get_viewport().gui_get_hovered_control() is BaseButton:
+		return
+	# 跟随 mode: clicking any non-button area exits back to the free orbit view
+	# (gesture consumed — the release does not navigate).
+	if _cam_mode == CamMode.FOLLOW:
+		_exit_follow_to_free()
+		return
+	if _pane_3d_container == null or not _pane_3d_container.get_global_rect().has_point(pos):
+		return
+	_press_in_pane = true
+
+
+func _on_pointer_drag(_pos: Vector2, relative: Vector2) -> void:
+	if not _press_in_pane:
+		return
+	_press_travel += relative.length()
+	# Below the click threshold nothing moves yet, so a jittery click never
+	# nudges the camera; past it the gesture is committed as an orbit drag.
+	if _press_travel <= _CLICK_TRAVEL_MAX:
+		return
+	if _tool_orbit and _cam_mode == CamMode.OVERVIEW:
+		_orbit_yaw -= relative.x * _ORBIT_SPEED
+		_orbit_pitch = clampf(_orbit_pitch + relative.y * _ORBIT_SPEED, -1.45, 1.45)
+		_update_orbit_camera()
+
+
+func _on_pointer_up(pos: Vector2) -> void:
+	if _press_in_pane and _press_travel <= _CLICK_TRAVEL_MAX:
+		_on_navigate_click(pos)
+	_press_in_pane = false
+
+
+func _on_pan_drag(pos: Vector2, relative: Vector2) -> void:
+	if _cam_mode != CamMode.OVERVIEW or _pane_3d_container == null:
+		return
+	if not _pane_3d_container.get_global_rect().has_point(pos):
+		return
+	var b := _camera.global_transform.basis
+	_orbit_pivot += (-b.x * relative.x + b.y * relative.y) * _orbit_dist * _PAN_SPEED
+	_update_orbit_camera()
+
+
+func _on_wheel_zoom(steps: int, pos: Vector2) -> void:
+	if _pane_3d_container == null or not _pane_3d_container.get_global_rect().has_point(pos):
+		return
+	_zoom_by(float(steps))

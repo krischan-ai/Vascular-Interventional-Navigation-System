@@ -11,10 +11,15 @@ extends Node3D
 ##   - FOLLOW    : third-person close-up trailing the tip (smoothed).
 ##   - ENDOSCOPE : first-person view from the tip looking down the guidewire.
 
-## Third-person follow tuning (meters).
-@export var follow_back: float = 0.025    ## distance behind the tip along travel
-@export var follow_height: float = 0.012  ## height above the tip
-@export var follow_smooth: float = 12.0   ## position/look lerp speed (1/s)
+## Third-person follow tuning (meters). Chase configuration: the camera trails the
+## tip ALONG the travel direction and looks ahead of it, so when the wire turns a
+## corner the whole view swings with it (跟随模式下转弯自动转视角). Walls close to
+## the lens are dissolved by the vessel shader's camera-proximity fade, so sitting
+## near/inside the lumen no longer fogs the view.
+@export var follow_back: float = 0.045      ## trailing distance along travel
+@export var follow_height: float = 0.015    ## height above the tip
+@export var follow_lookahead: float = 0.03  ## look-at point ahead of the tip
+@export var follow_smooth: float = 12.0     ## position/look lerp speed (1/s)
 @export var follow_fov: float = 55.0
 ## First-person endoscope tuning.
 @export var endoscope_back: float = 0.002  ## pull back from the tip to avoid clipping
@@ -75,8 +80,12 @@ func _process(delta: float) -> void:
 
 
 func _update_follow(delta: float) -> void:
-	var desired_pos := _tip - _dir * follow_back + Vector3.UP * follow_height
-	var desired_look := _tip
+	# Chase pose: behind the tip along travel, slightly raised, looking ahead of
+	# the tip so the view direction rotates with the wire through bends. The lerp
+	# smoothing below turns sharp direction changes into a smooth camera swing.
+	var up := _safe_up(_dir, Vector3.UP)
+	var desired_pos := _tip - _dir * follow_back + up * follow_height
+	var desired_look := _tip + _dir * follow_lookahead
 	if not _follow_init:
 		_follow_pos = desired_pos
 		_follow_look = desired_look
