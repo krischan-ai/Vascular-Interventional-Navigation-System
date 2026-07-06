@@ -19,12 +19,15 @@ extends Node3D
 # switch) swaps the active radii below.
 @export var wire_radius_overview: float = 0.0014  ## meters
 @export var wire_radius_closeup: float = 0.0006   ## meters
-@export var tip_radius_overview: float = 0.0018   ## meters
+@export var tip_radius_overview: float = 0.0015   ## meters
 @export var tip_radius_closeup: float = 0.0009    ## meters
 @export var wire_sides: int = 8            ## tube cross-section segments
-@export var wire_color: Color = Color(0.85, 0.86, 0.9)
+# Blue-tinted white wire (doc/11 §9: 导管当前位置颜色 蓝色), readable against the
+# dark-red vessel and the dark background.
+@export var wire_color: Color = Color(0.55, 0.75, 1.0)
 @export var tip_color: Color = Color(1.0, 0.35, 0.2)
-@export var root_color: Color = Color(0.2, 0.75, 1.0)
+# Root marker green so it stays distinct against the dark-red vessel.
+@export var root_color: Color = Color(0.2, 0.95, 0.5)
 
 # Active radii (default to overview); the tube rebuilds every batch so wire_radius
 # takes effect next frame, while the tip sphere is resized immediately.

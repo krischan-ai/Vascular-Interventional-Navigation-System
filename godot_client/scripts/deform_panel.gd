@@ -23,13 +23,19 @@ var _sliders := {}
 
 
 func _ready() -> void:
+	# Anchored to the BOTTOM-RIGHT so it clears the dashboard top bar and the
+	# top-right metric cards (it previously sat top-right and overlapped both).
+	# Grows up-and-left from the corner, sitting just above the bottom progress bar.
 	var panel := PanelContainer.new()
 	panel.anchor_left = 1.0
 	panel.anchor_right = 1.0
+	panel.anchor_top = 1.0
+	panel.anchor_bottom = 1.0
 	panel.offset_left = -320.0
-	panel.offset_top = 16.0
 	panel.offset_right = -16.0
+	panel.offset_bottom = -52.0
 	panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	add_child(panel)
 
 	var margin := MarginContainer.new()

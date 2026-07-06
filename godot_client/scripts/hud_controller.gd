@@ -1,429 +1,395 @@
 extends CanvasLayer
-## Dashboard-style HUD (设计图 doc/10 仪表盘): a top status/command bar, a left tool +
-## diagnostics panel, right-side metric cards, and a bottom progress bar. All chrome
-## is built in code and shares one dark, rounded Theme. The 3D viewport stays clickable:
-## the root Control ignores mouse events, so only the panels/buttons capture clicks and
-## the open centre still forwards left-clicks to the navigate handler.
+## Navigation-workstation dashboard (doc/11 前端设计方案), composed from reusable UI
+## components (StatusCard / StatusIcon / CircularProgress / DataCard / DashPanel)
+## styled by UiStyle. This script only LAYS OUT and BINDS DATA. Three zones on the
+## 1920x1080 canvas:
+##   顶部状态栏  (§3/§4)   : 8 StatusCards (线性图标 + 圆环进度) + 紧急停止
+##   导航与安全数据 (§12/§13): 2x4 DataCards
+##   底部控制区  (§14-§19) : 系统状态17 | 机器人连接17 | 运动控制27 | 系统日志21 | 告警18
+## The DSA (左 59%) and 3D (右上) panes are built by main_controller in a lower layer.
 ##
-## Control buttons emit signals the main controller wires to real actions (急停/接管/恢复
-## and 视角/模型/分支/重置), duplicating the keyboard shortcuts for mouse-only operation.
+## Fields the backend does not stream yet (剩余距离/血管半径/路径偏差/预计到达) are
+## initialised with the reference sample values and marked TODO; live fields update.
 
 signal emergency_stop
 signal manual_takeover
 signal resume_nav
+signal motion_command(push: float, rotate: float)
 signal view_cycle_requested
 signal model_cycle_requested
 signal branch_cycle_requested
 signal reset_requested
+signal deform_toggle
 
-const STATUS_COLORS := {
-	"STANDBY": Color(0.55, 0.55, 0.6),
-	"SAFE_NAV": Color(0.2, 0.85, 0.35),
-	"DANGER_WARNING": Color(0.95, 0.8, 0.2),
-	"COLLISION_STOP": Color(0.95, 0.25, 0.2),
-}
 const STATUS_TEXT := {
-	"STANDBY": "待机 STANDBY",
-	"SAFE_NAV": "安全导航 SAFE",
-	"DANGER_WARNING": "预警 WARNING",
-	"COLLISION_STOP": "制动 STOP",
+	"STANDBY": "待机",
+	"SAFE_NAV": "安全",
+	"DANGER_WARNING": "预警",
+	"COLLISION_STOP": "制动",
 }
 
-# Palette (shared with the cyan fresnel vessel so UI + 3D read as one product).
-const C_BG := Color(0.07, 0.09, 0.13, 0.92)
-const C_PANEL := Color(0.10, 0.13, 0.18, 0.94)
-const C_CARD := Color(0.12, 0.16, 0.22, 0.96)
-const C_ACCENT := Color(0.35, 0.85, 1.0)
-const C_TEXT := Color(0.86, 0.9, 0.95)
-const C_DIM := Color(0.55, 0.62, 0.7)
-const C_STOP := Color(0.9, 0.25, 0.22)
-const C_TAKE := Color(0.95, 0.72, 0.2)
-
-var _light: ColorRect
-var _status_label: Label
-var _connection_label: Label
-var _risk_pill: Label
-var _progress_bar: ProgressBar
-var _clock_label: Label
-var _bottom_status: Label
-var _cards := {}  # metric key -> value Label
-var _view_label: Label
-var _model_label: Label
-var _nav_label: Label
-var _input_label: Label
-var _debug_label: Label
-var _theme: Theme
+var _top := {}     # key -> StatusCard
+var _data := {}    # key -> DataCard
+var _sys := {}     # key -> Label (系统状态 kv)
+var _conn := {}    # key -> Label (机器人连接 kv)
+var _signal_bars: Array = []  # 5 ColorRects (信号强度)
+var _log: DashPanel
+var _alarm: DashPanel
+var _clock: Label
+var _nav_state: Label
+var _push_btn: Button
+var _rotate_btn: Button
+var _stop_btn: Button
+var _uptime_ms := 0
+var _last_alarm := ""
+var _estopped := false
 
 
 func _ready() -> void:
-	_theme = _build_theme()
+	_uptime_ms = Time.get_ticks_msec()
 	var root := Control.new()
 	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.theme = _theme
+	root.theme = UiStyle.theme()
 	add_child(root)
 
-	_build_top_bar(root)
-	_build_left_panel(root)
-	_build_right_cards(root)
-	_build_bottom_bar(root)
+	_build_top(root)
+	_build_data(root)
+	_build_bottom(root)
 
 
 func _process(_delta: float) -> void:
-	if _clock_label:
-		_clock_label.text = Time.get_time_string_from_system()
+	if _clock:
+		_clock.text = Time.get_time_string_from_system()
+	if _sys.has("uptime"):
+		var s := int((Time.get_ticks_msec() - _uptime_ms) / 1000.0)
+		_sys["uptime"].text = "%02d:%02d:%02d" % [s / 3600, (s / 60) % 60, s % 60]
 
 
-# ── Theme ────────────────────────────────────────────────────────────────────
-func _build_theme() -> Theme:
-	var t := Theme.new()
-	t.default_font_size = 14
-	t.set_stylebox("panel", "PanelContainer", _panel_style(C_PANEL))
-	# ProgressBar: dark track, cyan fill.
-	t.set_stylebox("background", "ProgressBar", _flat(Color(0.06, 0.08, 0.11), 6))
-	t.set_stylebox("fill", "ProgressBar", _flat(C_ACCENT, 6))
-	return t
-
-
-func _flat(color: Color, radius: int) -> StyleBoxFlat:
-	var sb := StyleBoxFlat.new()
-	sb.bg_color = color
-	sb.corner_radius_top_left = radius
-	sb.corner_radius_top_right = radius
-	sb.corner_radius_bottom_left = radius
-	sb.corner_radius_bottom_right = radius
-	return sb
-
-
-func _panel_style(color: Color) -> StyleBoxFlat:
-	var sb := _flat(color, 8)
-	sb.border_color = Color(1, 1, 1, 0.06)
-	sb.set_border_width_all(1)
-	sb.content_margin_left = 12
-	sb.content_margin_right = 12
-	sb.content_margin_top = 10
-	sb.content_margin_bottom = 10
-	return sb
-
-
-# ── Top command bar ──────────────────────────────────────────────────────────
-func _build_top_bar(root: Control) -> void:
+# ── 顶部状态栏 (§3/§4): 状态卡片 + 线性图标 + 圆环进度 + 紧急停止 ───────────────
+func _build_top(root: Control) -> void:
 	var bar := PanelContainer.new()
-	bar.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
-	bar.offset_left = 8
-	bar.offset_right = -8
-	bar.offset_top = 8
+	bar.add_theme_stylebox_override("panel", UiStyle.panel_box(0.9, 10))
+	UiStyle.place(bar, UiStyle.top_rect())
 	root.add_child(bar)
 
 	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 16)
+	row.add_theme_constant_override("separation", 10)
 	bar.add_child(row)
 
-	var title := Label.new()
-	title.text = "CathSim 介入导航"
-	title.add_theme_font_size_override("font_size", 19)
-	title.add_theme_color_override("font_color", C_TEXT)
-	row.add_child(title)
+	_top["robot"] = _card(row, "机器人状态", "未连接", "", UiStyle.RED, "robot")
+	row.add_child(_sep())
+	_top["mode"] = _card(row, "导航模式", "手动", "", UiStyle.BLUE, "compass")
+	row.add_child(_sep())
+	# 路径进度: 圆环进度 (§4 "不要只显示文字").
+	var ring := CircularProgress.new()
+	ring.ring_color = UiStyle.GREEN
+	_top["progress"] = StatusCard.new("路径进度", "0", "%", UiStyle.GREEN, ring)
+	row.add_child(_top["progress"])
+	row.add_child(_sep())
+	_top["remain"] = _card(row, "剩余距离", "23.6", "cm", UiStyle.BLUE, "path")  # TODO backend
+	row.add_child(_sep())
+	_top["radius"] = _card(row, "血管半径", "2.8", "mm", UiStyle.BLUE, "radius") # TODO backend
+	row.add_child(_sep())
+	_top["curv"] = _card(row, "曲率", "0.00", "1/mm", UiStyle.BLUE, "curve")
+	row.add_child(_sep())
+	_top["dwall"] = _card(row, "距血管壁距离", "0.0", "mm", UiStyle.GREEN, "wall")
+	row.add_child(_sep())
+	_top["risk"] = _card(row, "风险等级", "正常", "", UiStyle.GREEN, "warning")
+	row.add_child(_sep())
 
-	# Safety status: light + text.
-	var status_box := HBoxContainer.new()
-	status_box.add_theme_constant_override("separation", 8)
-	row.add_child(status_box)
-	_light = ColorRect.new()
-	_light.custom_minimum_size = Vector2(20, 20)
-	_light.color = STATUS_COLORS["STANDBY"]
-	status_box.add_child(_light)
-	_status_label = Label.new()
-	_status_label.text = STATUS_TEXT["STANDBY"]
-	_status_label.add_theme_font_size_override("font_size", 16)
-	status_box.add_child(_status_label)
-
-	_connection_label = _mk_label("● 未连接", Color(0.9, 0.4, 0.4), 14)
-	row.add_child(_connection_label)
-
-	# Risk-level pill.
-	_risk_pill = Label.new()
-	_risk_pill.text = "风险 正常"
-	_risk_pill.add_theme_font_size_override("font_size", 14)
-	_risk_pill.add_theme_color_override("font_color", Color(0.05, 0.07, 0.1))
-	_risk_pill.add_theme_stylebox_override("normal", _pill_style(Color(0.3, 0.8, 0.4)))
-	row.add_child(_risk_pill)
-
-	var spacer := Control.new()
-	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	row.add_child(spacer)
-
-	# Command buttons (right-aligned): resume / takeover / e-stop.
-	row.add_child(_accent_button("恢复导航", C_ACCENT, resume_nav))
-	row.add_child(_accent_button("人工接管", C_TAKE, manual_takeover))
-	row.add_child(_accent_button("急停 STOP", C_STOP, emergency_stop))
+	# 紧急停止 (§4: 暗红底 #4A1C1D + #FF4D4F 边框/文字, 宽 170-190).
+	var estop := UiStyle.button("紧急停止", UiStyle.ESTOP_BG, UiStyle.RED, UiStyle.RED, 18)
+	estop.custom_minimum_size = Vector2(175, 0)
+	estop.pressed.connect(_on_estop_pressed)
+	row.add_child(estop)
 
 
-# ── Left tool + diagnostics panel ────────────────────────────────────────────
-func _build_left_panel(root: Control) -> void:
-	var panel := PanelContainer.new()
-	panel.set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
-	panel.offset_left = 8
-	panel.offset_top = 64
-	panel.custom_minimum_size = Vector2(240, 0)
-	root.add_child(panel)
-
-	var vbox := VBoxContainer.new()
-	vbox.add_theme_constant_override("separation", 6)
-	panel.add_child(vbox)
-
-	vbox.add_child(_mk_label("工具 Tools", C_DIM, 13))
-	var tools := GridContainer.new()
-	tools.columns = 2
-	tools.add_theme_constant_override("h_separation", 6)
-	tools.add_theme_constant_override("v_separation", 6)
-	tools.add_child(_tool_button("视角 C", view_cycle_requested))
-	tools.add_child(_tool_button("模型 M", model_cycle_requested))
-	tools.add_child(_tool_button("分支 B", branch_cycle_requested))
-	tools.add_child(_tool_button("重置 R", reset_requested))
-	vbox.add_child(tools)
-
-	vbox.add_child(HSeparator.new())
-
-	_view_label = _mk_label("视角 View   概览 Overview", Color(0.85, 0.8, 1.0), 14)
-	vbox.add_child(_view_label)
-	_model_label = _mk_label("模型 Model  —", Color(0.8, 0.95, 0.85), 14)
-	vbox.add_child(_model_label)
-	_nav_label = _mk_label("导航 Nav    手动 Manual", C_ACCENT, 14)
-	vbox.add_child(_nav_label)
-	_input_label = _mk_label("Input  push=+0.0  rot=+0.0", Color(0.6, 0.85, 1.0), 14)
-	vbox.add_child(_input_label)
-
-	vbox.add_child(HSeparator.new())
-
-	var legend := VBoxContainer.new()
-	legend.add_theme_constant_override("separation", 2)
-	legend.add_child(_mk_label("● 入口 Entry", Color(0.15, 1.0, 0.4), 12))
-	legend.add_child(_mk_label("● 目标 Target", Color(1.0, 0.2, 0.2), 12))
-	legend.add_child(_mk_label("● 路径 Path", Color(0.2, 0.8, 1.0), 12))
-	legend.add_child(_mk_label("● 点击 Goal", Color(0.2, 1.0, 0.9), 12))
-	vbox.add_child(legend)
-
-	vbox.add_child(HSeparator.new())
-
-	_debug_label = _mk_label("session: none\nmsgs: 0\nlast: —", Color(0.8, 0.75, 0.5), 12)
-	_debug_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_debug_label.custom_minimum_size = Vector2(216, 0)
-	vbox.add_child(_debug_label)
-
-	var hint := _mk_label("W/S 推进·后退  A/D 旋转  左键 导航  ESC 脱离", C_DIM, 11)
-	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	hint.custom_minimum_size = Vector2(216, 0)
-	vbox.add_child(hint)
-
-
-# ── Right metric cards ───────────────────────────────────────────────────────
-func _build_right_cards(root: Control) -> void:
-	var panel := PanelContainer.new()
-	panel.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
-	panel.offset_left = -212
-	panel.offset_right = -8
-	panel.offset_top = 64
-	root.add_child(panel)
-
-	var grid := GridContainer.new()
-	grid.columns = 2
-	grid.add_theme_constant_override("h_separation", 8)
-	grid.add_theme_constant_override("v_separation", 8)
-	panel.add_child(grid)
-
-	grid.add_child(_metric_card("wall", "壁距 Wall", "mm"))
-	grid.add_child(_metric_card("curv", "曲率 Curv", "1/m"))
-	grid.add_child(_metric_card("speed", "速度 Speed", "m/s"))
-	grid.add_child(_metric_card("progress", "进度 Progress", "%"))
-	grid.add_child(_metric_card("risk", "风险 Risk", ""))
-	grid.add_child(_metric_card("episode", "步数 Step", ""))
-
-
-func _metric_card(key: String, title: String, unit: String) -> Control:
-	var card := PanelContainer.new()
-	card.add_theme_stylebox_override("panel", _card_style())
-	card.custom_minimum_size = Vector2(92, 0)
-	var vb := VBoxContainer.new()
-	vb.add_theme_constant_override("separation", 1)
-	card.add_child(vb)
-	vb.add_child(_mk_label(title, C_DIM, 11))
-	var value := Label.new()
-	value.text = "—"
-	value.add_theme_font_size_override("font_size", 20)
-	value.add_theme_color_override("font_color", C_ACCENT)
-	vb.add_child(value)
-	if unit != "":
-		vb.add_child(_mk_label(unit, C_DIM, 10))
-	_cards[key] = value
+func _card(row: HBoxContainer, title: String, value: String, unit: String,
+		color: Color, icon_kind: String) -> StatusCard:
+	var card := StatusCard.new(title, value, unit, color, StatusIcon.new(icon_kind, color))
+	row.add_child(card)
 	return card
 
 
-func _card_style() -> StyleBoxFlat:
-	var sb := _flat(C_CARD, 6)
-	sb.border_color = Color(1, 1, 1, 0.05)
-	sb.set_border_width_all(1)
-	sb.content_margin_left = 10
-	sb.content_margin_right = 10
-	sb.content_margin_top = 8
-	sb.content_margin_bottom = 8
-	return sb
+func _sep() -> VSeparator:
+	var s := VSeparator.new()
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(UiStyle.BORDER.r, UiStyle.BORDER.g, UiStyle.BORDER.b, 0.6)
+	sb.content_margin_left = 1
+	s.add_theme_stylebox_override("separator", sb)
+	return s
 
 
-# ── Bottom progress bar ──────────────────────────────────────────────────────
-func _build_bottom_bar(root: Control) -> void:
-	var bar := PanelContainer.new()
-	bar.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
-	bar.offset_left = 8
-	bar.offset_right = -8
-	bar.offset_bottom = -8
-	root.add_child(bar)
+# ── 导航与安全数据 (§12/§13): 2x4 DataCards ──────────────────────────────────
+func _build_data(root: Control) -> void:
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", UiStyle.panel_box(0.92, 10))
+	UiStyle.place(panel, UiStyle.data_rect())
+	root.add_child(panel)
 
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 8)
+	panel.add_child(vb)
+	vb.add_child(UiStyle.label("导航与安全数据", UiStyle.TEXT, 16))
+
+	var grid := GridContainer.new()
+	grid.columns = 4
+	grid.add_theme_constant_override("h_separation", 10)
+	grid.add_theme_constant_override("v_separation", 10)
+	grid.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	vb.add_child(grid)
+
+	_data["dwall"] = _dcard(grid, "距血管壁距离", "1.6", "mm", UiStyle.GREEN)
+	_data["dpath"] = _dcard(grid, "路径偏差", "0.7", "mm", UiStyle.GREEN)    # TODO backend
+	_data["radius"] = _dcard(grid, "血管半径", "2.8", "mm", UiStyle.BLUE)    # TODO backend
+	_data["curv"] = _dcard(grid, "曲率", "0.42", "1/mm", UiStyle.BLUE)
+	_data["speed"] = _dcard(grid, "导管速度", "3.2", "mm/s", UiStyle.BLUE)
+	_data["progress"] = _dcard(grid, "路径进度", "72", "%", UiStyle.BLUE)
+	_data["eta"] = _dcard(grid, "预计到达目标", "02:35", "min", UiStyle.BLUE) # TODO backend
+	# 卡8 风险状态 with 提示行 (§13).
+	var risk := DataCard.new("风险状态", "正常", "", UiStyle.GREEN, 30.0, "请保持谨慎操作")
+	grid.add_child(risk)
+	_data["risk"] = risk
+
+
+func _dcard(grid: GridContainer, title: String, value: String, unit: String,
+		color: Color) -> DataCard:
+	var card := DataCard.new(title, value, unit, color)
+	grid.add_child(card)
+	return card
+
+
+# ── 底部控制区 (§14-§19): 五面板 17/17/27/21/18 ──────────────────────────────
+func _build_bottom(root: Control) -> void:
 	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 14)
-	bar.add_child(row)
+	UiStyle.place(row, UiStyle.bottom_rect())
+	row.add_theme_constant_override("separation", UiStyle.GAP)
+	root.add_child(row)
 
-	_bottom_status = _mk_label("待机 STANDBY", C_DIM, 13)
-	row.add_child(_bottom_status)
+	# 1. 系统状态 (17%)
+	var sysp := DashPanel.new("系统状态", 17.0)
+	_clock = sysp.add_kv("系统时间", "--:--:--")
+	_sys["uptime"] = sysp.add_kv("系统运行时间", "00:00:00")
+	sysp.add_kv("软件版本", "v0.1 原型")
+	_sys["coord"] = sysp.add_kv("导丝坐标", "—")
+	_sys["view"] = sysp.add_kv("视角", "概览")
+	_sys["model"] = sysp.add_kv("模型", "—")
+	row.add_child(sysp)
 
-	row.add_child(_mk_label("进度", C_DIM, 13))
-	_progress_bar = ProgressBar.new()
-	_progress_bar.min_value = 0.0
-	_progress_bar.max_value = 100.0
-	_progress_bar.value = 0.0
-	_progress_bar.show_percentage = true
-	_progress_bar.custom_minimum_size = Vector2(0, 18)
-	_progress_bar.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	row.add_child(_progress_bar)
+	# 2. 机器人连接 (17%)
+	var connp := DashPanel.new("机器人连接", 17.0)
+	_conn["status"] = connp.add_kv("连接状态", "未连接", UiStyle.RED)
+	_conn["latency"] = connp.add_kv("延迟", "— ms")
+	# 信号强度: 5 格信号条 (§16).
+	var sigrow := HBoxContainer.new()
+	var sigt := UiStyle.label("信号强度", UiStyle.TEXT_MID, 12)
+	sigt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	sigrow.add_child(sigt)
+	var bars := HBoxContainer.new()
+	bars.add_theme_constant_override("separation", 3)
+	bars.alignment = BoxContainer.ALIGNMENT_END
+	for i in 5:
+		var seg := ColorRect.new()
+		seg.custom_minimum_size = Vector2(6, 6 + i * 3)
+		seg.size_flags_vertical = Control.SIZE_SHRINK_END
+		seg.color = UiStyle.TRACK
+		bars.add_child(seg)
+		_signal_bars.append(seg)
+	sigrow.add_child(bars)
+	connp.content.add_child(sigrow)
+	row.add_child(connp)
 
-	_clock_label = _mk_label("--:--:--", C_TEXT, 13)
-	row.add_child(_clock_label)
+	# 3. 运动控制 (27%): 大按钮 暗底+彩色描边 (§17), 急停后禁用推进/旋转 (§22).
+	var motionp := DashPanel.new("运动控制", 27.0)
+	var mrow := HBoxContainer.new()
+	mrow.add_theme_constant_override("separation", 10)
+	_push_btn = UiStyle.button("推进", UiStyle.BLUE_BG, UiStyle.BLUE, UiStyle.TEXT, 16)
+	_push_btn.custom_minimum_size = Vector2(130, 62)
+	_push_btn.pressed.connect(func(): motion_command.emit(1.0, 0.0))
+	mrow.add_child(_push_btn)
+	_rotate_btn = UiStyle.button("旋转", UiStyle.GRAY_BTN, UiStyle.GRAY_BORDER, UiStyle.TEXT, 16)
+	_rotate_btn.custom_minimum_size = Vector2(130, 62)
+	_rotate_btn.pressed.connect(func(): motion_command.emit(0.0, 1.0))
+	mrow.add_child(_rotate_btn)
+	_stop_btn = UiStyle.button("停止", UiStyle.RED_BG, UiStyle.RED, UiStyle.RED, 16)
+	_stop_btn.custom_minimum_size = Vector2(130, 62)
+	_stop_btn.pressed.connect(_on_estop_pressed)
+	mrow.add_child(_stop_btn)
+	motionp.content.add_child(mrow)
+	# Secondary tools + live nav/input readout.
+	var srow := HBoxContainer.new()
+	srow.add_theme_constant_override("separation", 6)
+	srow.add_child(_tool("恢复", func(): _on_resume_pressed()))
+	srow.add_child(_tool("接管", func(): manual_takeover.emit()))
+	srow.add_child(_tool("视角", func(): view_cycle_requested.emit()))
+	srow.add_child(_tool("模型", func(): model_cycle_requested.emit()))
+	srow.add_child(_tool("分支", func(): branch_cycle_requested.emit()))
+	srow.add_child(_tool("重置", func(): reset_requested.emit()))
+	srow.add_child(_tool("形变", func(): deform_toggle.emit()))
+	motionp.content.add_child(srow)
+	_nav_state = UiStyle.label("导航 手动 · Input p+0.0 r+0.0", UiStyle.TEXT2, 12)
+	motionp.content.add_child(_nav_state)
+	row.add_child(motionp)
+
+	# 4. 系统日志 (21%)
+	_log = DashPanel.new("系统日志", 21.0)
+	var now := Time.get_time_string_from_system()
+	_log.add_log(now, "系统初始化完成")
+	_log.add_log(now, "等待后端连接")
+	row.add_child(_log)
+
+	# 5. 告警信息 (18%)
+	_alarm = DashPanel.new("告警信息", 18.0)
+	row.add_child(_alarm)
 
 
-# ── Small builders ───────────────────────────────────────────────────────────
-func _mk_label(text: String, color: Color, size: int) -> Label:
-	var l := Label.new()
-	l.text = text
-	l.add_theme_font_size_override("font_size", size)
-	l.add_theme_color_override("font_color", color)
-	return l
-
-
-func _pill_style(color: Color) -> StyleBoxFlat:
-	var sb := _flat(color, 10)
-	sb.content_margin_left = 10
-	sb.content_margin_right = 10
-	sb.content_margin_top = 3
-	sb.content_margin_bottom = 3
-	return sb
-
-
-func _accent_button(text: String, color: Color, sig: Signal) -> Button:
-	var b := Button.new()
-	b.text = text
-	b.add_theme_font_size_override("font_size", 14)
-	b.add_theme_color_override("font_color", Color(0.05, 0.07, 0.1))
-	b.add_theme_color_override("font_hover_color", Color(0.02, 0.03, 0.05))
-	var normal := _pill_style(color)
-	normal.content_margin_left = 14
-	normal.content_margin_right = 14
-	normal.content_margin_top = 6
-	normal.content_margin_bottom = 6
-	var hover: StyleBoxFlat = normal.duplicate()
-	hover.bg_color = color.lightened(0.12)
-	var pressed: StyleBoxFlat = normal.duplicate()
-	pressed.bg_color = color.darkened(0.15)
-	b.add_theme_stylebox_override("normal", normal)
-	b.add_theme_stylebox_override("hover", hover)
-	b.add_theme_stylebox_override("pressed", pressed)
-	b.pressed.connect(func(): sig.emit())
+func _tool(text: String, cb: Callable) -> Button:
+	var b := UiStyle.button(text, UiStyle.GRAY_BTN, UiStyle.BORDER, UiStyle.TEXT_MID, 12, 6)
+	b.custom_minimum_size = Vector2(52, 24)
+	b.pressed.connect(cb)
 	return b
 
 
-func _tool_button(text: String, sig: Signal) -> Button:
-	var b := Button.new()
-	b.text = text
-	b.add_theme_font_size_override("font_size", 13)
-	b.add_theme_color_override("font_color", C_TEXT)
-	b.custom_minimum_size = Vector2(104, 30)
-	var normal := _flat(Color(0.16, 0.2, 0.27), 6)
-	var hover := _flat(Color(0.2, 0.26, 0.34), 6)
-	var pressed := _flat(C_ACCENT.darkened(0.2), 6)
-	b.add_theme_stylebox_override("normal", normal)
-	b.add_theme_stylebox_override("hover", hover)
-	b.add_theme_stylebox_override("pressed", pressed)
-	b.pressed.connect(func(): sig.emit())
-	return b
+# ── 紧急停止 / 恢复 (§22 interaction states) ─────────────────────────────────
+func _on_estop_pressed() -> void:
+	_estopped = true
+	_push_btn.disabled = true
+	_rotate_btn.disabled = true
+	_top["risk"].set_value("紧急停止")
+	_top["risk"].set_color(UiStyle.RED)
+	_alarm.add_alert(Time.get_time_string_from_system(), "紧急停止已触发", "danger")
+	add_log_line("紧急停止")
+	emergency_stop.emit()
 
 
-# ── Public API (unchanged signatures, consumed by main_controller) ───────────
+func _on_resume_pressed() -> void:
+	if _estopped:
+		_estopped = false
+		_push_btn.disabled = false
+		_rotate_btn.disabled = false
+		add_log_line("恢复导航")
+	resume_nav.emit()
+
+
+## Append a timestamped system-log line (kept to the latest 4).
+func add_log_line(text: String) -> void:
+	if _log:
+		_log.add_log(Time.get_time_string_from_system(), text)
+
+
+# ── Public API (consumed by main_controller) ────────────────────────────────
 func set_connection(connected: bool) -> void:
-	if connected:
-		_connection_label.text = "● 已连接 Connected"
-		_connection_label.add_theme_color_override("font_color", Color(0.4, 0.85, 0.45))
-	else:
-		_connection_label.text = "● 未连接 Disconnected"
-		_connection_label.add_theme_color_override("font_color", Color(0.9, 0.4, 0.4))
+	var txt := "已连接" if connected else "未连接"
+	var col := UiStyle.GREEN if connected else UiStyle.RED
+	_top["robot"].set_value(txt)
+	_top["robot"].set_color(col)
+	_conn["status"].text = txt
+	_conn["status"].add_theme_color_override("font_color", col)
+	_conn["latency"].text = "18 ms" if connected else "— ms"  # TODO backend RTT
+	for i in _signal_bars.size():
+		_signal_bars[i].color = (UiStyle.GREEN if connected and i < 4 else UiStyle.TRACK)
+	add_log_line("后端已连接" if connected else "后端连接断开")
 
 
 func update_safety(status: String) -> void:
-	_status_label.text = STATUS_TEXT.get(status, status)
-	_light.color = STATUS_COLORS.get(status, STATUS_COLORS["STANDBY"])
-	if _bottom_status:
-		_bottom_status.text = STATUS_TEXT.get(status, status)
-		_bottom_status.add_theme_color_override("font_color", STATUS_COLORS.get(status, C_DIM))
+	var text: String = STATUS_TEXT.get(status, status)
+	var stop := status == "COLLISION_STOP"
+	var warn := status == "DANGER_WARNING"
+	# Alert card only on a status transition, so it does not spam every frame.
+	if status != _last_alarm and (stop or warn):
+		_last_alarm = status
+		_alarm.add_alert(Time.get_time_string_from_system(),
+			"距血管壁较近，请注意操作" if warn else "已触发制动保护",
+			"warning" if warn else "danger")
+	elif not (stop or warn):
+		if _last_alarm in ["DANGER_WARNING", "COLLISION_STOP"]:
+			_alarm.add_alert(Time.get_time_string_from_system(), "恢复安全导航", "success")
+		_last_alarm = status
+
+
+func set_control_mode(text: String) -> void:
+	var col := UiStyle.BLUE
+	if "AUTO" in text:
+		col = UiStyle.GREEN
+	elif "STOP" in text or "HOLD" in text:
+		col = UiStyle.YELLOW
+	_top["mode"].set_value(text)
+	_top["mode"].set_color(col)
 
 
 func update_metrics(metrics: Dictionary) -> void:
 	var wall_mm := float(metrics.get("wall_distance", 0.0)) * 1000.0
+	var curv := float(metrics.get("curvature", 0.0))
+	var speed := float(metrics.get("velocity", 0.0)) * 1000.0  # m/s -> mm/s
 	var progress := float(metrics.get("path_progress", 0.0)) * 100.0
-	var risk := float(metrics.get("risk_score", 0.0))
-	_set_card("wall", "%.1f" % wall_mm)
-	_set_card("curv", "%.2f" % float(metrics.get("curvature", 0.0)))
-	_set_card("speed", "%.4f" % float(metrics.get("velocity", 0.0)))
-	_set_card("progress", "%.0f" % progress)
-	_set_card("risk", "%.2f" % risk)
-	_set_card("episode", "%d" % int(metrics.get("episode_length", 0)))
-	if _progress_bar:
-		_progress_bar.value = progress
-	_update_risk_pill(risk)
+
+	_top["progress"].set_value("%.0f" % progress)
+	_top["progress"].set_ring(progress)
+	_top["curv"].set_value("%.2f" % curv)
+	_top["dwall"].set_value("%.1f" % wall_mm)
+
+	_data["dwall"].set_value("%.1f" % wall_mm)
+	_data["dwall"].set_bar(clampf(wall_mm / 3.0 * 100.0, 0.0, 100.0))
+	_data["curv"].set_value("%.2f" % curv)
+	_data["speed"].set_value("%.1f" % speed)
+	_data["progress"].set_value("%.0f" % progress)
+	_data["progress"].set_bar(progress)
+
+	_update_risk(wall_mm)
 
 
-func _set_card(key: String, text: String) -> void:
-	if _cards.has(key):
-		_cards[key].text = text
-
-
-func _update_risk_pill(risk: float) -> void:
+## Risk rule (doc/11 §23): by wall distance —— >1.5mm 安全绿 / 0.8-1.5 中等黄 / <0.8 高危红.
+func _update_risk(wall_mm: float) -> void:
+	if _estopped:
+		return  # estop display holds until 恢复
 	var color: Color
 	var text: String
-	if risk < 0.34:
-		color = Color(0.3, 0.8, 0.4); text = "风险 正常 Safe"
-	elif risk < 0.67:
-		color = Color(0.95, 0.75, 0.2); text = "风险 预警 Warning"
+	if wall_mm > 1.5:
+		color = UiStyle.GREEN; text = "正常"
+	elif wall_mm >= 0.8:
+		color = UiStyle.YELLOW; text = "中等"
 	else:
-		color = Color(0.92, 0.3, 0.25); text = "风险 危险 Danger"
-	_risk_pill.text = text
-	_risk_pill.add_theme_stylebox_override("normal", _pill_style(color))
+		color = UiStyle.RED; text = "高风险"
+	_top["risk"].set_value(text)
+	_top["risk"].set_color(color)
+	_top["dwall"].set_color(color)
+	_data["risk"].set_value(text if text == "正常" else text + "风险")
+	_data["risk"].set_color(color)
+	_data["dwall"].set_color(color)
 
 
 func update_input(push: float, rotate: float) -> void:
-	_input_label.text = "Input  push=%+0.1f  rot=%+0.1f" % [push, rotate]
+	if _nav_state:
+		var parts := _nav_state.text.split(" · ")
+		var nav := parts[0] if parts.size() > 0 else "导航 手动"
+		_nav_state.text = "%s · Input p%+0.1f r%+0.1f" % [nav, push, rotate]
+
+
+func set_coord(pos: Vector3) -> void:
+	if _sys.has("coord"):
+		_sys["coord"].text = "(%.2f, %.2f, %.2f)" % [pos.x, pos.y, pos.z]
 
 
 func set_view_mode(mode_name: String) -> void:
-	_view_label.text = "视角 View   %s" % mode_name
+	if _sys.has("view"):
+		_sys["view"].text = mode_name
 
 
 func set_model(model_name: String) -> void:
-	_model_label.text = "模型 Model  %s" % model_name
+	if _sys.has("model"):
+		_sys["model"].text = model_name
 
 
 func set_nav(text: String, active: bool = true) -> void:
-	_nav_label.text = "导航 Nav    %s" % text
-	var color := C_ACCENT if active else C_DIM
-	_nav_label.add_theme_color_override("font_color", color)
+	if _nav_state:
+		var parts := _nav_state.text.split(" · ")
+		var inp := parts[1] if parts.size() > 1 else "Input p+0.0 r+0.0"
+		_nav_state.text = "导航 %s · %s" % [text, inp]
+		_nav_state.add_theme_color_override("font_color", UiStyle.BLUE if active else UiStyle.TEXT2)
 
 
-func set_debug(text: String) -> void:
-	_debug_label.text = text
+# Diagnostics are no longer shown on-screen; kept as a no-op so main_controller's
+# frequent set_debug calls stay valid.
+func set_debug(_text: String) -> void:
+	pass

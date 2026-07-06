@@ -13,7 +13,8 @@ extends Node3D
 ## path is constant for a session, so it is only (re)drawn when the waypoint
 ## count changes (e.g. after a reset or a new route).
 
-@export var path_color: Color = Color(0.2, 0.8, 1.0)
+# 规划路径黄色 (doc/11 §9: 导管路径颜色 黄色; matches the DSA overlay's planned path).
+@export var path_color: Color = Color(1.0, 0.831, 0.278)
 # Hair-thin guide line. The endoscope camera sits on the centerline (guided mode),
 # i.e. inside this tube, so the nearest ring wraps the view; its angular size is
 # ~atan(radius / near_plane) with near_plane = 0.0005 m. The radius must be a
