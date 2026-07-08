@@ -409,14 +409,6 @@ class WebSocketHandler:
                     "routes": engine.available_routes,
                 },
             )
-            if conn_state.batch_mode:
-                await self._send_message(
-                    conn_state,
-                    MessageType.STATE_BATCH,
-                    session_id=session_id,
-                    data=self._state_to_batch(state, engine, include_path=True),
-                )
-                conn_state.path_sent = True
 
         except Exception as e:  # noqa: BLE001 - report any init failure to the client
             traceback.print_exc()

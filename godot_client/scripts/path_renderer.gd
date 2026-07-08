@@ -1,9 +1,9 @@
 extends Node3D
 ## Renders the planned navigation path (state_batch.path.waypoints) as one thin
-## tube whose color runs along its length (一条多颜色的线):
-##   - Per-waypoint danger = smoothed discrete curvature (real geometry) mapped
-##     through a 白青→黄→红 gradient, plus red-override index ranges from the
-##     controller (MOCK 禁入段 until the backend streams no_go_zones).
+## tube whose color runs along its length (涓€鏉″棰滆壊鐨勭嚎):
+##   - Per-waypoint curvature hint = smoothed discrete curvature (real geometry) mapped
+##     through a white-cyan -> warm gradient. This is a route readability
+##     cue only, not a no-go/risk volume.
 ##   - The traversed portion behind the wire (path.progress) dims and fades via a
 ##     shader `progress` uniform, so the route never visually competes with the
 ##     guidewire that has already covered it. No waypoint dot spheres.
@@ -18,22 +18,23 @@ extends Node3D
 ## geometry is constant for a session and only rebuilt when the route changes;
 ## per-batch progress updates are a single uniform write.
 
-# Danger gradient endpoints (弯曲/危险程度 heat ramp).
-@export var color_safe: Color = Color(0.85, 0.95, 1.0)    # 平直段 白青
-@export var color_warn: Color = Color(1.0, 0.83, 0.28)    # 中等弯曲 黄
-@export var color_danger: Color = Color(1.0, 0.30, 0.31)  # 高弯曲/禁入 红
-# Curvature (1/m) that maps to full red; smaller = the ramp saturates earlier.
+# Curvature hint gradient endpoints. Keep the high end warm but not saturated
+# red, so it cannot be mistaken for a real no-go/risk region.
+@export var color_safe: Color = Color(0.85, 0.95, 1.0)    # 骞崇洿娈?鐧介潚
+@export var color_warn: Color = Color(1.0, 0.83, 0.28)    # medium curvature: amber
+@export var color_high_curvature: Color = Color(1.0, 0.58, 0.34)  # high curvature: warm hint
+# Curvature (1/m) that maps to the warm endpoint; smaller = the ramp saturates earlier.
 @export var curvature_red: float = 120.0
 # Radius by view. Overview/follow see the route from outside, so the line must be
 # visibly thick and bloom-lit. The endoscope camera sits ON the centerline (guided
 # mode), i.e. inside this tube, so there the radius must be a small fraction of the
 # near plane (0.0005 m) so the surrounding ring shrinks to a dot instead of a
-# hexagon blocking the curve behind it — set_endoscope() swaps them.
+# hexagon blocking the curve behind it 鈥?set_endoscope() swaps them.
 @export var path_radius_main: float = 0.0008       ## meters (overview/follow)
 @export var path_radius_endoscope: float = 0.00004 ## meters (on-centerline view)
 @export var path_sides: int = 8            ## tube cross-section segments
 @export var emission_energy: float = 1.8   ## >1 so the line blooms
-@export var traversed_dim: float = 0.25    ## brightness of the已走过 portion
+@export var traversed_dim: float = 0.25    ## brightness of the宸茶蛋杩?portion
 # Hide the tube right at the camera so the near cross-section (a faceted ring the
 # endoscope camera sits inside) disappears, leaving the line from a few mm out.
 # Distance fade is by camera distance, so the overview/follow cameras (always far
@@ -45,8 +46,8 @@ var _mesh: ImmediateMesh
 var _mi: MeshInstance3D
 var _material: ShaderMaterial
 var _points := PackedVector3Array()  # last drawn route, for re-builds
-var _danger := PackedFloat32Array()  # per-waypoint 0..1 danger
-var _risk_ranges: Array = []         # [{lo, hi}] red-override waypoint ranges
+var _curvature_hint := PackedFloat32Array()  # per-waypoint 0..1 route curvature hint
+var _forced_ranges: Array = []               # legacy compatibility; forced ranges stay disabled
 var _path_radius: float = 0.0008     # active radius (set_endoscope swaps)
 var _endoscope: bool = false
 var _drawn_count: int = -1
@@ -63,10 +64,10 @@ func _ready() -> void:
 	add_child(_mi)
 
 
-# Vertex-colored emissive line shader. COLOR carries the danger gradient, UV.x the
+# Vertex-colored emissive line shader. COLOR carries the curvature hint, UV.x the
 # arc-length fraction so the `progress` uniform can dim the traversed stretch
 # per-pixel. depth_test_disabled + render_priority keep the route visible through
-# the vessel walls (透视图画法) so the camera can stay outside the tree; the
+# the vessel walls (閫忚鍥剧敾娉? so the camera can stay outside the tree; the
 # view-distance fade hides the near ring the endoscope camera sits inside.
 func _make_path_material() -> ShaderMaterial:
 	var shader := Shader.new()
@@ -102,12 +103,19 @@ func set_progress(p: float) -> void:
 	_material.set_shader_parameter("progress", clampf(p, 0.0, 1.0))
 
 
-## Red-override waypoint index ranges ([{lo, hi}], inclusive) — the MOCK 禁入段
-## from the controller. Repaints the cached route.
+## Legacy compatibility entry point. Forced route ranges are intentionally ignored:
+## real spatial risks must arrive through backend `risk_regions` and the dedicated
+## risk renderer, not as path-index color overrides.
 func set_risk_ranges(ranges: Array) -> void:
-	_risk_ranges = ranges
+	if not ranges.is_empty():
+		push_warning("Ignoring forced path ranges; use source-backed risk_regions for spatial risk.")
+	clear_forced_ranges()
+
+
+func clear_forced_ranges() -> void:
+	_forced_ranges = []
 	if _points.size() >= 2:
-		_danger = _compute_danger(_points)
+		_curvature_hint = _compute_curvature_hint(_points)
 		_build_tube(_points, _path_radius)
 
 
@@ -148,7 +156,7 @@ func _draw(waypoints: Array) -> void:
 		if typeof(point) == TYPE_ARRAY and point.size() >= 3:
 			points.append(Vector3(float(point[0]), float(point[1]), float(point[2])))
 	_points = points
-	_danger = _compute_danger(points)
+	_curvature_hint = _compute_curvature_hint(points)
 	_build_tube(points, _path_radius)
 
 
@@ -162,10 +170,9 @@ func _path_signature(waypoints: Array) -> String:
 	]
 
 
-# Per-waypoint danger 0..1: discrete curvature (turning angle over mean local
-# spacing), smoothed over ±2 neighbors, scaled by curvature_red; then the
-# controller's red-override ranges (禁入段) are forced to 1.
-func _compute_danger(points: PackedVector3Array) -> PackedFloat32Array:
+# Per-waypoint curvature hint 0..1: discrete curvature (turning angle over mean
+# local spacing), smoothed over +/-2 neighbors, scaled by curvature_red.
+func _compute_curvature_hint(points: PackedVector3Array) -> PackedFloat32Array:
 	var n := points.size()
 	var out := PackedFloat32Array()
 	out.resize(n)
@@ -190,7 +197,7 @@ func _compute_danger(points: PackedVector3Array) -> PackedFloat32Array:
 			acc += kappa[j]
 			cnt += 1
 		out[i] = clampf((acc / float(cnt)) / curvature_red, 0.0, 1.0)
-	for r in _risk_ranges:
+	for r in _forced_ranges:
 		var lo: int = clampi(int(r.lo), 0, n - 1)
 		var hi: int = clampi(int(r.hi), 0, n - 1)
 		for i in range(lo, hi + 1):
@@ -198,11 +205,11 @@ func _compute_danger(points: PackedVector3Array) -> PackedFloat32Array:
 	return out
 
 
-# 白青→黄→红 heat ramp for a danger value.
+# White-cyan -> yellow -> warm-orange heat ramp for a curvature hint value.
 func _gradient(d: float) -> Color:
 	if d < 0.5:
 		return color_safe.lerp(color_warn, d * 2.0)
-	return color_warn.lerp(color_danger, (d - 0.5) * 2.0)
+	return color_warn.lerp(color_high_curvature, (d - 0.5) * 2.0)
 
 
 func _build_tube(points: PackedVector3Array, radius: float) -> void:
@@ -234,7 +241,7 @@ func _build_tube(points: PackedVector3Array, radius: float) -> void:
 	var fracs := PackedFloat32Array()
 	fracs.resize(count)
 	for i in count:
-		var d: float = _danger[i] if i < _danger.size() else 0.0
+		var d: float = _curvature_hint[i] if i < _curvature_hint.size() else 0.0
 		colors.append(_gradient(d))
 		fracs[i] = float(i) / float(count - 1)
 

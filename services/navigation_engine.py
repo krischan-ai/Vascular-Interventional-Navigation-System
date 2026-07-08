@@ -809,21 +809,11 @@ class NavigationEngine:
     def _risk_regions(self, path_progress: float, path_deviation: float) -> list[dict[str, Any]]:
         """Protocol placeholder for backend-provided risk regions.
 
-        Until the SDF/risk-map backend supplies spatial regions, expose a stable
-        empty list and add a local caution marker only when the current state is
-        already off-path enough to be useful to the frontend.
+        Until the SDF/risk-map backend supplies source-backed spatial regions,
+        expose a stable empty list. Path deviation still contributes to the
+        aggregate risk score, but it is not a renderable no-go/risk volume.
         """
-        if self._path is None or path_deviation < self.WALL_DISTANCE_SAFE:
-            return []
-        s = float(path_progress) * self._path.total_len
-        return [
-            {
-                "kind": "path_deviation",
-                "level": "warning",
-                "center": self._path.point_at_arclen(s).tolist(),
-                "radius": float(path_deviation),
-            }
-        ]
+        return []
 
     def _compute_curvature(self) -> float:
         """Estimate local tip curvature (m^-1) via Menger curvature.

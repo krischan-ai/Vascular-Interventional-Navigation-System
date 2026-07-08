@@ -207,6 +207,10 @@ class TestNavigationEngineHelpers:
         assert engine._compute_eta_seconds(1.5, 0.5) == pytest.approx(3.0)
         assert engine._compute_eta_seconds(1.5, 0.0) is None
 
+    def test_risk_regions_empty_until_source_backed_data(self):
+        engine = self._engine(planned_path=[[0, 0, 0], [0, 0, 1], [0, 0, 2]])
+        assert engine._risk_regions(0.5, engine.WALL_DISTANCE_SAFE * 2.0) == []
+
     def test_set_planned_path_clear(self):
         engine = self._engine(planned_path=[[0, 0, 0], [0, 0, 1]])
         assert engine._path is not None

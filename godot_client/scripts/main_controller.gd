@@ -132,17 +132,18 @@ var _tool_orbit: bool = true
 # Direction cube (§11): wireframe cube in its own SubViewport, counter-rotated
 # against the active 3D camera every frame so it always shows world orientation.
 var _cube_root: Node3D
-# Route risk display: the route line itself carries a continuous curvature/danger
-# color gradient (computed in path_renderer); the controller only supplies the
-# red-override 禁入段 range — MOCK at 60% of the route until the backend streams
-# real no_go_zones.
-# Entry-focused default view: once a route streams in, the orbit camera pivots to
-# the route start (起始点) at close range instead of framing the whole tree.
+# Route display: the route line itself carries a continuous curvature hint
+# gradient (computed in path_renderer). Real spatial risk regions are not
+# rendered here; they must arrive as source-backed backend risk_regions.
+# Route entry marker: route start is recorded for markers/navigation, but free
+# orbit stays framed on the vessel as a whole so dragging is not locked to the
+# green entry sphere.
 var _entry_world := Vector3.ZERO
 var _entry_known: bool = false
-# 跟随 (follow) toolbar toggle + the last known tip world position, so exiting
-# follow (clicking any non-button area) drops into the free orbit view pivoted on
-# the wire instead of jumping away.
+var _camera_user_controlled: bool = false
+# 跟随 (follow) toolbar toggle + the last known guidewire-front world position.
+# Exiting follow switches to an orbit camera centered on the actual guidewire
+# front, not the route target marker.
 var _follow_btn: Button
 var _tip_world_last := Vector3.ZERO
 var _tip_world_known: bool = false
@@ -271,6 +272,7 @@ func _teardown_model_scene() -> void:
 	_vessel = null
 	_vessel_meshes = []
 	_entry_known = false  # the next route re-focuses the camera on its entry
+	_camera_user_controlled = false
 	_tip_world_known = false
 
 
@@ -557,13 +559,11 @@ func _sync_direction_cube() -> void:
 	_cube_root.transform.basis = cam.global_transform.basis.inverse()
 
 
-# ── Route risk + entry-focused default view ───────────────────────────────────
+# ── Route risk + entry marker bookkeeping ─────────────────────────────────────
 # Called whenever route waypoints stream in (first batch / reset / branch switch).
-# The route line's curvature/danger gradient is computed inside path_renderer from
-# the polyline itself; here we only supply the red-override 禁入段 (MOCK at 60% of
-# the route until the backend streams no_go_zones) and drop the orbit camera onto
-# the route start — the default view is an external orbit around 起始点, not the
-# whole-tree framing.
+# The route line's curvature hint gradient is computed inside path_renderer from
+# the polyline itself. The orbit camera is not re-pivoted here: left-drag should
+# stay a free vessel-level orbit, not a rotation around the green entry marker.
 func _apply_route_features() -> void:
 	if _path == null or not is_instance_valid(_path) or not _path.is_inside_tree():
 		return
@@ -574,31 +574,18 @@ func _apply_route_features() -> void:
 	if pts.size() < 8:
 		return
 
-	# MOCK 禁入段 at 60% of the route.
-	var nogo_lo: int = clampi(int(float(pts.size()) * 0.6) - 3, 0, pts.size() - 2)
-	_path.set_risk_ranges([
-		{"lo": nogo_lo, "hi": mini(nogo_lo + 6, pts.size() - 2)},
-	])
+	# No fake no-go/risk overlays: leave the route unforced unless the backend
+	# provides real source-backed spatial risk data.
+	if _path.has_method("clear_forced_ranges"):
+		_path.clear_forced_ranges()
+	else:
+		_path.set_risk_ranges([])
 
-	# Default view: external orbit around the route start (起始点).
 	_entry_world = _path.global_transform * (pts[0] as Vector3)
 	_entry_known = true
-	_focus_entry()
 
 
-# Pivot the overview orbit camera onto the vessel entry at close range. Keeps the
-# current yaw/pitch so a re-focus (reset / branch switch) does not jerk the
-# viewing angle; distance scales with the model so every phantom frames sanely.
-func _focus_entry() -> void:
-	if not _entry_known:
-		return
-	var radius := _last_aabb.size.length() * 0.5
-	_orbit_pivot = _entry_world
-	_orbit_dist = clampf(radius * 0.3 if radius > 0.0 else 0.15, _orbit_min, _orbit_max)
-	_update_orbit_camera()
-
-
-# 跟随 toolbar toggle: on -> chase-follow the wire; off -> free orbit at the tip.
+# 跟随 toolbar toggle: on -> chase-follow the wire; off -> tip-centered orbit.
 func _on_follow_toggled(on: bool) -> void:
 	if on:
 		_set_camera_mode(CamMode.FOLLOW)
@@ -606,16 +593,13 @@ func _on_follow_toggled(on: bool) -> void:
 		_exit_follow_to_free()
 
 
-# Leave 跟随 into the free orbit view, pivoted on the wire tip so the view stays
-# where the operator was looking; from here left-drag orbits (查看不同方向的血管
-# 和导丝) and the wheel zooms.
+# Leave 跟随 into an overview orbit around the guidewire front. The pivot must be
+# the rendered wire front (bodies[-1] / tip.position), not the route target sphere.
 func _exit_follow_to_free() -> void:
-	if _tip_world_known:
-		_orbit_pivot = _tip_world_last
-		var radius := _last_aabb.size.length() * 0.5
-		if radius > 0.0:
-			_orbit_dist = clampf(radius * 0.3, _orbit_min, _orbit_max)
 	_set_camera_mode(CamMode.OVERVIEW)
+	_camera_user_controlled = true
+	if _tip_world_known:
+		_set_orbit_focus(_tip_world_last, true)
 	_update_orbit_camera()
 
 
@@ -694,16 +678,16 @@ func _setup_environment() -> void:
 	env.background_mode = Environment.BG_COLOR
 	env.background_color = UiStyle.PANE3D_BG  # 050B12 (doc/11 §9 深黑蓝)
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color = Color(0.4, 0.4, 0.45)
-	env.ambient_light_energy = 0.6
+	env.ambient_light_color = Color(0.22, 0.36, 0.55)
+	env.ambient_light_energy = 0.45
 	# Bloom/glow: the "通电发光" look of the reference view. Only fragments whose
 	# EMISSION exceeds 1.0 spill light (hdr_threshold), so the fresnel rims (glow
 	# uniform > 1), the white route line and the marker spheres halo while the flat
 	# UI/backdrop stays crisp.
 	env.glow_enabled = true
-	env.glow_intensity = 0.7
-	env.glow_bloom = 0.1
-	env.glow_hdr_threshold = 1.0
+	env.glow_intensity = 0.85
+	env.glow_bloom = 0.14
+	env.glow_hdr_threshold = 0.85
 	env.tonemap_mode = Environment.TONE_MAPPER_ACES
 	# Depth fog for the endoscope tunnel cue: near wall keeps its red, the far
 	# lumen fades toward the (near-black) fog color, giving depth WITHOUT any
@@ -728,6 +712,7 @@ func _setup_camera_and_light() -> void:
 	_camera = Camera3D.new()
 	_camera.near = 0.001
 	_camera.far = 50.0
+	_camera.fov = 42.0
 	_world.add_child(_camera)
 	# Activate only after the camera is in the scene tree, otherwise it may not
 	# become the active viewport camera.
@@ -735,26 +720,50 @@ func _setup_camera_and_light() -> void:
 
 
 func _resolve_vessel_glb() -> String:
+	var candidates := _vessel_glb_candidates()
+	for glb in candidates:
+		if ResourceLoader.exists(glb):
+			return glb
+	return str(candidates[0]) if not candidates.is_empty() else ""
+
+
+func _vessel_glb_candidates() -> Array:
 	# Prefer the phantom-named GLB (e.g. segment_part.glb); all VPP cases share the
 	# blood_vessels export. Do NOT silently substitute a different anatomy: the
 	# guidewire/path stream in this phantom's frame, so drawing another vessel
 	# leaves the wire floating far from it (e.g. segment_part is ~0.8 m off-origin).
 	# When the named GLB is missing (not yet imported in the Godot editor),
 	# _setup_vessel warns and renders no vessel rather than the wrong one.
+	var high: String
+	var fallback: String
 	if phantom.ends_with("_vpp"):
-		return "res://assets/models/blood_vessels.glb"
-	return "res://assets/models/%s.glb" % phantom
+		high = "res://assets/models/blood_vessels_visual_high.glb"
+		fallback = "res://assets/models/blood_vessels.glb"
+	else:
+		high = "res://assets/models/%s_visual_high.glb" % phantom
+		fallback = "res://assets/models/%s.glb" % phantom
+	return [high, fallback]
 
 
 func _setup_vessel() -> Node3D:
-	var glb := _resolve_vessel_glb()
-	if not ResourceLoader.exists(glb):
-		push_warning("Vessel GLB not found at %s. Run tools/export_godot_assets.py." % glb)
-		return null
-	var packed: PackedScene = load(glb)
+	var candidates := _vessel_glb_candidates()
+	var packed: PackedScene = null
+	var glb := ""
+	for candidate in candidates:
+		var path := str(candidate)
+		if not ResourceLoader.exists(path):
+			continue
+		var scene: PackedScene = load(path)
+		if scene != null:
+			packed = scene
+			glb = path
+			break
+		push_warning("Failed to load vessel GLB (import may have failed): %s" % path)
 	if packed == null:
-		push_warning("Failed to load vessel GLB (import may have failed): %s" % glb)
+		push_warning("Vessel GLB not found or not imported. Tried: %s. Run tools/export_godot_assets.py and open Godot once to import." % str(candidates))
 		return null
+	if candidates.size() > 1 and glb == str(candidates[1]):
+		push_warning("High-quality vessel GLB not imported; falling back to %s." % glb)
 	var vessel: Node3D = packed.instantiate()
 	_world.add_child(vessel)
 	var mesh_count := vessel.find_children("*", "MeshInstance3D", true, false).size()
@@ -831,11 +840,11 @@ func _make_fresnel_material(with_fade: bool) -> ShaderMaterial:
 	var shader := Shader.new()
 	shader.code = "shader_type spatial;\n" \
 		+ "render_mode cull_disabled, unshaded, depth_draw_never, blend_mix;\n" \
-		+ "uniform vec3 rim_color : source_color = vec3(0.35, 0.75, 1.0);\n" \
-		+ "uniform vec3 core_color : source_color = vec3(0.05, 0.11, 0.22);\n" \
-		+ "uniform float rim_power = 2.6;\n" \
-		+ "uniform float core_alpha = 0.05;\n" \
-		+ "uniform float glow = 2.2;\n" \
+		+ "uniform vec3 rim_color : source_color = vec3(0.20, 0.68, 1.0);\n" \
+		+ "uniform vec3 core_color : source_color = vec3(0.02, 0.08, 0.18);\n" \
+		+ "uniform float rim_power = 2.35;\n" \
+		+ "uniform float core_alpha = 0.028;\n" \
+		+ "uniform float glow = 2.45;\n" \
 		+ "uniform float cam_fade_near = 0.012;\n" \
 		+ "uniform float cam_fade_far = 0.045;\n" \
 		+ fade_decl \
@@ -1013,6 +1022,7 @@ func _cycle_branch() -> void:
 	var target := str(_branch_targets[_branch_index])
 	_ws.send_select_route(target)
 	_path_waypoints = []  # the new branch re-streams its route
+	_camera_user_controlled = false
 	_disengage_autopilot()
 	_auto_followed = false  # re-drop into follow view on the new branch's first pose
 	_hud.set_model("%s  ·  分支 %d/%d %s" % [
@@ -1038,7 +1048,7 @@ func _on_batch(batch: Dictionary) -> void:
 	_guidewire.update_from_batch(batch)
 	_path.update_from_batch(batch)
 	_entry_marker.update_from_batch(batch)
-	_feed_rig(_camera_pose_from_batch(batch))
+	_feed_rig(_guidewire_front_pose_from_batch(batch))
 	var safety: Dictionary = batch.get("safety", {})
 	var episode: Dictionary = batch.get("episode", {})
 	var status := str(safety.get("status", "STANDBY"))
@@ -1284,9 +1294,10 @@ func _feed_rig(tip: Dictionary) -> void:
 	# Refresh the surgical-view fade origin: the tip in world space (the path node
 	# shares the vessel frame, so its transform maps the frame-local tip to world,
 	# matching how click-nav projects waypoints).
-	if _vessel_mat_surgical != null and _path != null and is_instance_valid(_path):
+	if _path != null and is_instance_valid(_path):
 		var tip_world: Vector3 = _path.global_transform * pos
-		_vessel_mat_surgical.set_shader_parameter("tip_world_pos", tip_world)
+		if _vessel_mat_surgical != null:
+			_vessel_mat_surgical.set_shader_parameter("tip_world_pos", tip_world)
 		# §2.6 bottom status bar: tip world coordinate. Also the pivot the free
 		# orbit view drops onto when 跟随 is exited.
 		_hud.set_coord(tip_world)
@@ -1302,25 +1313,24 @@ func _feed_rig(tip: Dictionary) -> void:
 			_set_camera_mode(CamMode.OVERVIEW)
 
 
-func _camera_pose_from_batch(batch: Dictionary) -> Dictionary:
-	# Newton demo currently drives the proximal/root body; the distal red tip can
-	# lag or buckle. Follow the active root end for debugging while keeping other
-	# engines on the semantic tip pose.
-	if str(batch.get("engine", "")) == "NewtonEngine":
-		var bodies: Array = batch.get("bodies", [])
-		if bodies.size() >= 2:
-			var b0: Dictionary = bodies[0]
-			var b1: Dictionary = bodies[1]
-			if b0.has("pos") and b1.has("pos"):
-				var p0 := _to_vec3(b0["pos"])
-				var p1 := _to_vec3(b1["pos"])
-				var dir := p1 - p0
-				if dir.length() > 1e-6:
-					return {
-						"position": b0["pos"],
-						"direction": [dir.x, dir.y, dir.z],
-						"quaternion": b0.get("quat", []),
-					}
+# Camera orbit/follow uses the same front point the renderer draws as the
+# guidewire tip. Bodies are streamed root->front; prefer bodies[-1] so Newton
+# debug frames cannot accidentally follow the proximal/root body or route target.
+func _guidewire_front_pose_from_batch(batch: Dictionary) -> Dictionary:
+	var bodies: Array = batch.get("bodies", [])
+	if bodies.size() >= 2:
+		var prev: Dictionary = bodies[bodies.size() - 2]
+		var front: Dictionary = bodies[bodies.size() - 1]
+		if prev.has("pos") and front.has("pos"):
+			var p0 := _to_vec3(prev["pos"])
+			var p1 := _to_vec3(front["pos"])
+			var dir := p1 - p0
+			if dir.length() > 1e-6:
+				return {
+					"position": front["pos"],
+					"direction": [dir.x, dir.y, dir.z],
+					"quaternion": front.get("quat", []),
+				}
 	return batch.get("tip", {})
 
 
@@ -1397,6 +1407,8 @@ func _scene_aabb(node: Node) -> AABB:
 	var result := AABB()
 	var initialized := false
 	for mi in node.find_children("*", "MeshInstance3D", true, false):
+		if not mi.visible:
+			continue
 		var aabb: AABB = mi.global_transform * mi.get_aabb()
 		if not initialized:
 			result = aabb
@@ -1422,8 +1434,8 @@ func _frame_camera(aabb: AABB) -> void:
 		return
 	var center := aabb.position + aabb.size * 0.5
 	var radius := aabb.size.length() * 0.5
-	var distance := radius / tan(deg_to_rad(_camera.fov * 0.5)) * 1.35
-	var offset := Vector3(radius * 0.7, aabb.size.y * 0.5, distance)
+	var distance := radius / tan(deg_to_rad(_camera.fov * 0.5)) * 1.05
+	var offset := Vector3(radius * 0.42, aabb.size.y * 0.82, distance)
 	_orbit_pivot = center
 	_orbit_dist = offset.length()
 	_orbit_yaw = atan2(offset.x, offset.z)
@@ -1443,6 +1455,22 @@ func _update_orbit_camera() -> void:
 	_camera.look_at(_orbit_pivot, Vector3.UP)
 
 
+func _set_orbit_focus(pivot: Vector3, keep_camera_offset: bool) -> void:
+	if _camera == null or not is_instance_valid(_camera):
+		return
+	_orbit_pivot = pivot
+	if not keep_camera_offset:
+		return
+	var offset := _camera.global_position - pivot
+	var radius := _last_aabb.size.length() * 0.5
+	var fallback_dist := clampf(radius * 0.35 if radius > 0.0 else 0.18, _orbit_min, _orbit_max)
+	if offset.length() < 1e-5:
+		offset = Vector3(0.0, fallback_dist * 0.25, fallback_dist)
+	_orbit_dist = clampf(offset.length(), _orbit_min, _orbit_max)
+	_orbit_yaw = atan2(offset.x, offset.z)
+	_orbit_pitch = asin(clampf(offset.y / _orbit_dist, -1.0, 1.0))
+
+
 func _zoom_by(steps: float) -> void:
 	if _cam_mode != CamMode.OVERVIEW:
 		return
@@ -1450,14 +1478,12 @@ func _zoom_by(steps: float) -> void:
 	_update_orbit_camera()
 
 
-# 复位 tool: back to the default view — the stock angle around the vessel entry
-# (起始点) when a route is known, otherwise the whole-tree framing.
+# 复位 tool: back to the default whole-vessel framing.
 func _reset_view() -> void:
+	_camera_user_controlled = false
 	if _cam_mode != CamMode.OVERVIEW:
 		_set_camera_mode(CamMode.OVERVIEW)
 	_frame_camera(_last_aabb)  # resets yaw/pitch + zoom limits
-	if _entry_known:
-		_focus_entry()
 
 
 # ── 3D-pane pointer gestures (from input_handler's raw pointer stream) ────────
@@ -1469,11 +1495,10 @@ func _on_pointer_down(pos: Vector2) -> void:
 	_press_travel = 0.0
 	if get_viewport().gui_get_hovered_control() is BaseButton:
 		return
-	# 跟随 mode: clicking any non-button area exits back to the free orbit view
-	# (gesture consumed — the release does not navigate).
+	# 跟随 mode: clicking any non-button area exits back to the free overview
+	# camera and keeps the same press alive, so a drag immediately free-looks.
 	if _cam_mode == CamMode.FOLLOW:
 		_exit_follow_to_free()
-		return
 	if _pane_3d_container == null or not _pane_3d_container.get_global_rect().has_point(pos):
 		return
 	_press_in_pane = true
@@ -1488,6 +1513,9 @@ func _on_pointer_drag(_pos: Vector2, relative: Vector2) -> void:
 	if _press_travel <= _CLICK_TRAVEL_MAX:
 		return
 	if _tool_orbit and _cam_mode == CamMode.OVERVIEW:
+		_camera_user_controlled = true
+		if _tip_world_known:
+			_set_orbit_focus(_tip_world_last, false)
 		_orbit_yaw -= relative.x * _ORBIT_SPEED
 		_orbit_pitch = clampf(_orbit_pitch + relative.y * _ORBIT_SPEED, -1.45, 1.45)
 		_update_orbit_camera()
@@ -1504,6 +1532,7 @@ func _on_pan_drag(pos: Vector2, relative: Vector2) -> void:
 		return
 	if not _pane_3d_container.get_global_rect().has_point(pos):
 		return
+	_camera_user_controlled = true
 	var b := _camera.global_transform.basis
 	_orbit_pivot += (-b.x * relative.x + b.y * relative.y) * _orbit_dist * _PAN_SPEED
 	_update_orbit_camera()
@@ -1512,4 +1541,5 @@ func _on_pan_drag(pos: Vector2, relative: Vector2) -> void:
 func _on_wheel_zoom(steps: int, pos: Vector2) -> void:
 	if _pane_3d_container == null or not _pane_3d_container.get_global_rect().has_point(pos):
 		return
+	_camera_user_controlled = true
 	_zoom_by(float(steps))

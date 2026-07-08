@@ -118,6 +118,32 @@ class TestWebSocketHandlerUnit:
         assert batch["safety"]["risk_score"] == 0.2
         assert batch["safety"]["risk_regions"] == []
 
+    def test_session_start_batch_mode_does_not_send_stale_batch(self):
+        import asyncio
+
+        from services.navigation_engine import NavigationState
+        from services.websocket_handler import WebSocketHandler
+        from unittest.mock import AsyncMock, MagicMock
+
+        handler = WebSocketHandler(MagicMock())
+        engine = MagicMock()
+        engine.available_routes = {}
+        handler._session_manager.create_session.return_value = ("session-1", NavigationState())
+        handler._session_manager.get_session.return_value = engine
+        conn = MagicMock()
+        conn.session_id = None
+        conn.batch_mode = False
+
+        send_mock = AsyncMock()
+        handler._send_message = send_mock
+
+        asyncio.run(handler._handle_session_start(conn, {"batch_mode": True}))
+
+        assert conn.session_id == "session-1"
+        assert conn.batch_mode is True
+        assert send_mock.await_count == 1
+        assert send_mock.await_args.args[1].value == "session_started"
+
 
 class TestWebSocketProtocolExtensions:
     """Unit tests for Stage-8 protocol additions (no MuJoCo required)."""
