@@ -81,10 +81,15 @@ const MODELS: Array = [
 ]
 
 enum CamMode { OVERVIEW, FOLLOW, ENDOSCOPE }
+enum OrbitPreset { CLINICAL, TREE }
 const CAM_MODE_NAMES := {
-	CamMode.OVERVIEW: "概览 Overview",
+	CamMode.OVERVIEW: "外部 Orbit",
 	CamMode.FOLLOW: "跟随 Follow",
 	CamMode.ENDOSCOPE: "内窥镜 Endoscope",
+}
+const ORBIT_PRESET_NAMES := {
+	OrbitPreset.CLINICAL: "Clinical Orbit",
+	OrbitPreset.TREE: "Tree Overview",
 }
 
 var _ws  # WebSocketClient node
@@ -116,6 +121,7 @@ var _orbit_pitch: float = 0.0
 var _orbit_dist: float = 2.0
 var _orbit_min: float = 0.05
 var _orbit_max: float = 20.0
+var _orbit_preset: int = OrbitPreset.CLINICAL
 var _last_aabb := AABB()  # last framed vessel AABB, for the 复位 tool
 const _ORBIT_SPEED := 0.008     # rad per drag px
 const _PAN_SPEED := 0.0012      # pivot m per drag px per m of distance
@@ -243,6 +249,7 @@ func _load_model_scene() -> void:
 	# fog) and auto-follows again once its first tip pose streams in.
 	_auto_followed = false
 	_cam_mode = CamMode.OVERVIEW
+	_orbit_preset = OrbitPreset.CLINICAL
 	_set_vessel_view_material(CamMode.OVERVIEW)
 	if _env:
 		_env.fog_enabled = false
@@ -250,6 +257,7 @@ func _load_model_scene() -> void:
 		var aabb := _scene_aabb(vessel)
 		print("[Main] vessel AABB pos=%s size=%s" % [aabb.position, aabb.size])
 		_frame_camera(aabb)
+		_apply_clinical_orbit(true)
 	else:
 		# No vessel mesh: still place the camera somewhere sane so the HUD and
 		# guidewire tip are visible (zero AABB -> orbit defaults around origin).
@@ -596,6 +604,7 @@ func _on_follow_toggled(on: bool) -> void:
 # Leave 跟随 into an overview orbit around the guidewire front. The pivot must be
 # the rendered wire front (bodies[-1] / tip.position), not the route target sphere.
 func _exit_follow_to_free() -> void:
+	_orbit_preset = OrbitPreset.CLINICAL
 	_set_camera_mode(CamMode.OVERVIEW)
 	_camera_user_controlled = true
 	if _tip_world_known:
@@ -685,9 +694,9 @@ func _setup_environment() -> void:
 	# uniform > 1), the white route line and the marker spheres halo while the flat
 	# UI/backdrop stays crisp.
 	env.glow_enabled = true
-	env.glow_intensity = 0.85
-	env.glow_bloom = 0.14
-	env.glow_hdr_threshold = 0.85
+	env.glow_intensity = 0.78
+	env.glow_bloom = 0.10
+	env.glow_hdr_threshold = 0.95
 	env.tonemap_mode = Environment.TONE_MAPPER_ACES
 	# Depth fog for the endoscope tunnel cue: near wall keeps its red, the far
 	# lumen fades toward the (near-black) fog color, giving depth WITHOUT any
@@ -804,7 +813,7 @@ func _apply_vessel_material(node: Node) -> void:
 	_vessel_mat_surgical = _make_fresnel_material(true)
 	_vessel_mat_surgical.set_shader_parameter("fade_near", surgical_fade_near)
 	_vessel_mat_surgical.set_shader_parameter("fade_far", surgical_fade_far)
-	_vessel_mat_surgical.set_shader_parameter("tip_world_pos", Vector3.ZERO)
+	_update_vessel_focus_tip(Vector3.ZERO, false)
 
 	_vessel_meshes = node.find_children("*", "MeshInstance3D", true, false)
 	_set_vessel_view_material(CamMode.OVERVIEW)
@@ -830,30 +839,42 @@ func _make_fresnel_material(with_fade: bool) -> ShaderMaterial:
 	var fade_decl := ""
 	var alpha_line: String
 	if with_fade:
-		fade_decl = "uniform vec3 tip_world_pos;\n" \
-			+ "uniform float fade_near = 0.03;\n" \
+		fade_decl = "uniform float fade_near = 0.03;\n" \
 			+ "uniform float fade_far = 0.11;\n"
 		alpha_line = "	float prox = 1.0 - smoothstep(fade_near, fade_far, distance(tip_world_pos, world_pos));\n" \
-			+ "	ALPHA = clamp(core_alpha + f * 0.5, 0.0, 0.6) * prox * cam_fade;\n"
+			+ "	ALPHA = clamp(core_alpha + rim_alpha * rim, 0.0, 0.52) * prox * cam_fade;\n"
 	else:
-		alpha_line = "	ALPHA = clamp(core_alpha + f * 0.9, 0.0, 1.0) * cam_fade;\n"
+		alpha_line = "	ALPHA = clamp(core_alpha + rim_alpha * rim, 0.0, 0.68) * focus_alpha * cam_fade;\n"
 	var shader := Shader.new()
 	shader.code = "shader_type spatial;\n" \
 		+ "render_mode cull_disabled, unshaded, depth_draw_never, blend_mix;\n" \
-		+ "uniform vec3 rim_color : source_color = vec3(0.20, 0.68, 1.0);\n" \
-		+ "uniform vec3 core_color : source_color = vec3(0.02, 0.08, 0.18);\n" \
-		+ "uniform float rim_power = 2.35;\n" \
-		+ "uniform float core_alpha = 0.028;\n" \
-		+ "uniform float glow = 2.45;\n" \
+		+ "uniform vec3 rim_color : source_color = vec3(0.18, 0.67, 1.0);\n" \
+		+ "uniform vec3 core_color : source_color = vec3(0.005, 0.030, 0.075);\n" \
+		+ "uniform vec3 back_wall_color : source_color = vec3(0.030, 0.180, 0.360);\n" \
+		+ "uniform float rim_power = 2.65;\n" \
+		+ "uniform float core_alpha = 0.014;\n" \
+		+ "uniform float rim_alpha = 0.46;\n" \
+		+ "uniform float glow = 2.9;\n" \
 		+ "uniform float cam_fade_near = 0.012;\n" \
 		+ "uniform float cam_fade_far = 0.045;\n" \
+		+ "uniform vec3 tip_world_pos;\n" \
+		+ "uniform float focus_enabled = 0.0;\n" \
+		+ "uniform float focus_near = 0.035;\n" \
+		+ "uniform float focus_far = 0.22;\n" \
+		+ "uniform float focus_alpha_far = 0.30;\n" \
+		+ "uniform float focus_emission_far = 0.24;\n" \
 		+ fade_decl \
 		+ "varying vec3 world_pos;\n" \
 		+ "void vertex() { world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz; }\n" \
 		+ "void fragment() {\n" \
-		+ "	float f = pow(1.0 - clamp(dot(normalize(NORMAL), normalize(VIEW)), 0.0, 1.0), rim_power);\n" \
-		+ "	ALBEDO = mix(core_color, rim_color, f);\n" \
-		+ "	EMISSION = rim_color * f * glow;\n" \
+		+ "	float f = 1.0 - clamp(dot(normalize(NORMAL), normalize(VIEW)), 0.0, 1.0);\n" \
+		+ "	float rim = pow(f, rim_power);\n" \
+		+ "	float back = pow(1.0 - rim, 1.7) * 0.38;\n" \
+		+ "	float focus = mix(1.0, 1.0 - smoothstep(focus_near, focus_far, distance(tip_world_pos, world_pos)), focus_enabled);\n" \
+		+ "	float focus_alpha = mix(focus_alpha_far, 1.0, focus);\n" \
+		+ "	float focus_emission = mix(focus_emission_far, 1.0, focus);\n" \
+		+ "	ALBEDO = mix(mix(core_color, back_wall_color, back), rim_color, rim);\n" \
+		+ "	EMISSION = rim_color * rim * glow * focus_emission;\n" \
 		+ "	float cam_fade = smoothstep(cam_fade_near, cam_fade_far, distance(CAMERA_POSITION_WORLD, world_pos));\n" \
 		+ alpha_line \
 		+ "}\n"
@@ -865,6 +886,22 @@ func _make_fresnel_material(with_fade: bool) -> ShaderMaterial:
 # Select the vessel wall material for the active camera mode: whole-tree translucent
 # in overview (演示视图), tip-proximity fade in follow (手术视图), opaque inner wall
 # in endoscope.
+func _update_vessel_focus_tip(tip_world: Vector3, enabled: bool) -> void:
+	var focus_far := 0.22
+	var focus_near := 0.035
+	var radius := _last_aabb.size.length() * 0.5
+	if radius > 0.0:
+		focus_near = clampf(radius * 0.045, 0.018, 0.06)
+		focus_far = clampf(radius * 0.42, 0.10, 0.42)
+	for mat in [_vessel_mat_overlay, _vessel_mat_surgical]:
+		if mat == null:
+			continue
+		mat.set_shader_parameter("tip_world_pos", tip_world)
+		mat.set_shader_parameter("focus_enabled", 1.0 if enabled else 0.0)
+		mat.set_shader_parameter("focus_near", focus_near)
+		mat.set_shader_parameter("focus_far", focus_far)
+
+
 func _set_vessel_view_material(mode: int) -> void:
 	var mat: Material
 	match mode:
@@ -1048,6 +1085,7 @@ func _on_batch(batch: Dictionary) -> void:
 	_guidewire.update_from_batch(batch)
 	_path.update_from_batch(batch)
 	_entry_marker.update_from_batch(batch)
+	_sync_entry_marker_visibility()
 	_feed_rig(_guidewire_front_pose_from_batch(batch))
 	var safety: Dictionary = batch.get("safety", {})
 	var episode: Dictionary = batch.get("episode", {})
@@ -1296,8 +1334,7 @@ func _feed_rig(tip: Dictionary) -> void:
 	# matching how click-nav projects waypoints).
 	if _path != null and is_instance_valid(_path):
 		var tip_world: Vector3 = _path.global_transform * pos
-		if _vessel_mat_surgical != null:
-			_vessel_mat_surgical.set_shader_parameter("tip_world_pos", tip_world)
+		_update_vessel_focus_tip(tip_world, true)
 		# §2.6 bottom status bar: tip world coordinate. Also the pivot the free
 		# orbit view drops onto when 跟随 is exited.
 		_hud.set_coord(tip_world)
@@ -1311,6 +1348,8 @@ func _feed_rig(tip: Dictionary) -> void:
 		_auto_followed = true
 		if _cam_mode != CamMode.OVERVIEW:
 			_set_camera_mode(CamMode.OVERVIEW)
+		if _orbit_preset == OrbitPreset.CLINICAL and not _camera_user_controlled:
+			_apply_clinical_orbit(true)
 
 
 # Camera orbit/follow uses the same front point the renderer draws as the
@@ -1335,7 +1374,15 @@ func _guidewire_front_pose_from_batch(batch: Dictionary) -> Dictionary:
 
 
 func _cycle_camera_mode() -> void:
-	_set_camera_mode((_cam_mode + 1) % CamMode.size())
+	if _cam_mode == CamMode.OVERVIEW:
+		if _orbit_preset == OrbitPreset.CLINICAL:
+			_set_orbit_preset(OrbitPreset.TREE, true)
+		else:
+			_set_camera_mode(CamMode.FOLLOW)
+	elif _cam_mode == CamMode.FOLLOW:
+		_set_camera_mode(CamMode.ENDOSCOPE)
+	else:
+		_set_orbit_preset(OrbitPreset.CLINICAL, true)
 
 
 # Cycle to the next phantom model (M key): reapply its config, rebuild the
@@ -1356,7 +1403,7 @@ func _cycle_model() -> void:
 	_msg_count = 0
 	_last_msg = "model switch"
 	_hud.set_model(str(cfg.name))
-	_hud.set_view_mode(CAM_MODE_NAMES.get(CamMode.OVERVIEW, "?"))
+	_hud.set_view_mode(_view_mode_label())
 	_hud.update_safety("STANDBY")
 	_update_debug()
 
@@ -1386,8 +1433,57 @@ func _set_camera_mode(mode: int) -> void:
 	# Keep the 跟随 toolbar toggle in sync (the C key also cycles into FOLLOW).
 	if _follow_btn != null and is_instance_valid(_follow_btn):
 		_follow_btn.set_pressed_no_signal(mode == CamMode.FOLLOW)
-	_hud.set_view_mode(CAM_MODE_NAMES.get(mode, "?"))
-	print("[Main] camera mode -> %s" % CAM_MODE_NAMES.get(mode, "?"))
+	_sync_entry_marker_visibility()
+	_hud.set_view_mode(_view_mode_label())
+	print("[Main] camera mode -> %s" % _view_mode_label())
+
+
+func _set_orbit_preset(preset: int, reset_angle: bool) -> void:
+	_orbit_preset = preset
+	if _cam_mode != CamMode.OVERVIEW:
+		_set_camera_mode(CamMode.OVERVIEW)
+	if preset == OrbitPreset.TREE:
+		_frame_camera(_last_aabb)
+	else:
+		_apply_clinical_orbit(reset_angle)
+	_sync_entry_marker_visibility()
+	_hud.set_view_mode(_view_mode_label())
+	print("[Main] orbit preset -> %s" % _view_mode_label())
+
+
+func _apply_clinical_orbit(reset_angle: bool) -> void:
+	var radius := _last_aabb.size.length() * 0.5
+	if _last_aabb.size == Vector3.ZERO:
+		_orbit_pivot = _tip_world_last if _tip_world_known else Vector3.ZERO
+		_orbit_min = 0.025
+		_orbit_max = 4.0
+		_orbit_dist = 0.18
+		if reset_angle:
+			_orbit_yaw = deg_to_rad(28.0)
+			_orbit_pitch = deg_to_rad(34.0)
+		_update_orbit_camera()
+		return
+	_orbit_pivot = _tip_world_last if _tip_world_known else (_last_aabb.position + _last_aabb.size * 0.5)
+	_orbit_min = maxf(0.02, radius * 0.08)
+	_orbit_max = maxf(0.5, radius * 4.0)
+	_orbit_dist = clampf(radius * 0.38, _orbit_min, _orbit_max)
+	if reset_angle:
+		_orbit_yaw = deg_to_rad(28.0)
+		_orbit_pitch = deg_to_rad(34.0)
+	_update_orbit_camera()
+
+
+func _view_mode_label() -> String:
+	if _cam_mode == CamMode.OVERVIEW:
+		return str(ORBIT_PRESET_NAMES.get(_orbit_preset, "Clinical Orbit"))
+	return str(CAM_MODE_NAMES.get(_cam_mode, "?"))
+
+
+func _sync_entry_marker_visibility() -> void:
+	if _entry_marker == null or not is_instance_valid(_entry_marker):
+		return
+	if _entry_marker.has_method("set_landmarks_visible"):
+		_entry_marker.set_landmarks_visible(_cam_mode == CamMode.OVERVIEW and _orbit_preset == OrbitPreset.TREE)
 
 
 func _to_vec3(arr: Variant) -> Vector3:
@@ -1478,12 +1574,10 @@ func _zoom_by(steps: float) -> void:
 	_update_orbit_camera()
 
 
-# 复位 tool: back to the default whole-vessel framing.
+# 复位 tool: back to the clinical close orbit around the guidewire tip.
 func _reset_view() -> void:
 	_camera_user_controlled = false
-	if _cam_mode != CamMode.OVERVIEW:
-		_set_camera_mode(CamMode.OVERVIEW)
-	_frame_camera(_last_aabb)  # resets yaw/pitch + zoom limits
+	_set_orbit_preset(OrbitPreset.CLINICAL, true)
 
 
 # ── 3D-pane pointer gestures (from input_handler's raw pointer stream) ────────

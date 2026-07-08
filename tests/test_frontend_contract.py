@@ -8,6 +8,8 @@ def test_hud_uses_backend_dashboard_fields():
     hud = (ROOT / "godot_client/scripts/hud_controller.gd").read_text(encoding="utf-8")
     main = (ROOT / "godot_client/scripts/main_controller.gd").read_text(encoding="utf-8")
     path = (ROOT / "godot_client/scripts/path_renderer.gd").read_text(encoding="utf-8")
+    guidewire = (ROOT / "godot_client/scripts/guidewire_renderer.gd").read_text(encoding="utf-8")
+    entry = (ROOT / "godot_client/scripts/entry_marker.gd").read_text(encoding="utf-8")
     ws = (ROOT / "godot_client/scripts/websocket_client.gd").read_text(encoding="utf-8")
 
     for field in ("remaining_distance", "vessel_radius", "eta_seconds", "latency_ms"):
@@ -40,6 +42,24 @@ def test_hud_uses_backend_dashboard_fields():
     assert '"02:35"' not in hud
     assert '"18 ms"' not in hud
     assert "blood_vessels_visual_high.glb" in main
+    assert "enum OrbitPreset { CLINICAL, TREE }" in main
+    assert "Clinical Orbit" in main
+    assert "Tree Overview" in main
+    assert "func _apply_clinical_orbit" in main
+    assert "_set_orbit_preset(OrbitPreset.CLINICAL, true)" in main
+    assert "_set_orbit_preset(OrbitPreset.TREE, true)" in main
+    assert "back_wall_color" in main
+    assert "focus_alpha_far" in main
+    assert "focus_emission_far" in main
+    assert "func _update_vessel_focus_tip" in main
+    assert "_update_vessel_focus_tip(tip_world, true)" in main
+    assert "rim_alpha = 0.46" in main
+    assert "core_alpha = 0.014" in main
     assert "func clear_forced_ranges" in path
     assert "var _risk_ranges" not in path
     assert "_curvature_hint" in path
+    assert "path_radius_main: float = 0.00055" in path
+    assert "mix(0.72, 0.10, behind)" in path
+    assert "tip_radius_overview: float = 0.0011" in guidewire
+    assert "func set_landmarks_visible" in entry
+    assert "_landmarks_visible: bool = false" in entry

@@ -17,10 +17,10 @@ extends Node3D
 @export var entry_color: Color = Color(0.15, 1.0, 0.4)   ## green = access / go
 @export var target_color: Color = Color(1.0, 0.2, 0.2)   ## red = target
 @export var goal_color: Color = Color(0.2, 1.0, 0.9)     ## cyan = clicked goal
-@export var entry_radius: float = 0.006                  ## meters
-@export var target_radius: float = 0.006                 ## meters
-@export var goal_radius: float = 0.008                   ## meters (slightly bigger)
-@export var arrow_length: float = 0.02                   ## meters
+@export var entry_radius: float = 0.0035                 ## meters
+@export var target_radius: float = 0.0035                ## meters
+@export var goal_radius: float = 0.0045                  ## meters (slightly bigger)
+@export var arrow_length: float = 0.014                  ## meters
 
 var _entry: MeshInstance3D
 var _target: MeshInstance3D
@@ -29,6 +29,8 @@ var _arrow: MeshInstance3D
 var _arrow_mesh: ImmediateMesh
 var _arrow_material: StandardMaterial3D
 var _entry_set: bool = false
+var _target_set: bool = false
+var _landmarks_visible: bool = false
 
 
 func _ready() -> void:
@@ -66,7 +68,15 @@ func update_from_batch(batch: Dictionary) -> void:
 	var target: Variant = batch.get("target", [])
 	if typeof(target) == TYPE_ARRAY and target.size() >= 3:
 		_target.position = _to_vec3(target)
-		_target.visible = true
+		_target_set = true
+		_target.visible = _landmarks_visible
+
+
+func set_landmarks_visible(show: bool) -> void:
+	_landmarks_visible = show
+	_entry.visible = show and _entry_set
+	_target.visible = show and _target_set
+	_arrow.visible = show and _entry_set and _arrow_mesh.get_surface_count() > 0
 
 
 # Show the clicked navigation goal at ``pos`` (backend meter frame, same frame
@@ -86,7 +96,7 @@ func _set_entry(pos: Vector3, dir: Vector3) -> void:
 		return
 	_entry_set = true
 	_entry.position = pos
-	_entry.visible = true
+	_entry.visible = _landmarks_visible
 	_draw_arrow(pos, dir)
 
 
@@ -112,7 +122,7 @@ func _draw_arrow(pos: Vector3, dir: Vector3) -> void:
 	_arrow_mesh.surface_add_vertex(tip)
 	_arrow_mesh.surface_add_vertex(back - ortho)
 	_arrow_mesh.surface_end()
-	_arrow.visible = true
+	_arrow.visible = _landmarks_visible
 
 
 func _make_sphere(radius: float, color: Color) -> MeshInstance3D:
@@ -125,7 +135,7 @@ func _make_sphere(radius: float, color: Color) -> MeshInstance3D:
 	mat.albedo_color = color
 	mat.emission_enabled = true
 	mat.emission = color
-	mat.emission_energy_multiplier = 0.8
+	mat.emission_energy_multiplier = 0.55
 	mi.material_override = mat
 	return mi
 

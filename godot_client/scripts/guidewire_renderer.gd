@@ -17,10 +17,10 @@ extends Node3D
 # real (sub-mm) guidewire. The endoscope culls the wire entirely, so its value is
 # irrelevant there. set_close_up() (called by the main controller on camera
 # switch) swaps the active radii below.
-@export var wire_radius_overview: float = 0.0014  ## meters
+@export var wire_radius_overview: float = 0.0011  ## meters
 @export var wire_radius_closeup: float = 0.0006   ## meters
-@export var tip_radius_overview: float = 0.0015   ## meters
-@export var tip_radius_closeup: float = 0.0009    ## meters
+@export var tip_radius_overview: float = 0.0011   ## meters
+@export var tip_radius_closeup: float = 0.00075   ## meters
 @export var wire_sides: int = 8            ## tube cross-section segments
 # Blue-tinted white wire (doc/11 §9: 导管当前位置颜色 蓝色), readable against the
 # dark-red vessel and the dark background.
@@ -31,8 +31,8 @@ extends Node3D
 
 # Active radii (default to overview); the tube rebuilds every batch so wire_radius
 # takes effect next frame, while the tip sphere is resized immediately.
-var wire_radius: float = 0.0014
-var tip_radius: float = 0.0018
+var wire_radius: float = 0.0011
+var tip_radius: float = 0.0011
 
 ## Render layer for the guidewire (tip + tube). The first-person endoscope camera
 ## culls this layer (see camera_rig.gd) so it never renders the wire it is
@@ -63,7 +63,7 @@ func _ready() -> void:
 	tip_mat.albedo_color = tip_color
 	tip_mat.emission_enabled = true
 	tip_mat.emission = tip_color
-	tip_mat.emission_energy_multiplier = 0.6
+	tip_mat.emission_energy_multiplier = 0.45
 	_tip.material_override = tip_mat
 	_tip.layers = GUIDEWIRE_RENDER_LAYER
 	add_child(_tip)
@@ -77,7 +77,7 @@ func _ready() -> void:
 	root_mat.albedo_color = root_color
 	root_mat.emission_enabled = true
 	root_mat.emission = root_color
-	root_mat.emission_energy_multiplier = 0.55
+	root_mat.emission_energy_multiplier = 0.35
 	_root.material_override = root_mat
 	_root.layers = GUIDEWIRE_RENDER_LAYER
 	add_child(_root)
@@ -97,7 +97,7 @@ func _ready() -> void:
 	# into the wall when scene lighting is low.
 	_wire_material.emission_enabled = true
 	_wire_material.emission = wire_color
-	_wire_material.emission_energy_multiplier = 0.25
+	_wire_material.emission_energy_multiplier = 0.22
 	_wire.material_override = _wire_material
 	_wire.layers = GUIDEWIRE_RENDER_LAYER
 	add_child(_wire)

@@ -22,7 +22,7 @@ extends Node3D
 # red, so it cannot be mistaken for a real no-go/risk region.
 @export var color_safe: Color = Color(0.85, 0.95, 1.0)    # 骞崇洿娈?鐧介潚
 @export var color_warn: Color = Color(1.0, 0.83, 0.28)    # medium curvature: amber
-@export var color_high_curvature: Color = Color(1.0, 0.58, 0.34)  # high curvature: warm hint
+@export var color_high_curvature: Color = Color(1.0, 0.62, 0.42)  # high curvature: warm hint
 # Curvature (1/m) that maps to the warm endpoint; smaller = the ramp saturates earlier.
 @export var curvature_red: float = 120.0
 # Radius by view. Overview/follow see the route from outside, so the line must be
@@ -30,10 +30,10 @@ extends Node3D
 # mode), i.e. inside this tube, so there the radius must be a small fraction of the
 # near plane (0.0005 m) so the surrounding ring shrinks to a dot instead of a
 # hexagon blocking the curve behind it 鈥?set_endoscope() swaps them.
-@export var path_radius_main: float = 0.0008       ## meters (overview/follow)
+@export var path_radius_main: float = 0.00055      ## meters (overview/follow)
 @export var path_radius_endoscope: float = 0.00004 ## meters (on-centerline view)
 @export var path_sides: int = 8            ## tube cross-section segments
-@export var emission_energy: float = 1.8   ## >1 so the line blooms
+@export var emission_energy: float = 2.05  ## >1 so the line blooms
 @export var traversed_dim: float = 0.25    ## brightness of the宸茶蛋杩?portion
 # Hide the tube right at the camera so the near cross-section (a faceted ring the
 # endoscope camera sits inside) disappears, leaving the line from a few mm out.
@@ -48,7 +48,7 @@ var _material: ShaderMaterial
 var _points := PackedVector3Array()  # last drawn route, for re-builds
 var _curvature_hint := PackedFloat32Array()  # per-waypoint 0..1 route curvature hint
 var _forced_ranges: Array = []               # legacy compatibility; forced ranges stay disabled
-var _path_radius: float = 0.0008     # active radius (set_endoscope swaps)
+var _path_radius: float = 0.00055    # active radius (set_endoscope swaps)
 var _endoscope: bool = false
 var _drawn_count: int = -1
 var _drawn_signature: String = ""
@@ -84,7 +84,7 @@ func _make_path_material() -> ShaderMaterial:
 		+ "	ALBEDO = COLOR.rgb * dim;\n" \
 		+ "	EMISSION = COLOR.rgb * emission_energy * dim * dim;\n" \
 		+ "	float cam_d = length(VERTEX);\n" \
-		+ "	ALPHA = mix(1.0, 0.12, behind) * smoothstep(near_hide, near_show, cam_d);\n" \
+		+ "	ALPHA = mix(0.72, 0.10, behind) * smoothstep(near_hide, near_show, cam_d);\n" \
 		+ "}\n"
 	var mat := ShaderMaterial.new()
 	mat.shader = shader
