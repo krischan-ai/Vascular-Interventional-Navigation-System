@@ -2,6 +2,7 @@
 logs/
 scratch/
 data/
+.claude/settings.local.json
 .sync*
 
 _site
