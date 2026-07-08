@@ -58,6 +58,32 @@ def test_path_planner_finds_astar_path(tmp_path):
     assert result.waypoints[-1] == (2.0, 0.0, 0.0)
 
 
+def test_graph_connectivity_repair_links_components(tmp_path):
+    from services.graph_connectivity import connect_components, connected_components
+
+    raw = {
+        "0.000000,0.000000,0.000000": [["1.000000,0.000000,0.000000", 1.0]],
+        "1.000000,0.000000,0.000000": [["0.000000,0.000000,0.000000", 1.0]],
+        "5.000000,0.000000,0.000000": [["6.000000,0.000000,0.000000", 1.0]],
+        "6.000000,0.000000,0.000000": [["5.000000,0.000000,0.000000", 1.0]],
+    }
+
+    assert len(connected_components(raw)) == 2
+    repaired, virtual_edges = connect_components(raw)
+
+    assert len(virtual_edges) == 1
+    assert len(connected_components(repaired)) == 1
+
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_text(json.dumps(repaired), encoding="utf-8")
+    result = PathPlanner(graph_path).plan(
+        (0.0, 0.0, 0.0),
+        (6.0, 0.0, 0.0),
+    )
+    assert result.waypoints[0] == (0.0, 0.0, 0.0)
+    assert result.waypoints[-1] == (6.0, 0.0, 0.0)
+
+
 class TestBSplineSmoothing:
     """Tests for B-spline path smoothing."""
 

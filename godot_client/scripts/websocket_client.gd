@@ -54,6 +54,7 @@ var _control_sent := false   ## debug: log the first control we send
 # paces itself to the backend's step throughput instead of flooding it.
 var _awaiting := false
 var _awaiting_since := 0.0
+var last_latency_ms: float = -1.0
 
 
 func _ready() -> void:
@@ -153,11 +154,15 @@ func _handle_packet(packet: String) -> void:
 			# outside the newly loaded vessel.
 			if session_id == "":
 				return
+			if _awaiting:
+				last_latency_ms = (Time.get_ticks_msec() / 1000.0 - _awaiting_since) * 1000.0
 			_awaiting = false
 			state_received.emit(data)
 		"state_batch":
 			if session_id == "":
 				return
+			if _awaiting:
+				last_latency_ms = (Time.get_ticks_msec() / 1000.0 - _awaiting_since) * 1000.0
 			_awaiting = false
 			batch_received.emit(data)
 		"path_response":

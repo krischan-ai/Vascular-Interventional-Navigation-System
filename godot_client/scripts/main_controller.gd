@@ -1045,18 +1045,28 @@ func _on_batch(batch: Dictionary) -> void:
 	_hud.update_safety(status)
 	# Fixed control-mode display (VPP §2.1/§2.4): SAFE HOLD on a collision stop,
 	# SUPERVISED AUTO while click-autopilot drives, otherwise MANUAL.
-	var mode := "手动 MANUAL"
+	var mode := "手动"
 	if status == "COLLISION_STOP":
-		mode = "安全保持 SAFE HOLD"
+		mode = "安全保持"
 	elif _autopilot_active:
-		mode = "自动 SUPERVISED AUTO"
+		mode = "自动"
 	_hud.set_control_mode(mode)
+	var path_info: Dictionary = batch.get("path", {})
+	var progress := float(path_info.get("progress", 0.0))
+	var remaining := float(path_info.get("remaining_distance", -1.0))
+	if remaining < 0.0 or (remaining == 0.0 and progress > 0.0 and progress < 0.999):
+		remaining = _remaining_from_waypoints(progress)
 	_hud.update_metrics({
 		"episode_length": episode.get("length", 0),
 		"velocity": safety.get("speed", 0.0),
 		"wall_distance": safety.get("wall_distance", 0.0),
 		"curvature": safety.get("curvature", 0.0),
-		"path_progress": batch.get("path", {}).get("progress", 0.0),
+		"path_progress": progress,
+		"path_deviation": path_info.get("deviation", 0.0),
+		"remaining_distance": remaining,
+		"vessel_radius": path_info.get("vessel_radius", null),
+		"eta_seconds": path_info.get("eta_seconds", null),
+		"latency_ms": _ws.last_latency_ms,
 		"risk_score": safety.get("risk_score", 0.0),
 	})
 	# While click autopilot is engaged, keep the nav line live with progress so the
@@ -1072,10 +1082,47 @@ func _on_batch(batch: Dictionary) -> void:
 func _on_state(state: Dictionary) -> void:
 	_guidewire.update_from_state(state)
 	_hud.update_safety(str(state.get("safety_status", "STANDBY")))
+	_hud.set_control_mode("手动")
+	var progress := float(state.get("path_progress", 0.0))
+	var remaining := float(state.get("remaining_distance", -1.0))
+	if remaining < 0.0 or (remaining == 0.0 and progress > 0.0 and progress < 0.999):
+		state["remaining_distance"] = _remaining_from_waypoints(progress)
+	state["latency_ms"] = _ws.last_latency_ms
 	_hud.update_metrics(state)
 	_msg_count += 1
 	_last_msg = "state_update"
 	_update_debug()
+
+
+func _fidelity_label(mode: String) -> String:
+	match mode:
+		"guided":
+			return "运动学演示 GUIDED"
+		"rl":
+			return "策略推理 RL"
+		_:
+			return "物理仿真 PHYSICS"
+
+
+func _remaining_from_waypoints(progress: float) -> float:
+	if _path_waypoints.size() < 2:
+		return 0.0
+	var total := 0.0
+	var prev := _vec3_from_backend_point(_path_waypoints[0])
+	for i in range(1, _path_waypoints.size()):
+		var cur := _vec3_from_backend_point(_path_waypoints[i])
+		total += prev.distance_to(cur)
+		prev = cur
+	return maxf(0.0, (1.0 - clampf(progress, 0.0, 1.0)) * total)
+
+
+func _vec3_from_backend_point(p) -> Vector3:
+	if typeof(p) == TYPE_VECTOR3:
+		return p
+	if typeof(p) == TYPE_ARRAY and (p as Array).size() >= 3:
+		var a := p as Array
+		return Vector3(float(a[0]), float(a[1]), float(a[2]))
+	return Vector3.ZERO
 
 
 # Per-frame: keep the direction cube counter-rotated to the active camera; while

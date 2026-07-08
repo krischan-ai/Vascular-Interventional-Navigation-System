@@ -125,3 +125,32 @@ class TestLiveTuning:
         assert effective["free_len"] == pytest.approx(0.05)
         assert effective["max_slack"] == pytest.approx(0.02)
         assert engine._sheath_count(20) == 5
+
+
+class TestSegmentedStiffness:
+    """D4-R soft-tip / hard-shaft bend stiffness profile."""
+
+    def test_bend_profile_keeps_proximal_hard_and_distal_soft(self, engine):
+        engine._bend = 20.0
+        engine._tip_bend = 2.0
+        engine._soft_tip = 4
+
+        profile = engine._bend_profile(10)
+
+        assert profile[:6].tolist() == pytest.approx([20.0] * 6)
+        assert profile[6:].tolist() == pytest.approx([15.5, 11.0, 6.5, 2.0])
+
+    def test_bend_profile_short_rod_still_reaches_tip_bend(self, engine):
+        engine._bend = 20.0
+        engine._tip_bend = 2.0
+        engine._soft_tip = 10
+
+        profile = engine._bend_profile(3)
+
+        assert profile.tolist() == pytest.approx([14.0, 8.0, 2.0])
+
+    def test_deform_params_exposes_bend_profile_preview(self, engine):
+        params = engine.deform_params
+
+        assert "bend_profile" in params
+        assert params["bend_profile"][-1] == pytest.approx(engine._tip_bend)

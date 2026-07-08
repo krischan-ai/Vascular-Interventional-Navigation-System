@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 
 Vector3 = list[float]
 SafetyStatus = Literal["STANDBY", "SAFE_NAV", "DANGER_WARNING", "COLLISION_STOP"]
+FidelityMode = Literal["guided", "physics", "rl"]
 
 
 class HealthResponse(BaseModel):
@@ -97,6 +98,13 @@ class NavigationStateResponse(BaseModel):
     target_position: Vector3 = Field(description="Target position")
     path_progress: float = Field(default=0.0, description="Planned-path progress [0, 1]")
     path_deviation: float = Field(default=0.0, description="Deviation from path (m)")
+    remaining_distance: float = Field(default=0.0, description="Remaining path arc length (m)")
+    vessel_radius: float | None = Field(default=None, description="Local lumen radius (m)")
+    eta_seconds: float | None = Field(default=None, description="Estimated seconds to target")
+    latency_ms: float | None = Field(default=None, description="Latest measured client/server RTT (ms)")
+    fidelity_mode: FidelityMode = Field(default="physics", description="guided / physics / rl fidelity mode")
+    risk_score: float = Field(default=0.0, description="Aggregated risk score [0, 1]")
+    risk_regions: list[dict[str, Any]] = Field(default_factory=list, description="Spatial risk regions")
     reward: float = Field(description="Reward from last step")
     done: bool = Field(description="Episode terminated")
     safety_status: SafetyStatus = Field(default="STANDBY", description="Safety status")

@@ -8,8 +8,8 @@ extends CanvasLayer
 ##   底部控制区  (§14-§19) : 系统状态17 | 机器人连接17 | 运动控制27 | 系统日志21 | 告警18
 ## The DSA (左 59%) and 3D (右上) panes are built by main_controller in a lower layer.
 ##
-## Fields the backend does not stream yet (剩余距离/血管半径/路径偏差/预计到达) are
-## initialised with the reference sample values and marked TODO; live fields update.
+## Backend-fed metrics include progress, remaining distance, lumen radius,
+## deviation, ETA, safety/risk, and client-estimated WebSocket latency.
 
 signal emergency_stop
 signal manual_takeover
@@ -43,6 +43,9 @@ var _stop_btn: Button
 var _uptime_ms := 0
 var _last_alarm := ""
 var _estopped := false
+var _smooth_wall_mm := -1.0
+var _smooth_curv_per_mm := -1.0
+var _smooth_deviation_mm := -1.0
 
 
 func _ready() -> void:
@@ -74,7 +77,7 @@ func _build_top(root: Control) -> void:
 	root.add_child(bar)
 
 	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 10)
+	row.add_theme_constant_override("separation", 6)
 	bar.add_child(row)
 
 	_top["robot"] = _card(row, "机器人状态", "未连接", "", UiStyle.RED, "robot")
@@ -87,9 +90,9 @@ func _build_top(root: Control) -> void:
 	_top["progress"] = StatusCard.new("路径进度", "0", "%", UiStyle.GREEN, ring)
 	row.add_child(_top["progress"])
 	row.add_child(_sep())
-	_top["remain"] = _card(row, "剩余距离", "23.6", "cm", UiStyle.BLUE, "path")  # TODO backend
+	_top["remain"] = _card(row, "剩余距离", "—", "cm", UiStyle.BLUE, "path")
 	row.add_child(_sep())
-	_top["radius"] = _card(row, "血管半径", "2.8", "mm", UiStyle.BLUE, "radius") # TODO backend
+	_top["radius"] = _card(row, "血管半径", "—", "mm", UiStyle.BLUE, "radius")
 	row.add_child(_sep())
 	_top["curv"] = _card(row, "曲率", "0.00", "1/mm", UiStyle.BLUE, "curve")
 	row.add_child(_sep())
@@ -100,7 +103,8 @@ func _build_top(root: Control) -> void:
 
 	# 紧急停止 (§4: 暗红底 #4A1C1D + #FF4D4F 边框/文字, 宽 170-190).
 	var estop := UiStyle.button("紧急停止", UiStyle.ESTOP_BG, UiStyle.RED, UiStyle.RED, 18)
-	estop.custom_minimum_size = Vector2(175, 0)
+	estop.custom_minimum_size = Vector2(150, 74)
+	estop.size_flags_horizontal = Control.SIZE_SHRINK_END
 	estop.pressed.connect(_on_estop_pressed)
 	row.add_child(estop)
 
@@ -141,12 +145,12 @@ func _build_data(root: Control) -> void:
 	vb.add_child(grid)
 
 	_data["dwall"] = _dcard(grid, "距血管壁距离", "1.6", "mm", UiStyle.GREEN)
-	_data["dpath"] = _dcard(grid, "路径偏差", "0.7", "mm", UiStyle.GREEN)    # TODO backend
-	_data["radius"] = _dcard(grid, "血管半径", "2.8", "mm", UiStyle.BLUE)    # TODO backend
+	_data["dpath"] = _dcard(grid, "路径偏差", "—", "mm", UiStyle.GREEN)
+	_data["radius"] = _dcard(grid, "血管半径", "—", "mm", UiStyle.BLUE)
 	_data["curv"] = _dcard(grid, "曲率", "0.42", "1/mm", UiStyle.BLUE)
 	_data["speed"] = _dcard(grid, "导管速度", "3.2", "mm/s", UiStyle.BLUE)
 	_data["progress"] = _dcard(grid, "路径进度", "72", "%", UiStyle.BLUE)
-	_data["eta"] = _dcard(grid, "预计到达目标", "02:35", "min", UiStyle.BLUE) # TODO backend
+	_data["eta"] = _dcard(grid, "预计到达目标", "—", "", UiStyle.BLUE)
 	# 卡8 风险状态 with 提示行 (§13).
 	var risk := DataCard.new("风险状态", "正常", "", UiStyle.GREEN, 30.0, "请保持谨慎操作")
 	grid.add_child(risk)
@@ -286,7 +290,7 @@ func set_connection(connected: bool) -> void:
 	_top["robot"].set_color(col)
 	_conn["status"].text = txt
 	_conn["status"].add_theme_color_override("font_color", col)
-	_conn["latency"].text = "18 ms" if connected else "— ms"  # TODO backend RTT
+	_conn["latency"].text = "— ms"
 	for i in _signal_bars.size():
 		_signal_bars[i].color = (UiStyle.GREEN if connected and i < 4 else UiStyle.TRACK)
 	add_log_line("后端已连接" if connected else "后端连接断开")
@@ -310,42 +314,85 @@ func update_safety(status: String) -> void:
 
 func set_control_mode(text: String) -> void:
 	var col := UiStyle.BLUE
-	if "AUTO" in text:
+	var short_text := "手动"
+	if "自动" in text or "AUTO" in text:
+		short_text = "自动"
 		col = UiStyle.GREEN
-	elif "STOP" in text or "HOLD" in text:
+	elif "STOP" in text or "HOLD" in text or "安全保持" in text:
+		short_text = "安全保持"
 		col = UiStyle.YELLOW
-	_top["mode"].set_value(text)
+	_top["mode"].set_value(short_text)
 	_top["mode"].set_color(col)
 
 
 func update_metrics(metrics: Dictionary) -> void:
-	var wall_mm := float(metrics.get("wall_distance", 0.0)) * 1000.0
-	var curv := float(metrics.get("curvature", 0.0))
+	var raw_wall_mm := float(metrics.get("wall_distance", 0.0)) * 1000.0
+	var raw_deviation_mm := float(metrics.get("path_deviation", 0.0)) * 1000.0
+	var remaining_cm := float(metrics.get("remaining_distance", 0.0)) * 100.0
+	var radius_value = metrics.get("vessel_radius", null)
+	var radius_mm := -1.0
+	if radius_value != null:
+		radius_mm = float(radius_value) * 1000.0
+	var raw_curv_per_mm := float(metrics.get("curvature", 0.0)) / 1000.0
+	var wall_mm := _smooth_value("_smooth_wall_mm", raw_wall_mm, 0.18)
+	var deviation_mm := _smooth_value("_smooth_deviation_mm", raw_deviation_mm, 0.18)
+	var curv_per_mm := _smooth_value("_smooth_curv_per_mm", raw_curv_per_mm, 0.16)
 	var speed := float(metrics.get("velocity", 0.0)) * 1000.0  # m/s -> mm/s
 	var progress := float(metrics.get("path_progress", 0.0)) * 100.0
+	var risk_score := float(metrics.get("risk_score", 0.0))
+	var latency := float(metrics.get("latency_ms", -1.0))
 
 	_top["progress"].set_value("%.0f" % progress)
 	_top["progress"].set_ring(progress)
-	_top["curv"].set_value("%.2f" % curv)
+	_top["remain"].set_value("%.1f" % remaining_cm)
+	_top["radius"].set_value(_format_optional(radius_mm, 1))
+	_top["curv"].set_value("%.4f" % curv_per_mm)
 	_top["dwall"].set_value("%.1f" % wall_mm)
 
 	_data["dwall"].set_value("%.1f" % wall_mm)
 	_data["dwall"].set_bar(clampf(wall_mm / 3.0 * 100.0, 0.0, 100.0))
-	_data["curv"].set_value("%.2f" % curv)
+	_data["dpath"].set_value("%.1f" % deviation_mm)
+	_data["dpath"].set_bar(clampf((1.5 - deviation_mm) / 1.5 * 100.0, 0.0, 100.0))
+	_data["radius"].set_value(_format_optional(radius_mm, 1))
+	_data["curv"].set_value("%.4f" % curv_per_mm)
 	_data["speed"].set_value("%.1f" % speed)
 	_data["progress"].set_value("%.0f" % progress)
 	_data["progress"].set_bar(progress)
+	_data["eta"].set_value(_format_eta(metrics.get("eta_seconds", null)))
+	if latency >= 0.0 and _conn.has("latency"):
+		_conn["latency"].text = "%.0f ms" % latency
 
-	_update_risk(wall_mm)
+	_update_risk(wall_mm, risk_score)
+
+
+func _smooth_value(slot: String, raw: float, alpha: float) -> float:
+	if slot == "_smooth_wall_mm":
+		_smooth_wall_mm = raw if _smooth_wall_mm < 0.0 else lerpf(_smooth_wall_mm, raw, alpha)
+		return _smooth_wall_mm
+	if slot == "_smooth_deviation_mm":
+		_smooth_deviation_mm = raw if _smooth_deviation_mm < 0.0 else lerpf(_smooth_deviation_mm, raw, alpha)
+		return _smooth_deviation_mm
+	_smooth_curv_per_mm = raw if _smooth_curv_per_mm < 0.0 else lerpf(_smooth_curv_per_mm, raw, alpha)
+	return _smooth_curv_per_mm
+
+
+func _format_optional(value: float, decimals: int) -> String:
+	if value < 0.0 or is_nan(value) or is_inf(value):
+		return "—"
+	return ("%." + str(decimals) + "f") % value
 
 
 ## Risk rule (doc/11 §23): by wall distance —— >1.5mm 安全绿 / 0.8-1.5 中等黄 / <0.8 高危红.
-func _update_risk(wall_mm: float) -> void:
+func _update_risk(wall_mm: float, risk_score: float = 0.0) -> void:
 	if _estopped:
 		return  # estop display holds until 恢复
 	var color: Color
 	var text: String
-	if wall_mm > 1.5:
+	if risk_score >= 0.75:
+		color = UiStyle.RED; text = "高风险"
+	elif risk_score >= 0.35:
+		color = UiStyle.YELLOW; text = "中等"
+	elif wall_mm > 1.5:
 		color = UiStyle.GREEN; text = "正常"
 	elif wall_mm >= 0.8:
 		color = UiStyle.YELLOW; text = "中等"
@@ -357,6 +404,18 @@ func _update_risk(wall_mm: float) -> void:
 	_data["risk"].set_value(text if text == "正常" else text + "风险")
 	_data["risk"].set_color(color)
 	_data["dwall"].set_color(color)
+
+
+func _format_eta(value) -> String:
+	if value == null:
+		return "—"
+	var seconds := float(value)
+	if seconds < 0.0 or is_inf(seconds) or is_nan(seconds):
+		return "—"
+	var total := int(round(seconds))
+	var minutes := total / 60
+	var secs := total % 60
+	return "%02d:%02d" % [minutes, secs]
 
 
 func update_input(push: float, rotate: float) -> void:

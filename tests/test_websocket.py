@@ -87,6 +87,37 @@ class TestWebSocketHandlerUnit:
         assert state.control_rate_limiter == 0.0
         assert state.batch_mode is False
 
+    def test_state_batch_contains_dashboard_fields(self):
+        from services.navigation_engine import NavigationState
+        from services.session_manager import SessionManager
+        from services.websocket_handler import WebSocketHandler
+
+        class DummyEngine:
+            _engine = object()
+            planned_path = [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+            entry_pose = {"position": [0.0, 0.0, 0.0], "direction": [0.0, 0.0, 1.0]}
+
+            def get_render_bodies(self):
+                return []
+
+        state = NavigationState(
+            path_progress=0.25,
+            path_deviation=0.001,
+            remaining_distance=0.75,
+            vessel_radius=0.004,
+            eta_seconds=3.0,
+            risk_score=0.2,
+            fidelity_mode="physics",
+        )
+        batch = WebSocketHandler(SessionManager())._state_to_batch(state, DummyEngine())
+
+        assert batch["fidelity_mode"] == "physics"
+        assert batch["path"]["remaining_distance"] == 0.75
+        assert batch["path"]["vessel_radius"] == 0.004
+        assert batch["path"]["eta_seconds"] == 3.0
+        assert batch["safety"]["risk_score"] == 0.2
+        assert batch["safety"]["risk_regions"] == []
+
 
 class TestWebSocketProtocolExtensions:
     """Unit tests for Stage-8 protocol additions (no MuJoCo required)."""

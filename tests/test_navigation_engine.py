@@ -47,6 +47,10 @@ class TestNavigationStateDataclass:
         assert result["episode_length"] == 10
         assert "done" in result
         assert "reward" in result
+        assert result["remaining_distance"] == 0.0
+        assert result["vessel_radius"] is None
+        assert result["fidelity_mode"] == "physics"
+        assert result["risk_regions"] == []
 
 
 class TestSessionManagerUnit:
@@ -109,6 +113,27 @@ class TestSchemas:
         assert request.target == "bca"
         assert request.use_pixels is False
 
+    def test_state_response_contains_dashboard_fields(self):
+        from services.main import _state_to_response
+        from services.navigation_engine import NavigationState
+
+        state = NavigationState(
+            remaining_distance=0.12,
+            vessel_radius=0.003,
+            eta_seconds=2.5,
+            fidelity_mode="guided",
+            risk_score=0.4,
+            risk_regions=[{"level": "warning"}],
+        )
+        response = _state_to_response(state)
+
+        assert response.remaining_distance == 0.12
+        assert response.vessel_radius == 0.003
+        assert response.eta_seconds == 2.5
+        assert response.fidelity_mode == "guided"
+        assert response.risk_score == 0.4
+        assert response.risk_regions == [{"level": "warning"}]
+
 
 class TestNavigationStateExtended:
     """Tests for the extended NavigationState fields (Stage 7)."""
@@ -134,6 +159,13 @@ class TestNavigationStateExtended:
             "curvature",
             "path_progress",
             "path_deviation",
+            "remaining_distance",
+            "vessel_radius",
+            "eta_seconds",
+            "latency_ms",
+            "fidelity_mode",
+            "risk_score",
+            "risk_regions",
             "safety_status",
         ):
             assert key in result
@@ -162,6 +194,18 @@ class TestNavigationEngineHelpers:
         progress, deviation = engine._compute_path_progress([0.5, 0.0, 2.0])
         assert progress == pytest.approx(1.0)
         assert deviation == pytest.approx(0.5)
+
+    def test_remaining_distance_and_radius_from_path(self):
+        engine = self._engine(planned_path=[[0, 0, 0], [0, 0, 1], [0, 0, 2]])
+        engine.set_planned_path(
+            [[0, 0, 0], [0, 0, 1], [0, 0, 2]],
+            radii=[0.003, 0.004, 0.005],
+        )
+
+        assert engine._compute_remaining_distance(0.25) == pytest.approx(1.5)
+        assert engine._compute_vessel_radius(0.5) == pytest.approx(0.004)
+        assert engine._compute_eta_seconds(1.5, 0.5) == pytest.approx(3.0)
+        assert engine._compute_eta_seconds(1.5, 0.0) is None
 
     def test_set_planned_path_clear(self):
         engine = self._engine(planned_path=[[0, 0, 0], [0, 0, 1]])

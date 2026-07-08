@@ -87,6 +87,12 @@ class NavigationState:
     target_position: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     path_progress: float = 0.0
     path_deviation: float = 0.0
+    remaining_distance: float = 0.0
+    vessel_radius: float | None = None
+    eta_seconds: float | None = None
+    latency_ms: float | None = None
+    fidelity_mode: str = "physics"
+    risk_regions: list[dict[str, Any]] = field(default_factory=list)
     joint_positions: list[float] = field(default_factory=list)
     joint_velocities: list[float] = field(default_factory=list)
     safety_status: str = "STANDBY"
@@ -108,6 +114,12 @@ class NavigationState:
             "target_position": self.target_position,
             "path_progress": self.path_progress,
             "path_deviation": self.path_deviation,
+            "remaining_distance": self.remaining_distance,
+            "vessel_radius": self.vessel_radius,
+            "eta_seconds": self.eta_seconds,
+            "latency_ms": self.latency_ms,
+            "fidelity_mode": self.fidelity_mode,
+            "risk_regions": self.risk_regions,
             "joint_positions": self.joint_positions,
             "joint_velocities": self.joint_velocities,
             "safety_status": self.safety_status,
@@ -289,6 +301,7 @@ class NavigationEngine:
             default_radii = self._route_radii(route_target) if default_path is not None else None
             if default_path is None:
                 default_path = self._default_centerline_points()
+                default_radii = self._default_centerline_radii() if default_path is not None else None
             if default_path is not None:
                 self.set_planned_path(default_path, radii=default_radii)
 
@@ -339,6 +352,25 @@ class NavigationEngine:
         if isinstance(waypoints, list) and len(waypoints) >= 2:
             return waypoints
         return None
+
+    def _default_centerline_radii(self) -> list[float] | None:
+        """Load per-waypoint centerline radii from ``centerline.json`` when present."""
+        if self.assets_dir is not None:
+            return None
+        centerline = (
+            _SRC_DIR
+            / "cathsim/dm/components/phantom_assets/meshes"
+            / self.phantom
+            / "centerline.json"
+        )
+        if not centerline.is_file():
+            return None
+        try:
+            data = json.loads(centerline.read_text(encoding="utf-8"))
+            radii = data.get("radius_m")
+        except Exception:
+            return None
+        return radii if isinstance(radii, list) and len(radii) >= 2 else None
 
     def _load_phantom_graph(self) -> dict | None:
         """Load a built-in phantom's centerline graph for A* planning.
@@ -714,6 +746,11 @@ class NavigationEngine:
             path_deviation = 0.0
         else:
             path_progress, path_deviation = self._compute_path_progress(tip_pos)
+        path_progress = float(np.clip(path_progress, 0.0, 1.0))
+
+        remaining_distance = self._compute_remaining_distance(path_progress)
+        vessel_radius = self._compute_vessel_radius(path_progress)
+        eta_seconds = self._compute_eta_seconds(remaining_distance, velocity)
 
         force_mode = self._is_force_physics()
         safety_status = self._compute_safety_status(
@@ -732,6 +769,11 @@ class NavigationEngine:
             target_position=raw.target_position,
             path_progress=float(path_progress),
             path_deviation=float(path_deviation),
+            remaining_distance=float(remaining_distance),
+            vessel_radius=vessel_radius,
+            eta_seconds=eta_seconds,
+            fidelity_mode=self.fidelity_mode,
+            risk_regions=self._risk_regions(path_progress, path_deviation),
             joint_positions=raw.joint_positions,
             joint_velocities=raw.joint_velocities,
             safety_status=safety_status,
@@ -743,6 +785,45 @@ class NavigationEngine:
             state, force_mode=force_mode, contact_ke=contact_ke
         )["risk_score"]
         return state
+
+    def _compute_remaining_distance(self, path_progress: float) -> float:
+        """Remaining arc length to target in meters."""
+        if self._path is None or self._path.total_len <= 0.0:
+            return 0.0
+        return max(0.0, (1.0 - float(path_progress)) * self._path.total_len)
+
+    def _compute_vessel_radius(self, path_progress: float) -> float | None:
+        """Local lumen radius in meters from VMTK/route data, when available."""
+        if self._path is None or self._path.total_len <= 0.0:
+            return None
+        return self._path.radius_at_arclen(float(path_progress) * self._path.total_len)
+
+    def _compute_eta_seconds(self, remaining_distance: float, velocity: float) -> float | None:
+        """Estimated time to target from current speed; None when stationary."""
+        if remaining_distance <= 0.0:
+            return 0.0
+        if velocity <= 1e-6:
+            return None
+        return float(remaining_distance / velocity)
+
+    def _risk_regions(self, path_progress: float, path_deviation: float) -> list[dict[str, Any]]:
+        """Protocol placeholder for backend-provided risk regions.
+
+        Until the SDF/risk-map backend supplies spatial regions, expose a stable
+        empty list and add a local caution marker only when the current state is
+        already off-path enough to be useful to the frontend.
+        """
+        if self._path is None or path_deviation < self.WALL_DISTANCE_SAFE:
+            return []
+        s = float(path_progress) * self._path.total_len
+        return [
+            {
+                "kind": "path_deviation",
+                "level": "warning",
+                "center": self._path.point_at_arclen(s).tolist(),
+                "radius": float(path_deviation),
+            }
+        ]
 
     def _compute_curvature(self) -> float:
         """Estimate local tip curvature (m^-1) via Menger curvature.
@@ -842,6 +923,11 @@ class NavigationEngine:
         has no geometry yet.
         """
         return self._engine.render_bodies()
+
+    @property
+    def fidelity_mode(self) -> str:
+        """Current simulation fidelity bucket exposed to API/HUD clients."""
+        return "guided" if self._is_guided() else "physics"
 
     def get_safety_status(self, state: NavigationState) -> SafetyStatus:
         """Return the safety status carried by the given state.

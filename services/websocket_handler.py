@@ -769,6 +769,7 @@ class WebSocketHandler:
         """
         return {
             "engine": type(engine._engine).__name__ if getattr(engine, "_engine", None) is not None else "",
+            "fidelity_mode": state.fidelity_mode,
             "tip": {
                 "position": state.tip_position,
                 "direction": state.tip_direction,
@@ -779,6 +780,9 @@ class WebSocketHandler:
                 "waypoints": engine.planned_path if include_path else [],
                 "progress": state.path_progress,
                 "deviation": state.path_deviation,
+                "remaining_distance": state.remaining_distance,
+                "vessel_radius": state.vessel_radius,
+                "eta_seconds": state.eta_seconds,
             },
             # Vessel-entry (vascular access) and target markers, for highlighting
             # in the client. The entry is constant for a session, so it rides the
@@ -792,6 +796,7 @@ class WebSocketHandler:
                 "curvature": state.curvature,
                 "speed": state.velocity,
                 "risk_score": state.risk_score,
+                "risk_regions": state.risk_regions,
             },
             "episode": {
                 "length": state.episode_length,

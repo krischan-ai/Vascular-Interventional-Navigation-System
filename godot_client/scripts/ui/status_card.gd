@@ -13,7 +13,7 @@ func _init(title: String, value: String, unit: String, color: Color,
 		icon: Control = null) -> void:
 	add_theme_stylebox_override("panel", UiStyle.card_box(0.9, 8))
 	size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	custom_minimum_size = Vector2(150, 0)
+	custom_minimum_size = Vector2(126, 0)
 
 	var hb := HBoxContainer.new()
 	hb.add_theme_constant_override("separation", 8)
@@ -31,11 +31,11 @@ func _init(title: String, value: String, unit: String, color: Color,
 	vb.alignment = BoxContainer.ALIGNMENT_CENTER
 	hb.add_child(vb)
 
-	vb.add_child(UiStyle.label(title, UiStyle.TEXT_MID, 14))
+	vb.add_child(UiStyle.label(title, UiStyle.TEXT_MID, 13))
 
 	var valrow := HBoxContainer.new()
 	valrow.add_theme_constant_override("separation", 4)
-	_value = UiStyle.label(value, color, 26)
+	_value = UiStyle.label(value, color, 24)
 	valrow.add_child(_value)
 	_unit = UiStyle.label(unit, UiStyle.TEXT2, 14)
 	_unit.size_flags_vertical = Control.SIZE_SHRINK_END

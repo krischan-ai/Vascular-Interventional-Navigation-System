@@ -396,14 +396,32 @@ class NewtonEngine:
             return
         ke = self._model.joint_target_ke.numpy()
         nj = len(self._rod_bodies) - 1
+        bend_profile = self._bend_profile(nj)
         for j in range(nj):
             ke[2 * j] = self._stretch
-            ke[2 * j + 1] = self._bend
-        for i in range(min(self._soft_tip, nj)):
-            j = nj - 1 - i
-            frac = (i + 1) / self._soft_tip
-            ke[2 * j + 1] = self._bend * (1.0 - frac) + self._tip_bend * frac
+            ke[2 * j + 1] = bend_profile[j]
         self._model.joint_target_ke.assign(ke)
+
+    def _bend_profile(self, joint_count: int) -> np.ndarray:
+        """Per-joint bend stiffness from proximal shaft to distal soft tip.
+
+        This is the D4-R soft-tip/hard-shaft calibration surface. The shaft uses
+        ``bend``; the distal ``soft_tip`` joints ramp down to ``tip_bend`` so
+        push is transmitted by stretch constraints while the tip remains able to
+        conform and rebound at the wall. If the rod has fewer joints than the
+        configured soft-tip span, the available joints still cover the full ramp
+        and the last joint reaches ``tip_bend``.
+        """
+        count = max(0, int(joint_count))
+        profile = np.full(count, float(self._bend), dtype=np.float64)
+        tip_count = min(max(0, int(self._soft_tip)), count)
+        if tip_count <= 0:
+            return profile
+        start = count - tip_count
+        for offset in range(tip_count):
+            frac = (offset + 1) / tip_count
+            profile[start + offset] = self._bend * (1.0 - frac) + self._tip_bend * frac
+        return profile
 
     # Deformation params that live-update (no scene rebuild) vs. those baked into
     # the model geometry at build time (rebuild required).
@@ -461,6 +479,7 @@ class NewtonEngine:
             "sheath_bodies": self._sheath_bodies,
             "free_len": self._free_len,
             "max_slack": self._max_slack,
+            "bend_profile": self._bend_profile(max(0, int(round(self._rod_length / self._rod_seg_len)))).tolist(),
         }
 
     def _ensure_initialized(self) -> None:
