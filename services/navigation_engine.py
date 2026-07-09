@@ -31,6 +31,7 @@ from services.physics import (
     make_engine,
 )
 from services.physics.kinematic_engine import KinematicEngine
+from services.vpp_assets import resolve_vpp_mujoco_dir
 
 # Make the in-repo `cathsim` package importable even when the server runs in a
 # Python environment where it was not installed editable (e.g. uvicorn launched
@@ -38,8 +39,6 @@ from services.physics.kinematic_engine import KinematicEngine
 _SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 if _SRC_DIR.is_dir() and str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
-
-_VPP_DATA_ROOT = Path(__file__).resolve().parents[1] / "data" / "vpp_assets"
 
 # Built-in phantoms whose vessel is offset from the world origin and therefore
 # need a fixed guidewire entry pose when no planned path or explicit entry is
@@ -60,11 +59,7 @@ def resolve_vpp_assets_dir(phantom: str) -> str | None:
     Non-VPP phantoms (e.g. ``low_tort``) return None so the built-in phantom
     assets are used.
     """
-    if not phantom.endswith("_vpp"):
-        return None
-    case_id = phantom[: -len("_vpp")]
-    mujoco_dir = _VPP_DATA_ROOT / case_id / "mujoco"
-    return str(mujoco_dir) if mujoco_dir.is_dir() else None
+    return resolve_vpp_mujoco_dir(phantom)
 
 
 @dataclass

@@ -628,6 +628,66 @@ class NewtonEngine:
         tip = self._s0.body_q.numpy()[self._rod_bodies[-1], :3]
         return float(_nearest_arclen(self._centerline, self._cl_cum, tip))
 
+    def _breach_stats(self, xyz: np.ndarray) -> tuple[float, float, float]:
+        """Worst lumen breach plus wall-distance/contact-force for rod bodies."""
+        d2 = np.sum((xyz[:, None, :] - self._centerline[None, :, :]) ** 2, axis=2)
+        nearest = np.argmin(d2, axis=1)
+        dist = np.sqrt(d2[np.arange(len(xyz)), nearest])
+        breach = dist + self._rod_radius - self._radii[nearest]  # >0 => outside lumen
+        worst = float(breach.max())
+        wall_distance = max(0.0, -worst)
+        contact_force = max(0.0, worst) * self._contact_ke
+        return worst, wall_distance, contact_force
+
+    def diagnostics(self) -> dict:
+        """Human-facing Newton debug metrics streamed to the front end.
+
+        These are not part of the physics contract; they explain why a VPP force
+        session behaves a certain way (blocked by slack guard, penetrating the
+        lumen wall, or simply still feeding through the sheath).
+        """
+        body_count = len(self._rod_bodies)
+        out = {
+            "initialized": self._initialized,
+            "drive": self._drive,
+            "substeps": self._substeps,
+            "iterations": self._iterations,
+            "rod_length_m": self._rod_length,
+            "rod_seg_len_m": self._rod_seg_len,
+            "rod_radius_m": self._rod_radius,
+            "body_count": body_count,
+            "insert_s_m": self._insert_s,
+            "max_insert_s_m": self._max_s_ins,
+            "free_len_m": self._free_len,
+            "max_slack_m": self._max_slack,
+            "sheath_bodies": self._sheath_bodies,
+            "contact_ke": self._contact_ke,
+        }
+        if body_count > 0:
+            out["sheath_bodies_resolved"] = self._sheath_count(body_count)
+        if not self._initialized or self._base_arc is None or self._s0 is None:
+            return out
+
+        xyz = self._s0.body_q.numpy()[self._rod_bodies, :3]
+        tip_arclen = self._tip_arclen()
+        fed_arclen = self._insert_s + float(self._base_arc[-1])
+        slack = fed_arclen - tip_arclen
+        worst, wall_distance, contact_force = self._breach_stats(xyz)
+        out.update({
+            "tip_arclen_m": tip_arclen,
+            "fed_arclen_m": fed_arclen,
+            "slack_m": slack,
+            "feed_budget_m": (
+                max(0.0, self._max_slack - slack)
+                if self._drive == "force" and self._max_slack > 0.0
+                else float("inf")
+            ),
+            "max_breach_m": worst,
+            "wall_distance_m": min(wall_distance, MAX_WALL_DISTANCE),
+            "contact_force": contact_force,
+        })
+        return out
+
     def step(self, push: float, rotate: float) -> RawPose:
         self._ensure_initialized()
 
@@ -669,14 +729,7 @@ class NewtonEngine:
         else:
             direction = direction / norm
 
-        # Per-body breach against the local (variable) lumen radius via nearest node.
-        d2 = np.sum((xyz[:, None, :] - self._centerline[None, :, :]) ** 2, axis=2)
-        nearest = np.argmin(d2, axis=1)
-        dist = np.sqrt(d2[np.arange(len(xyz)), nearest])
-        breach = dist + self._rod_radius - self._radii[nearest]  # >0 => poking past wall
-        worst = float(breach.max())
-        wall_distance = max(0.0, -worst)
-        contact_force = max(0.0, worst) * self._contact_ke
+        worst, wall_distance, contact_force = self._breach_stats(xyz)
         target = self._path.points[-1].tolist()
         # Anchor mode rides the route so inserted arc is exact; force mode lets the
         # tip physically lag, so report its actual projected arc along the route.

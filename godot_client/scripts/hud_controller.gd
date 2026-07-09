@@ -185,6 +185,9 @@ func _build_bottom(root: Control) -> void:
 	var connp := DashPanel.new("机器人连接", 17.0)
 	_conn["status"] = connp.add_kv("连接状态", "未连接", UiStyle.RED)
 	_conn["latency"] = connp.add_kv("延迟", "— ms")
+	_conn["engine"] = connp.add_kv("Engine", "-")
+	_conn["mode"] = connp.add_kv("Mode", "-")
+	_conn["slack"] = connp.add_kv("Slack", "-")
 	# 信号强度: 5 格信号条 (§16).
 	var sigrow := HBoxContainer.new()
 	var sigt := UiStyle.label("信号强度", UiStyle.TEXT_MID, 12)
@@ -291,6 +294,9 @@ func set_connection(connected: bool) -> void:
 	_conn["status"].text = txt
 	_conn["status"].add_theme_color_override("font_color", col)
 	_conn["latency"].text = "— ms"
+	_conn["engine"].text = "-"
+	_conn["mode"].text = "-"
+	_conn["slack"].text = "-"
 	for i in _signal_bars.size():
 		_signal_bars[i].color = (UiStyle.GREEN if connected and i < 4 else UiStyle.TRACK)
 	add_log_line("后端已连接" if connected else "后端连接断开")
@@ -323,6 +329,20 @@ func set_control_mode(text: String) -> void:
 		col = UiStyle.YELLOW
 	_top["mode"].set_value(short_text)
 	_top["mode"].set_color(col)
+
+
+func set_backend(engine: String, mode: String, diagnostics: Dictionary) -> void:
+	if _conn.has("engine") and engine != "":
+		_conn["engine"].text = engine
+	if _conn.has("mode") and mode != "":
+		_conn["mode"].text = mode
+	if _conn.has("slack"):
+		if diagnostics.has("slack_m"):
+			var slack_mm := float(diagnostics.get("slack_m", 0.0)) * 1000.0
+			var budget_mm := float(diagnostics.get("feed_budget_m", 0.0)) * 1000.0
+			_conn["slack"].text = "%.1f / %.1f mm" % [slack_mm, budget_mm]
+		else:
+			_conn["slack"].text = "-"
 
 
 func update_metrics(metrics: Dictionary) -> void:

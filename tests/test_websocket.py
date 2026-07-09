@@ -5,6 +5,7 @@ the actual MuJoCo environment are marked with pytest.mark.slow.
 """
 
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -93,8 +94,12 @@ class TestWebSocketHandlerUnit:
         from services.session_manager import SessionManager
         from services.websocket_handler import WebSocketHandler
 
+        class DummyBackend:
+            def diagnostics(self):
+                return {"drive": "force", "slack_m": 0.002, "feed_budget_m": 0.010}
+
         class DummyEngine:
-            _engine = object()
+            _engine = DummyBackend()
             planned_path = [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
             entry_pose = {"position": [0.0, 0.0, 0.0], "direction": [0.0, 0.0, 1.0]}
 
@@ -118,8 +123,11 @@ class TestWebSocketHandlerUnit:
         assert batch["path"]["eta_seconds"] == 3.0
         assert batch["safety"]["risk_score"] == 0.2
         assert batch["safety"]["risk_regions"] == []
+        assert batch["engine"] == "DummyBackend"
+        assert batch["diagnostics"]["drive"] == "force"
+        assert batch["diagnostics"]["slack_m"] == 0.002
 
-    def test_session_start_batch_mode_does_not_send_stale_batch(self):
+    def test_session_start_batch_mode_embeds_initial_batch(self):
         import asyncio
 
         from services.navigation_engine import NavigationState
@@ -129,11 +137,18 @@ class TestWebSocketHandlerUnit:
         handler = WebSocketHandler(MagicMock())
         engine = MagicMock()
         engine.available_routes = {}
+        engine.planned_path = [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+        engine.entry_pose = {"position": [0.0, 0.0, 0.0], "direction": [0.0, 0.0, 1.0]}
+        engine.get_render_bodies.return_value = [
+            {"pos": [0.0, 0.0, 0.0], "quat": [0.0, 0.0, 0.0, 1.0]},
+            {"pos": [0.0, 0.0, 0.01], "quat": [0.0, 0.0, 0.0, 1.0]},
+        ]
         handler._session_manager.create_session.return_value = ("session-1", NavigationState())
         handler._session_manager.get_session.return_value = engine
         conn = MagicMock()
         conn.session_id = None
         conn.batch_mode = False
+        conn.path_sent = False
 
         send_mock = AsyncMock()
         handler._send_message = send_mock
@@ -144,6 +159,10 @@ class TestWebSocketHandlerUnit:
         assert conn.batch_mode is True
         assert send_mock.await_count == 1
         assert send_mock.await_args.args[1].value == "session_started"
+        data = send_mock.await_args.kwargs["data"]
+        assert data["initial_batch"]["bodies"] == engine.get_render_bodies.return_value
+        assert data["initial_batch"]["path"]["waypoints"] == engine.planned_path
+        assert conn.path_sent is True
 
 
 class TestWebSocketProtocolExtensions:
@@ -180,6 +199,16 @@ class TestWebSocketProtocolExtensions:
 
 class TestWebSocketPathRequest:
     """path_request does not require MuJoCo (graph + A* only)."""
+
+    def test_vpp_graph_resolves_when_started_from_godot_client(self, monkeypatch):
+        from services.websocket_handler import _get_path_planner
+
+        _get_path_planner.cache_clear()
+        monkeypatch.chdir(Path(__file__).resolve().parents[1] / "godot_client")
+
+        planner = _get_path_planner("case_001")
+
+        assert planner.nodes
 
     def test_websocket_path_request_returns_path(self):
         from services.websocket_handler import _get_path_planner
@@ -665,6 +694,13 @@ class TestWebSocketVPPNavigation:
             # Server planned the path and spawned the guidewire at the vessel
             # entry: the tip starts on the path (within a few mm), not ~1m away.
             assert state["path_deviation"] < 0.02
+            initial_batch = start["data"]["initial_batch"]
+            assert len(initial_batch["path"]["waypoints"]) > 100
+            assert len(initial_batch["bodies"]) > 0
+            assert len(initial_batch["entry"]["position"]) == 3
+            assert initial_batch["entry"]["position"] == pytest.approx(
+                initial_batch["path"]["waypoints"][0], abs=1e-6
+            )
 
             websocket.send_json({
                 "type": "control",
@@ -673,17 +709,11 @@ class TestWebSocketVPPNavigation:
             batch = _recv_pong(websocket)
             assert batch["type"] == "state_batch"
             data = batch["data"]
-            # The planned path streams to the client for visualization.
-            assert len(data["path"]["waypoints"]) > 100
+            # The planned path already streamed in session_started.initial_batch;
+            # follow-up control frames can omit waypoints to stay small.
+            assert data["path"]["waypoints"] == []
             assert len(data["bodies"]) > 0
             assert 0.0 <= data["path"]["progress"] <= 1.0
-            # Entry (vascular access) and target markers are highlighted in the
-            # client. The entry rides the first batch and sits at the path start.
-            assert len(data["entry"]["position"]) == 3
-            assert len(data["entry"]["direction"]) == 3
-            assert data["entry"]["position"] == pytest.approx(
-                data["path"]["waypoints"][0], abs=1e-6
-            )
             assert len(data["target"]) == 3
 
             # Guided (centerline-follow) mode is auto-enabled for VPP routes:

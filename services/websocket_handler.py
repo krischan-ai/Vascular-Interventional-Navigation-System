@@ -21,9 +21,9 @@ from pydantic import BaseModel, Field, ValidationError
 from services.navigation_engine import NavigationEngine, NavigationState
 from services.path_planner import PathPlanner
 from services.session_manager import SessionManager
+from services.vpp_assets import require_vpp_graph_path
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
-_DATA_ROOT = _PROJECT_ROOT / "data" / "vpp_assets"
 
 # Built-in sealed-lumen phantoms can run physical backends despite shipping a
 # centerline/routes. Other centerline phantoms default to kinematic guidance
@@ -79,10 +79,7 @@ def _resolve_session_backend(
 @lru_cache(maxsize=8)
 def _get_path_planner(case_id: str) -> PathPlanner:
     """Load (and cache) a PathPlanner for the given case's VPP graph."""
-    graph_path = _DATA_ROOT / case_id / "graph" / "graph.json"
-    if not graph_path.is_file():
-        raise FileNotFoundError(f"Graph not found for case: {case_id}")
-    return PathPlanner(graph_path)
+    return PathPlanner(require_vpp_graph_path(case_id))
 
 
 class MessageType(str, Enum):
@@ -283,6 +280,12 @@ class WebSocketHandler:
             if not conn_state.is_alive:
                 break
 
+            # Session startup can take a while on first Newton/Warp init. Until
+            # the session exists, keep the socket open without enforcing pong
+            # timeouts so a slow create_session does not get killed mid-start.
+            if conn_state.session_id is None:
+                continue
+
             elapsed = time.time() - conn_state.last_pong_time
             if elapsed > self.PONG_TIMEOUT:
                 conn_state.is_alive = False
@@ -419,6 +422,13 @@ class WebSocketHandler:
             # Multi-branch phantoms expose their selectable branch tips so the
             # client can offer targets and switch via a select_route message.
             engine = self._session_manager.get_session(session_id)
+            initial_batch = (
+                self._state_to_batch(state, engine, include_path=True)
+                if params.batch_mode
+                else None
+            )
+            if initial_batch is not None:
+                conn_state.path_sent = True
             await self._send_message(
                 conn_state,
                 MessageType.SESSION_STARTED,
@@ -431,6 +441,7 @@ class WebSocketHandler:
                     "engine": type(engine._engine).__name__,
                     "fidelity_mode": state.fidelity_mode,
                     "state": self._state_to_dict(state),
+                    "initial_batch": initial_batch,
                     "routes": engine.available_routes,
                 },
             )
@@ -791,9 +802,14 @@ class WebSocketHandler:
         frame small. The client keeps its existing path drawing when waypoints is
         empty.
         """
+        backend = getattr(engine, "_engine", None)
+        diagnostics = {}
+        if backend is not None and hasattr(backend, "diagnostics"):
+            diagnostics = backend.diagnostics()
         return {
-            "engine": type(engine._engine).__name__ if getattr(engine, "_engine", None) is not None else "",
+            "engine": type(backend).__name__ if backend is not None else "",
             "fidelity_mode": state.fidelity_mode,
+            "diagnostics": diagnostics,
             "tip": {
                 "position": state.tip_position,
                 "direction": state.tip_direction,

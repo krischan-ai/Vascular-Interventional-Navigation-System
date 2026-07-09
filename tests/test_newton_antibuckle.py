@@ -116,6 +116,16 @@ class TestLiveTuning:
         assert params["free_len"] == pytest.approx(0.03)
         assert params["max_slack"] == pytest.approx(0.012)
 
+    def test_diagnostics_available_before_init(self, engine):
+        diag = engine.diagnostics()
+
+        assert diag["initialized"] is False
+        assert diag["drive"] == "force"
+        assert diag["free_len_m"] == pytest.approx(0.03)
+        assert diag["max_slack_m"] == pytest.approx(0.012)
+        assert diag["sheath_bodies"] == -1
+        assert "slack_m" not in diag
+
     def test_set_deform_params_updates_before_init(self, engine):
         # Not initialized (no newton locally): values update, no rebuild/crash.
         effective = engine.set_deform_params(

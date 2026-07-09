@@ -4,6 +4,7 @@ scratch/
 data/
 .claude/settings.local.json
 .sync*
+.deploy_backend.local.json
 
 _site
 .sass-cache

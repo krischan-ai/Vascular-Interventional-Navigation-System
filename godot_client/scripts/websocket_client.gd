@@ -49,6 +49,7 @@ var _was_open := false
 var session_id: String = ""
 var _session_accum := 0.0    ## time since last session_start attempt
 var _session_attempts := 0
+var _session_start_blocked := false
 var _seen_types := {}        ## debug: first-occurrence logging
 var _control_sent := false   ## debug: log the first control we send
 # Lock-step control: keep at most one control command in flight so the client
@@ -90,7 +91,7 @@ func _process(delta: float) -> void:
 			# (Re)send session_start until the server acknowledges with a
 			# session_id. The first packet right after the handshake can be
 			# dropped, so we retry on an interval.
-			if session_id == "":
+			if session_id == "" and not _session_start_blocked:
 				_session_accum += delta
 				if _session_attempts == 0 or _session_accum >= session_retry_interval:
 					_session_attempts += 1
@@ -146,8 +147,12 @@ func _handle_packet(packet: String) -> void:
 			_send("pong", {})
 		"session_started":
 			session_id = str(msg.get("session_id", ""))
+			_session_start_blocked = false
 			session_started.emit(session_id, data.get("state", {}))
 			routes_received.emit(data.get("routes", {}))
+			var initial_batch: Dictionary = data.get("initial_batch", {})
+			if not initial_batch.is_empty():
+				batch_received.emit(initial_batch)
 		"state_update":
 			# Drop frames that arrive while no session is active: during a model
 			# switch (restart_session clears session_id until the new
@@ -180,6 +185,9 @@ func _handle_packet(packet: String) -> void:
 				print("[WS] ignoring benign SESSION_EXISTS")
 			else:
 				print("[WS] SERVER ERROR: %s" % str(data))
+				var code := str(data.get("code", ""))
+				if code in ["PATH_NOT_FOUND", "SESSION_ERROR", "INVALID_PARAMS"]:
+					_session_start_blocked = true
 				error_received.emit(data)
 				push_warning("Server error: %s" % str(data))
 		_:
@@ -271,6 +279,7 @@ func restart_session(new_phantom: String, new_target: String, new_case_id: Strin
 	session_id = ""
 	_session_attempts = 0
 	_session_accum = 0.0
+	_session_start_blocked = false
 	_control_sent = false
 	_awaiting = false
 

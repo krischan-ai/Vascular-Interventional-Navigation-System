@@ -23,6 +23,11 @@ from services.schemas import (
     StepResponse,
 )
 from services.session_manager import get_session_manager
+from services.vpp_assets import (
+    require_vpp_graph_path,
+    vpp_case_dir,
+    vpp_data_root_candidates,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -37,18 +42,21 @@ app = FastAPI(
 
 
 def list_case_ids() -> list[str]:
-    if not DATA_ROOT.is_dir():
-        return []
-    return sorted(
-        path.name
-        for path in DATA_ROOT.iterdir()
-        if path.is_dir() and (path / "manifest.json").is_file()
-    )
+    case_ids: set[str] = set()
+    for data_root in vpp_data_root_candidates():
+        if not data_root.is_dir():
+            continue
+        case_ids.update(
+            path.name
+            for path in data_root.iterdir()
+            if path.is_dir() and (path / "manifest.json").is_file()
+        )
+    return sorted(case_ids)
 
 
 def case_dir(case_id: str) -> Path:
-    path = DATA_ROOT / case_id
-    if not path.is_dir():
+    path = vpp_case_dir(case_id)
+    if path is None:
         raise HTTPException(status_code=404, detail=f"Case not found: {case_id}")
     return path
 
@@ -69,10 +77,10 @@ def load_manifest(case_id: str) -> dict[str, Any]:
 
 @lru_cache(maxsize=8)
 def get_path_planner(case_id: str) -> PathPlanner:
-    graph_path = case_dir(case_id) / "graph" / "graph.json"
-    if not graph_path.is_file():
-        raise HTTPException(status_code=404, detail=f"Graph not found for case: {case_id}")
-    return PathPlanner(graph_path)
+    try:
+        return PathPlanner(require_vpp_graph_path(case_id))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 def summarize_case(manifest: dict[str, Any]) -> CaseSummary:

@@ -1124,9 +1124,13 @@ func _on_batch(batch: Dictionary) -> void:
 	if not _logged_first_batch:
 		_logged_first_batch = true
 		var path: Dictionary = batch.get("path", {})
-		print("[Main] first state_batch waypoints=%d target=%s" % [
+		var diag: Dictionary = batch.get("diagnostics", {}) as Dictionary
+		print("[Main] first state_batch engine=%s mode=%s waypoints=%d target=%s diagnostics=%s" % [
+			str(batch.get("engine", "")),
+			str(batch.get("fidelity_mode", "")),
 			(path.get("waypoints", []) as Array).size(),
 			str(batch.get("target", [])),
+			str(diag),
 		])
 	# Capture the route waypoints (backend meter frame) for click-to-navigate;
 	# they arrive only on the first batch / after a reset or route switch.
@@ -1141,6 +1145,11 @@ func _on_batch(batch: Dictionary) -> void:
 	_feed_rig(_guidewire_front_pose_from_batch(batch))
 	var safety: Dictionary = batch.get("safety", {})
 	var episode: Dictionary = batch.get("episode", {})
+	_hud.set_backend(
+		str(batch.get("engine", "")),
+		str(batch.get("fidelity_mode", "")),
+		batch.get("diagnostics", {}) as Dictionary
+	)
 	var status := str(safety.get("status", "STANDBY"))
 	_hud.update_safety(status)
 	# Fixed control-mode display (VPP §2.1/§2.4): SAFE HOLD on a collision stop,
