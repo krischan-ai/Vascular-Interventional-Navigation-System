@@ -334,6 +334,23 @@ class TestNavigationEngineHelpers:
 
         assert engine.planned_path[-1] == pytest.approx(engine.available_routes[target])
 
+    def test_vpp_routes_are_selectable_without_mujoco(self):
+        engine = self._engine(
+            phantom="case_001_vpp",
+            guided=True,
+            physics_engine="guided",
+            route_target="endpoints_1",
+        )
+
+        assert "endpoints_1" in engine.available_routes
+        assert "endpoints_24" in engine.available_routes
+        assert engine.planned_path[-1] == pytest.approx(engine.available_routes["endpoints_1"])
+        assert engine._path is not None
+        assert engine._path.radii is not None
+
+        assert engine.select_route("endpoints_2") is True
+        assert engine.planned_path[-1] == pytest.approx(engine.available_routes["endpoints_2"])
+
 
 class TestGuidedMode:
     """Kinematic centerline-follow mode (no MuJoCo required)."""

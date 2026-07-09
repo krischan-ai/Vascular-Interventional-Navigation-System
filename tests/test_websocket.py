@@ -61,6 +61,7 @@ class TestWebSocketHandlerUnit:
         assert data.phantom == "low_tort"
         assert data.target == "bca"
         assert data.use_pixels is False
+        assert data.physics_engine == "auto"
 
     def test_websocket_message_parsing(self):
         from services.websocket_handler import WebSocketMessage
@@ -489,6 +490,113 @@ class TestSessionStartDataVPP:
         assert params.end_position is None
         assert params.planned_path is None
         assert params.smooth is True
+        assert params.physics_engine == "auto"
+
+    def test_vpp_mujoco_override_uses_real_physics_backend(self):
+        from services.websocket_handler import SessionStartData, _resolve_session_backend
+
+        params = SessionStartData(
+            phantom="case_001_vpp",
+            physics_engine="mujoco",
+            start_position=[0.0, 0.0, 0.0],
+            end_position=[1.0, 0.0, 0.0],
+        )
+
+        guided, engine_mode = _resolve_session_backend(
+            params,
+            planned_path=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+        )
+
+        assert guided is False
+        assert engine_mode == "mujoco"
+
+    def test_vpp_guided_override_is_explicit_only(self):
+        from services.websocket_handler import SessionStartData, _resolve_session_backend
+
+        params = SessionStartData(phantom="case_001_vpp", physics_engine="guided")
+        guided, engine_mode = _resolve_session_backend(
+            params,
+            planned_path=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+        )
+
+        assert guided is True
+        assert engine_mode == "guided"
+
+    def test_aorta_tree_defaults_to_physics_backend(self):
+        from services.websocket_handler import SessionStartData, _resolve_session_backend
+
+        params = SessionStartData(phantom="aorta_tree")
+        guided, engine_mode = _resolve_session_backend(params, planned_path=None)
+
+        assert guided is False
+        assert engine_mode == "auto"
+
+    def test_vpp_auto_backend_defaults_to_guided(self, monkeypatch):
+        from services.websocket_handler import SessionStartData, _resolve_session_backend
+
+        monkeypatch.delenv("CATHSIM_PHYSICS_ENGINE", raising=False)
+        params = SessionStartData(phantom="case_001_vpp")
+        guided, physics_engine = _resolve_session_backend(
+            params,
+            planned_path=[[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+        )
+
+        assert guided is True
+        assert physics_engine == "auto"
+
+    def test_vpp_newton_backend_disables_guided(self):
+        from services.websocket_handler import SessionStartData, _resolve_session_backend
+
+        params = SessionStartData(
+            phantom="case_001_vpp",
+            guided=True,
+            physics_engine="newton_demo",
+        )
+        guided, physics_engine = _resolve_session_backend(
+            params,
+            planned_path=[[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+        )
+
+        assert guided is False
+        assert physics_engine == "newton_demo"
+
+    def test_vpp_mujoco_backend_disables_guided(self):
+        from services.websocket_handler import SessionStartData, _resolve_session_backend
+
+        params = SessionStartData(
+            phantom="case_001_vpp",
+            guided=True,
+            physics_engine="mujoco",
+        )
+        guided, physics_engine = _resolve_session_backend(
+            params,
+            planned_path=[[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+        )
+
+        assert guided is False
+        assert physics_engine == "mujoco"
+
+    def test_vpp_resolved_path_carries_radii_in_meters(self):
+        import asyncio
+
+        from services.session_manager import SessionManager
+        from services.websocket_handler import SessionStartData, WebSocketHandler
+
+        params = SessionStartData(
+            phantom="case_001_vpp",
+            start_position=[0.173, -268.24, 291.25],
+            end_position=[-30.0, -268.6, 296.0],
+            smooth=False,
+        )
+
+        path, radii = asyncio.run(
+            WebSocketHandler(SessionManager())._resolve_session_path(params)
+        )
+
+        assert path is not None
+        assert radii is not None
+        assert len(path) == len(radii)
+        assert 0.0001 < min(radii) < max(radii) < 0.02
 
     def test_resolve_vpp_assets_dir(self):
         from services.navigation_engine import resolve_vpp_assets_dir

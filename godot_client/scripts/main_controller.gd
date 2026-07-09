@@ -12,12 +12,13 @@ extends Node3D
 # For a built-in phantom that ships its own entry + centerline (e.g.
 # segment_part), set phantom/target and leave start/end empty: the backend reads
 # the entry landmark and centerline.json from the phantom assets.
-@export var phantom: String = "aorta_tree"
-@export var target: String = "root"
+@export var phantom: String = "case_001_vpp"
+@export var target: String = "endpoints_1"
 @export var case_id: String = "case_001"
 ## LPS millimeters; leave empty for non-VPP (low_tort / segment_part) sessions.
-@export var start_position: Array = []
-@export var end_position: Array = []
+@export var start_position: Array = [0.173, -268.24, 291.25]
+@export var end_position: Array = [-975.65, -217.22, 250.32]
+@export var physics_engine: String = "newton_demo"
 
 # Surgical-view wall fade (meters). In the follow ("手术视图") view the vessel wall
 # is fully opaque within `surgical_fade_near` of the guidewire tip and fully
@@ -45,6 +46,7 @@ const MODELS: Array = [
 		"case_id": "case_001",
 		"start": [],
 		"end": [],
+		"physics_engine": "auto",
 	},
 	{
 		"name": "主动脉干 Aorta-Trunk",
@@ -53,6 +55,7 @@ const MODELS: Array = [
 		"case_id": "case_001",
 		"start": [],
 		"end": [],
+		"physics_engine": "mujoco",
 	},
 	{
 		"name": "主动脉树 Aorta-Tree",
@@ -61,6 +64,7 @@ const MODELS: Array = [
 		"case_id": "case_001",
 		"start": [],
 		"end": [],
+		"physics_engine": "mujoco",
 	},
 	{
 		"name": "全身体膜 Segment-Part",
@@ -69,6 +73,7 @@ const MODELS: Array = [
 		"case_id": "case_001",
 		"start": [],
 		"end": [],
+		"physics_engine": "auto",
 	},
 	{
 		"name": "局部血管空腔 VPP",
@@ -77,6 +82,25 @@ const MODELS: Array = [
 		"case_id": "case_001",
 		"start": [0.173, -268.24, 291.25],
 		"end": [-975.65, -217.22, 250.32],
+		"physics_engine": "newton_demo",
+	},
+	{
+		"name": "VPP MuJoCo Compare",
+		"phantom": "case_001_vpp",
+		"target": "endpoints_1",
+		"case_id": "case_001",
+		"start": [0.173, -268.24, 291.25],
+		"end": [-975.65, -217.22, 250.32],
+		"physics_engine": "mujoco",
+	},
+	{
+		"name": "VPP Guided Compare",
+		"phantom": "case_001_vpp",
+		"target": "endpoints_1",
+		"case_id": "case_001",
+		"start": [0.173, -268.24, 291.25],
+		"end": [-975.65, -217.22, 250.32],
+		"physics_engine": "guided",
 	},
 ]
 
@@ -213,10 +237,14 @@ func _ready() -> void:
 
 
 func _resolve_model_index(phantom_name: String) -> int:
+	var first_match := -1
 	for i in MODELS.size():
 		if str(MODELS[i].phantom) == phantom_name:
-			return i
-	return 0
+			if first_match < 0:
+				first_match = i
+			if str(MODELS[i].get("physics_engine", "auto")) == physics_engine:
+				return i
+	return first_match if first_match >= 0 else 0
 
 
 func _apply_model_config(cfg: Dictionary) -> void:
@@ -225,6 +253,7 @@ func _apply_model_config(cfg: Dictionary) -> void:
 	case_id = str(cfg.case_id)
 	start_position = (cfg.start as Array).duplicate()
 	end_position = (cfg.end as Array).duplicate()
+	physics_engine = str(cfg.get("physics_engine", "auto"))
 
 
 # Build the vessel mesh plus the renderers that share its coordinate frame
@@ -744,14 +773,17 @@ func _vessel_glb_candidates() -> Array:
 	# When the named GLB is missing (not yet imported in the Godot editor),
 	# _setup_vessel warns and renders no vessel rather than the wrong one.
 	var high: String
+	var native: String
 	var fallback: String
 	if phantom.ends_with("_vpp"):
+		native = "res://assets/models/blood_vessels_visual_native.glb"
 		high = "res://assets/models/blood_vessels_visual_high.glb"
 		fallback = "res://assets/models/blood_vessels.glb"
 	else:
+		native = "res://assets/models/%s_visual_native.glb" % phantom
 		high = "res://assets/models/%s_visual_high.glb" % phantom
 		fallback = "res://assets/models/%s.glb" % phantom
-	return [high, fallback]
+	return [native, high, fallback]
 
 
 func _setup_vessel() -> Node3D:
@@ -771,14 +803,20 @@ func _setup_vessel() -> Node3D:
 	if packed == null:
 		push_warning("Vessel GLB not found or not imported. Tried: %s. Run tools/export_godot_assets.py and open Godot once to import." % str(candidates))
 		return null
-	if candidates.size() > 1 and glb == str(candidates[1]):
-		push_warning("High-quality vessel GLB not imported; falling back to %s." % glb)
+	if candidates.size() > 1 and glb == str(candidates[candidates.size() - 1]):
+		push_warning("Native/high-quality vessel GLB not imported; falling back to %s." % glb)
+	if _is_debug_low_poly_phantom(phantom):
+		push_warning("%s is a debug low-poly phantom; use case_001_vpp or segment_part for surface relief QA." % phantom)
 	var vessel: Node3D = packed.instantiate()
 	_world.add_child(vessel)
 	var mesh_count := vessel.find_children("*", "MeshInstance3D", true, false).size()
-	print("[Main] vessel loaded, MeshInstance3D count=%d" % mesh_count)
+	print("[Main] vessel loaded from %s, MeshInstance3D count=%d" % [glb, mesh_count])
 	_apply_vessel_material(vessel)
 	return vessel
+
+
+func _is_debug_low_poly_phantom(name: String) -> bool:
+	return name in ["low_tort", "aorta_trunk", "aorta_tree"]
 
 
 func _apply_vessel_material(node: Node) -> void:
@@ -789,6 +827,9 @@ func _apply_vessel_material(node: Node) -> void:
 	# blooming rim — the tube boundary defines the structure instead of alpha
 	# stacking. Unshaded so it cannot clip to white from any camera angle.
 	_vessel_mat_overlay = _make_fresnel_material(false)
+	_vessel_mat_overlay.set_shader_parameter("relief_light_dir", Vector3(-0.35, 0.72, 0.59))
+	_vessel_mat_overlay.set_shader_parameter("relief_strength", 0.42)
+	_vessel_mat_overlay.set_shader_parameter("relief_shadow", 0.34)
 
 	# Interior material (endoscope): opaque so the lumen wall is visible from
 	# inside instead of see-through. Double-sided so Godot flips back-face
@@ -813,6 +854,9 @@ func _apply_vessel_material(node: Node) -> void:
 	_vessel_mat_surgical = _make_fresnel_material(true)
 	_vessel_mat_surgical.set_shader_parameter("fade_near", surgical_fade_near)
 	_vessel_mat_surgical.set_shader_parameter("fade_far", surgical_fade_far)
+	_vessel_mat_surgical.set_shader_parameter("relief_light_dir", Vector3(-0.35, 0.72, 0.59))
+	_vessel_mat_surgical.set_shader_parameter("relief_strength", 0.34)
+	_vessel_mat_surgical.set_shader_parameter("relief_shadow", 0.26)
 	_update_vessel_focus_tip(Vector3.ZERO, false)
 
 	_vessel_meshes = node.find_children("*", "MeshInstance3D", true, false)
@@ -855,6 +899,9 @@ func _make_fresnel_material(with_fade: bool) -> ShaderMaterial:
 		+ "uniform float core_alpha = 0.014;\n" \
 		+ "uniform float rim_alpha = 0.46;\n" \
 		+ "uniform float glow = 2.9;\n" \
+		+ "uniform vec3 relief_light_dir = vec3(-0.35, 0.72, 0.59);\n" \
+		+ "uniform float relief_strength = 0.42;\n" \
+		+ "uniform float relief_shadow = 0.34;\n" \
 		+ "uniform float cam_fade_near = 0.012;\n" \
 		+ "uniform float cam_fade_far = 0.045;\n" \
 		+ "uniform vec3 tip_world_pos;\n" \
@@ -873,8 +920,12 @@ func _make_fresnel_material(with_fade: bool) -> ShaderMaterial:
 		+ "	float focus = mix(1.0, 1.0 - smoothstep(focus_near, focus_far, distance(tip_world_pos, world_pos)), focus_enabled);\n" \
 		+ "	float focus_alpha = mix(focus_alpha_far, 1.0, focus);\n" \
 		+ "	float focus_emission = mix(focus_emission_far, 1.0, focus);\n" \
-		+ "	ALBEDO = mix(mix(core_color, back_wall_color, back), rim_color, rim);\n" \
-		+ "	EMISSION = rim_color * rim * glow * focus_emission;\n" \
+		+ "	vec3 n = normalize(NORMAL);\n" \
+		+ "	float lit = clamp(dot(n, normalize(relief_light_dir)) * 0.5 + 0.5, 0.0, 1.0);\n" \
+		+ "	float relief = mix(1.0 - relief_shadow, 1.0 + relief_strength, lit);\n" \
+		+ "	vec3 vessel_color = mix(mix(core_color, back_wall_color, back), rim_color, rim);\n" \
+		+ "	ALBEDO = vessel_color * relief;\n" \
+		+ "	EMISSION = rim_color * rim * glow * focus_emission * mix(0.72, 1.0, lit);\n" \
 		+ "	float cam_fade = smoothstep(cam_fade_near, cam_fade_far, distance(CAMERA_POSITION_WORLD, world_pos));\n" \
 		+ alpha_line \
 		+ "}\n"
@@ -954,6 +1005,7 @@ func _setup_network_and_input() -> void:
 	_ws.case_id = case_id
 	_ws.start_position = start_position
 	_ws.end_position = end_position
+	_ws.physics_engine = physics_engine
 	add_child(_ws)
 	_input = preload("res://scripts/input_handler.gd").new()
 	add_child(_input)
@@ -1391,14 +1443,15 @@ func _cycle_model() -> void:
 	_model_index = (_model_index + 1) % MODELS.size()
 	var cfg: Dictionary = MODELS[_model_index]
 	_apply_model_config(cfg)
-	print("[Main] switching model -> %s (phantom=%s)" % [cfg.name, phantom])
+	print("[Main] switching model -> %s (phantom=%s, physics_engine=%s)" % [
+		cfg.name, phantom, physics_engine])
 	_branch_targets = []
 	_branch_index = 0
 	_logged_first_batch = false
 	_path_waypoints = []
 	_disengage_autopilot()
 	_load_model_scene()
-	_ws.restart_session(phantom, target, case_id, start_position, end_position)
+	_ws.restart_session(phantom, target, case_id, start_position, end_position, physics_engine)
 	_session_id = "none"
 	_msg_count = 0
 	_last_msg = "model switch"

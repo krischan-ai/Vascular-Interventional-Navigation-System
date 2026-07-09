@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import heapq
+import json
 import math
 import time
 import uuid
@@ -24,6 +25,8 @@ class PathResult:
     smooth_waypoints: list[Node3D] | None = None
     smooth_length_mm: float | None = None
     max_curvature: float | None = None
+    radii: list[float] | None = None
+    smooth_radii: list[float] | None = None
 
     def as_dict(self) -> dict:
         result = {
@@ -37,6 +40,10 @@ class PathResult:
             result["smooth_waypoints"] = [list(p) for p in self.smooth_waypoints]
             result["smooth_length_mm"] = self.smooth_length_mm
             result["max_curvature"] = self.max_curvature
+        if self.radii is not None:
+            result["radii"] = [float(r) for r in self.radii]
+        if self.smooth_radii is not None:
+            result["smooth_radii"] = [float(r) for r in self.smooth_radii]
         return result
 
 
@@ -51,6 +58,9 @@ def euclidean(a: Sequence[float], b: Sequence[float]) -> float:
 class PathPlanner:
     def __init__(self, graph_path: str | Path | None = None) -> None:
         self.loader = GraphLoader(graph_path) if graph_path is not None else GraphLoader()
+        self._radii: dict[Node3D, float] = {}
+        if graph_path is not None:
+            self._load_radii_for_graph(Path(graph_path))
 
     @property
     def graph(self) -> Graph:
@@ -62,6 +72,7 @@ class PathPlanner:
 
     def load(self, graph_path: str | Path) -> None:
         self.loader.load(graph_path)
+        self._load_radii_for_graph(Path(graph_path))
 
     def find_nearest_node(self, position: Sequence[float]) -> Node3D:
         if not self.nodes:
@@ -103,16 +114,20 @@ class PathPlanner:
         smooth_waypoints = None
         smooth_length_mm = None
         max_curvature = None
+        radii = self._radii_for_waypoints(waypoints)
+        smooth_radii = None
 
         if smooth and len(waypoints) >= 4:
             smooth_result = self.smooth_path(
                 waypoints,
                 smoothing_factor=smooth_factor,
                 num_points=num_points,
+                radii=radii,
             )
             smooth_waypoints = smooth_result["waypoints"]
             smooth_length_mm = smooth_result["length_mm"]
             max_curvature = smooth_result["max_curvature"]
+            smooth_radii = smooth_result.get("radii")
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
 
@@ -128,6 +143,8 @@ class PathPlanner:
             smooth_waypoints=smooth_waypoints,
             smooth_length_mm=smooth_length_mm,
             max_curvature=max_curvature,
+            radii=radii,
+            smooth_radii=smooth_radii,
         )
 
     def smooth_path(
@@ -136,6 +153,7 @@ class PathPlanner:
         smoothing_factor: float = 0.0,
         num_points: int | None = None,
         degree: int = 3,
+        radii: Sequence[float] | None = None,
     ) -> dict:
         """Apply B-spline smoothing to a path.
 
@@ -164,11 +182,14 @@ class PathPlanner:
             )
 
         if cumulative_dist[-1] < 1e-10:
-            return {
+            result = {
                 "waypoints": [tuple(p) for p in points],
                 "length_mm": 0.0,
                 "max_curvature": 0.0,
             }
+            if radii is not None and len(radii) == len(waypoints):
+                result["radii"] = [float(r) for r in radii]
+            return result
 
         u = cumulative_dist / cumulative_dist[-1]
 
@@ -202,11 +223,16 @@ class PathPlanner:
 
         max_curvature = self._compute_max_curvature(tck, u_new)
 
-        return {
+        result = {
             "waypoints": smooth_waypoints,
             "length_mm": float(length_mm),
             "max_curvature": float(max_curvature),
         }
+        if radii is not None and len(radii) == len(waypoints):
+            result["radii"] = [
+                float(r) for r in np.interp(u_new, u, np.asarray(radii, dtype=np.float64))
+            ]
+        return result
 
     def _compute_max_curvature(self, tck, u_values: np.ndarray) -> float:
         """Compute maximum curvature along a B-spline curve."""
@@ -224,6 +250,38 @@ class PathPlanner:
                 curvatures.append(kappa)
 
         return max(curvatures) if curvatures else 0.0
+
+    def _load_radii_for_graph(self, graph_path: Path) -> None:
+        """Load optional per-node lumen radii next to ``graph.json``.
+
+        VPP stores graph coordinates and node radii in millimeters. The planner
+        keeps those native units; callers that convert waypoints to meters must
+        convert radii at the same boundary.
+        """
+        self._radii = {}
+        radii_path = graph_path.parent / "node_radii.json"
+        if not radii_path.is_file():
+            return
+        try:
+            raw = json.loads(radii_path.read_text(encoding="utf-8"))
+            radii = raw.get("radii", {}) if isinstance(raw, dict) else {}
+            if not isinstance(radii, dict):
+                return
+            self._radii = {
+                self.loader.node_for_key(key): float(value)
+                for key, value in radii.items()
+                if key in self.loader._key_to_node
+            }
+        except Exception:
+            self._radii = {}
+
+    def _radii_for_waypoints(self, waypoints: list[Node3D]) -> list[float] | None:
+        if not self._radii:
+            return None
+        values = [self._radii.get(point) for point in waypoints]
+        if any(value is None for value in values):
+            return None
+        return [float(value) for value in values]
 
     def _astar(self, start: Node3D, goal: Node3D) -> list[Node3D]:
         frontier: list[tuple[float, int, Node3D]] = []

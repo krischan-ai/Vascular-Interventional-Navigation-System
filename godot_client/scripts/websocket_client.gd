@@ -30,6 +30,7 @@ signal shape_intent_received(result: Dictionary)      ## shape_intent echo {acti
 @export var start_position: Array = []
 @export var end_position: Array = []
 @export var smooth: bool = true
+@export var physics_engine: String = "newton_demo"
 # Kinematic centerline-follow: drive the guidewire along the planned path so it
 # reliably reaches the target on full-length VPP vessels. Only takes effect when
 # a path is planned (low_tort sessions stay physics-driven regardless).
@@ -115,6 +116,7 @@ func _build_session_start() -> Dictionary:
 		"n_bodies": n_bodies,
 		"n_substeps": n_substeps,
 		"case_id": case_id,
+		"physics_engine": physics_engine,
 	}
 	# Request server-side path planning + entry alignment only when a VPP route
 	# is configured; low_tort sessions omit these and spawn near the origin.
@@ -256,7 +258,7 @@ func send_select_route(target: String) -> void:
 ## fresh session_start (it auto-sends whenever session_id is empty). The backend
 ## handles session_stop before session_start in message order on the same socket.
 func restart_session(new_phantom: String, new_target: String, new_case_id: String,
-		new_start: Array, new_end: Array) -> void:
+		new_start: Array, new_end: Array, new_physics_engine: String = "auto") -> void:
 	if session_id != "":
 		_send("session_stop", {})
 	phantom = new_phantom
@@ -264,6 +266,7 @@ func restart_session(new_phantom: String, new_target: String, new_case_id: Strin
 	case_id = new_case_id
 	start_position = new_start
 	end_position = new_end
+	physics_engine = new_physics_engine
 	# Reset handshake + lock-step state so _process resends session_start.
 	session_id = ""
 	_session_attempts = 0

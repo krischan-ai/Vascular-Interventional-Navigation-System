@@ -79,9 +79,11 @@ class SessionManager:
         use_pixels: bool = False,
         assets_dir: str | None = None,
         planned_path=None,
+        planned_radii=None,
         n_bodies: int = 80,
         n_substeps: int | None = None,
         guided: bool = False,
+        physics_engine: str | None = None,
         route_target: str | None = None,
     ) -> tuple[str, NavigationState]:
         """Create a new navigation session.
@@ -117,9 +119,11 @@ class SessionManager:
                 use_pixels=use_pixels,
                 assets_dir=assets_dir,
                 planned_path=planned_path,
+                planned_radii=planned_radii,
                 n_bodies=n_bodies,
                 n_substeps=n_substeps,
                 guided=guided,
+                physics_engine=physics_engine,
                 route_target=route_target,
             )
 

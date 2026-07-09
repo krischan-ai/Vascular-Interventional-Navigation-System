@@ -181,6 +181,7 @@ class NavigationEngine:
         image_size: int = 80,
         assets_dir: str = None,
         planned_path: Sequence[Sequence[float]] | None = None,
+        planned_radii: Sequence[float] | None = None,
         n_bodies: int = 80,
         n_substeps: int | None = None,
         insertion_max: float = 0.2,
@@ -189,6 +190,7 @@ class NavigationEngine:
         entry_point: Sequence[float] | None = None,
         entry_direction: Sequence[float] | None = None,
         guided: bool = False,
+        physics_engine: str | None = None,
         advance_per_step: float = 0.01,
         wire_length: float = 0.12,
         wall_lean: float = 0.0025,
@@ -206,6 +208,9 @@ class NavigationEngine:
             planned_path: Optional planned path as a list of [x, y, z] points in
                           MuJoCo meters. When provided, path_progress and
                           path_deviation are computed each step.
+            planned_radii: Optional lumen radii in meters, one per planned-path
+                          point. Consumed by NewtonEngine to build the same
+                          variable-radius wall used by aorta_tree routes.
             n_bodies: Number of guidewire segments. Fewer segments greatly reduce
                       per-step cost (fewer contacts/DOFs) for interactive use.
             n_substeps: Physics substeps per control step. Fewer is faster; None
@@ -229,6 +234,10 @@ class NavigationEngine:
                     the route and it reliably reaches the target. Required for
                     full-length VPP vessels (path ~1.1m) that the physical
                     guidewire (~0.08m, 0.2m insertion cap) cannot traverse.
+            physics_engine: Optional backend override. ``auto``/None preserves
+                    the legacy selection, ``guided`` forces kinematic
+                    centerline-follow, ``mujoco`` forces MuJoCo physics, and
+                    ``newton_demo`` selects the experimental VPP Newton wall.
             advance_per_step: Arc-length advanced per unit push in guided mode
                               (meters). delta_push=1.0 advances this much.
             wire_length: Legacy trailing-length hint for guided rendering; the
@@ -263,6 +272,7 @@ class NavigationEngine:
 
         # Guided (kinematic centerline-follow) configuration.
         self._guided = bool(guided)
+        self._physics_engine = physics_engine
         self._advance_per_step = float(advance_per_step)
         self._wire_length = float(wire_length)
         self._wall_lean = float(wall_lean)
@@ -295,7 +305,7 @@ class NavigationEngine:
         self._routes: dict | None = self._load_phantom_routes()
 
         if planned_path is not None:
-            self.set_planned_path(planned_path)
+            self.set_planned_path(planned_path, radii=planned_radii)
         else:
             default_path = self._route_waypoints(route_target)
             default_radii = self._route_radii(route_target) if default_path is not None else None
@@ -324,6 +334,7 @@ class NavigationEngine:
             entry_direction=entry_dir,
             advance_per_step=self._advance_per_step,
             wall_lean=self._wall_lean,
+            engine_mode=self._physics_engine,
         )
 
     def _default_centerline_points(self) -> list[list[float]] | None:
@@ -401,13 +412,14 @@ class NavigationEngine:
         Returns None when absent (single-route phantoms use centerline.json).
         """
         if self.assets_dir is not None:
-            return None
-        routes_path = (
-            _SRC_DIR
-            / "cathsim/dm/components/phantom_assets/meshes"
-            / self.phantom
-            / "routes.json"
-        )
+            routes_path = Path(self.assets_dir).resolve().parent / "derived" / "routes.json"
+        else:
+            routes_path = (
+                _SRC_DIR
+                / "cathsim/dm/components/phantom_assets/meshes"
+                / self.phantom
+                / "routes.json"
+            )
         if not routes_path.is_file():
             return None
         try:

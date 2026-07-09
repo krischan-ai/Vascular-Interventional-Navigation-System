@@ -80,6 +80,31 @@ def validate_radii(path: Path, graph_path: Path) -> dict[str, Any]:
     }
 
 
+def validate_routes(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as file_obj:
+        data = json.load(file_obj)
+    routes = data.get("routes", {}) if isinstance(data, dict) else {}
+    if not isinstance(routes, dict):
+        raise ValueError("routes.json must contain a routes object")
+    with_radii = 0
+    route_lengths = []
+    for route_id, route in routes.items():
+        waypoints = route.get("waypoints")
+        if not isinstance(waypoints, list) or len(waypoints) < 1:
+            raise ValueError(f"Route {route_id!r} has no waypoints")
+        radii = route.get("radius_m")
+        if isinstance(radii, list):
+            if len(radii) != len(waypoints):
+                raise ValueError(f"Route {route_id!r} radius count != waypoint count")
+            with_radii += 1
+        route_lengths.append(float(route.get("length_m", 0.0)))
+    return {
+        "routes": len(routes),
+        "routes_with_radii": with_radii,
+        "max_length_m": max(route_lengths) if route_lengths else None,
+    }
+
+
 def count_fcsv_points(path: Path) -> int:
     count = 0
     with path.open("r", encoding="utf-8") as file_obj:
@@ -104,6 +129,7 @@ def validate_case(case_dir: Path) -> dict[str, Any]:
 
     graph_path = case_dir / "graph/graph.json"
     radii_path = case_dir / "graph/node_radii.json"
+    routes_path = case_dir / "derived/routes.json"
 
     result = {
         "case_dir": str(case_dir),
@@ -116,6 +142,7 @@ def validate_case(case_dir: Path) -> dict[str, Any]:
         },
         "derived": {
             "targets_exists": (case_dir / "derived/targets.json").is_file(),
+            "routes": validate_routes(routes_path) if routes_path.is_file() else None,
         },
     }
     return result

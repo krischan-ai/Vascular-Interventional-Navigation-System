@@ -23,10 +23,14 @@ def test_quality_defaults_and_output_names():
 
     visual = parser.parse_args([])
     preview = parser.parse_args(["--quality", "preview"])
+    native = parser.parse_args(["--quality", "visual_native"])
 
     assert visual.quality == "visual_high"
+    assert native.quality == "visual_native"
+    assert export_godot_assets.default_max_faces(native.quality) == 1_000_000_000
     assert export_godot_assets.default_max_faces(visual.quality) == 300000
     assert export_godot_assets.default_max_faces(preview.quality) == 120000
+    assert export_godot_assets.output_stem("blood_vessels", "visual_native") == "blood_vessels_visual_native"
     assert export_godot_assets.output_stem("blood_vessels", "visual_high") == "blood_vessels_visual_high"
     assert export_godot_assets.output_stem("segment_part", "preview") == "segment_part_preview"
 

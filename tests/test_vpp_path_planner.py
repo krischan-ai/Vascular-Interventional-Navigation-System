@@ -4,6 +4,7 @@ import pytest
 
 from services.graph_loader import GraphLoader
 from services.path_planner import PathPlanner
+from tools.build_vpp_routes import build_routes
 
 
 def write_graph(path):
@@ -32,6 +33,17 @@ def write_longer_graph(path):
             neighbors.append([next_key, 1.118])
         graph[key] = neighbors
     path.write_text(json.dumps(graph), encoding="utf-8")
+
+
+def write_node_radii(path, count):
+    radii = {}
+    for i in range(count):
+        key = f"{float(i):.6f},0.000000,{float(i * 0.5):.6f}"
+        radii[key] = 1.0 + i * 0.1
+    path.write_text(
+        json.dumps({"n_nodes": count, "method": "test", "radii": radii}),
+        encoding="utf-8",
+    )
 
 
 def test_graph_loader_parses_vpp_adjacency(tmp_path):
@@ -197,3 +209,70 @@ class TestBSplineSmoothing:
         assert "smooth_length_mm" in result_dict
         assert "max_curvature" in result_dict
         assert len(result_dict["smooth_waypoints"]) > 0
+
+    def test_plan_carries_node_radii(self, tmp_path):
+        graph_path = tmp_path / "graph.json"
+        write_longer_graph(graph_path)
+        write_node_radii(tmp_path / "node_radii.json", 10)
+
+        result = PathPlanner(graph_path).plan(
+            (0.0, 0.0, 0.0),
+            (9.0, 0.0, 4.5),
+            smooth=False,
+        )
+
+        assert result.radii is not None
+        assert len(result.radii) == len(result.waypoints)
+        assert result.radii[0] == pytest.approx(1.0)
+        assert result.radii[-1] == pytest.approx(1.9)
+        assert result.as_dict()["radii"] == pytest.approx(result.radii)
+
+    def test_smooth_plan_interpolates_node_radii(self, tmp_path):
+        graph_path = tmp_path / "graph.json"
+        write_longer_graph(graph_path)
+        write_node_radii(tmp_path / "node_radii.json", 10)
+
+        result = PathPlanner(graph_path).plan(
+            (0.0, 0.0, 0.0),
+            (9.0, 0.0, 4.5),
+            smooth=True,
+            num_points=25,
+        )
+
+        assert result.smooth_waypoints is not None
+        assert result.smooth_radii is not None
+        assert len(result.smooth_radii) == len(result.smooth_waypoints)
+        assert result.smooth_radii[0] == pytest.approx(result.radii[0])
+        assert result.smooth_radii[-1] == pytest.approx(result.radii[-1])
+        assert len(result.as_dict()["smooth_radii"]) == len(result.smooth_waypoints)
+
+
+def test_build_vpp_routes_cache(tmp_path):
+    case_dir = tmp_path / "case_x"
+    graph_dir = case_dir / "graph"
+    derived_dir = case_dir / "derived"
+    graph_dir.mkdir(parents=True)
+    derived_dir.mkdir(parents=True)
+    write_longer_graph(graph_dir / "graph.json")
+    write_node_radii(graph_dir / "node_radii.json", 10)
+    targets = {
+        "case_id": "case_x",
+        "coordinate_system": "LPS",
+        "unit": "mm",
+        "endpoints": {
+            "Endpoints-24": {"id": "24", "position_lps": [0.0, 0.0, 0.0]},
+            "Endpoints-1": {"id": "1", "position_lps": [9.0, 0.0, 4.5]},
+        },
+    }
+    (derived_dir / "targets.json").write_text(json.dumps(targets), encoding="utf-8")
+
+    out = build_routes(case_dir, smooth=True, smooth_factor=0.5)
+    data = json.loads(out.read_text(encoding="utf-8"))
+    route = data["routes"]["endpoints_1"]
+
+    assert data["phantom"] == "case_x_vpp"
+    assert data["unit"] == "m"
+    assert len(data["routes"]) == 2
+    assert len(route["waypoints"]) == len(route["radius_m"])
+    assert route["length_m"] > 0.0
+    assert route["target"] == pytest.approx([0.009, 0.0, 0.0045], abs=0.001)

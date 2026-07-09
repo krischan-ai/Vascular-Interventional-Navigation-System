@@ -9,6 +9,7 @@ frame) without any coordinate conversion.
 
 Usage:
     python tools/export_godot_assets.py [--case-id CASE_ID] [--quality visual_high]
+    python tools/export_godot_assets.py [--case-id CASE_ID] [--quality visual_native]
 """
 
 from __future__ import annotations
@@ -27,11 +28,13 @@ PHANTOM_MESH_ROOT = (
     PROJECT_ROOT / "src" / "cathsim" / "dm" / "components" / "phantom_assets" / "meshes"
 )
 
-Quality = Literal["visual_high", "preview"]
+Quality = Literal["visual_native", "visual_high", "preview"]
 
 
 def default_max_faces(quality: Quality) -> int:
     """Face budget for a quality preset."""
+    if quality == "visual_native":
+        return 1_000_000_000
     return 300000 if quality == "visual_high" else 120000
 
 
@@ -185,7 +188,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--case-id", default="case_001")
     parser.add_argument(
         "--quality",
-        choices=("visual_high", "preview"),
+        choices=("visual_native", "visual_high", "preview"),
         default="visual_high",
         help="Output quality preset and filename suffix",
     )
@@ -219,12 +222,13 @@ def main() -> None:
     parser = build_arg_parser()
     args = parser.parse_args()
     max_faces = args.max_faces or default_max_faces(args.quality)
+    no_decimate = args.no_decimate or args.quality == "visual_native"
     if args.phantom:
         export_cathsim_phantom(
             args.phantom,
             args.quality,
             max_faces,
-            args.no_decimate,
+            no_decimate,
             args.smooth_normals,
             args.taubin_smooth_iter,
         )
@@ -233,7 +237,7 @@ def main() -> None:
             args.case_id,
             args.quality,
             max_faces,
-            args.no_decimate,
+            no_decimate,
             args.smooth_normals,
             args.taubin_smooth_iter,
         )

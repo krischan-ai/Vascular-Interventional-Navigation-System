@@ -42,6 +42,12 @@ def test_hud_uses_backend_dashboard_fields():
     assert '"02:35"' not in hud
     assert '"18 ms"' not in hud
     assert "blood_vessels_visual_high.glb" in main
+    assert "blood_vessels_visual_native.glb" in main
+    assert "%s_visual_native.glb" in main
+    assert '@export var phantom: String = "case_001_vpp"' in main
+    assert '@export var target: String = "endpoints_1"' in main
+    assert "func _is_debug_low_poly_phantom" in main
+    assert "debug low-poly phantom" in main
     assert "enum OrbitPreset { CLINICAL, TREE }" in main
     assert "Clinical Orbit" in main
     assert "Tree Overview" in main
@@ -55,6 +61,10 @@ def test_hud_uses_backend_dashboard_fields():
     assert "_update_vessel_focus_tip(tip_world, true)" in main
     assert "rim_alpha = 0.46" in main
     assert "core_alpha = 0.014" in main
+    assert "relief_light_dir" in main
+    assert "relief_strength" in main
+    assert "relief_shadow" in main
+    assert "vessel loaded from %s" in main
     assert "func clear_forced_ranges" in path
     assert "var _risk_ranges" not in path
     assert "_curvature_hint" in path

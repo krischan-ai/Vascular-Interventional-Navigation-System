@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field, ValidationError
@@ -26,9 +26,10 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _DATA_ROOT = _PROJECT_ROOT / "data" / "vpp_assets"
 
 # Built-in sealed-lumen phantoms can run physical backends despite shipping a
-# centerline. Other centerline phantoms default to kinematic guidance unless an
-# explicit engine override (Newton demo) is active.
-_PHYSICS_CAPABLE_BUILTIN: frozenset[str] = frozenset({"aorta_trunk"})
+# centerline/routes. Other centerline phantoms default to kinematic guidance
+# unless an explicit engine override is active.
+_PHYSICS_CAPABLE_BUILTIN: frozenset[str] = frozenset({"aorta_trunk", "aorta_tree"})
+PhysicsEngineMode = Literal["auto", "guided", "mujoco", "physics", "newton", "newton_demo"]
 
 
 def _builtin_phantom_centerline(phantom: str) -> Path | None:
@@ -46,6 +47,33 @@ def _builtin_phantom_centerline(phantom: str) -> Path | None:
         / "centerline.json"
     )
     return centerline if centerline.is_file() else None
+
+
+def _resolve_session_backend(
+    params: "SessionStartData",
+    planned_path: list[list[float]] | None,
+) -> tuple[bool, str]:
+    """Resolve guided flag plus concrete backend override for session creation."""
+    requested = params.physics_engine.lower()
+    if requested == "guided":
+        return True, "guided"
+    if requested in {"mujoco", "physics", "newton", "newton_demo"}:
+        return False, requested
+
+    env_mode = os.environ.get("CATHSIM_PHYSICS_ENGINE", "").lower()
+    if env_mode in {"newton", "newton_demo"}:
+        return False, env_mode
+
+    ships_centerline = _builtin_phantom_centerline(params.phantom) is not None
+    force_guided_builtin = (
+        ships_centerline and params.phantom not in _PHYSICS_CAPABLE_BUILTIN
+    )
+    guided = (
+        params.guided
+        or (planned_path is not None and params.phantom.endswith("_vpp"))
+        or force_guided_builtin
+    )
+    return guided, "auto"
 
 
 @lru_cache(maxsize=8)
@@ -133,6 +161,11 @@ class SessionStartData(BaseModel):
     # path so it reliably reaches the target on full-length VPP vessels that the
     # physical guidewire cannot traverse. Auto-enabled for VPP routes below.
     guided: bool = False
+    # Backend override for VPP development. ``auto`` preserves the current
+    # defaults, ``guided`` forces centerline-follow, ``mujoco``/``physics`` forces
+    # the MuJoCo backend, and ``newton_demo`` selects the experimental native
+    # VPP lumen-wall backend.
+    physics_engine: PhysicsEngineMode = "auto"
     # Initial branch route id (e.g. "endpoint_24") for multi-branch phantoms that
     # ship routes.json (aorta_tree). None -> the shipped primary centerline.
     route_target: str | None = None
@@ -356,29 +389,15 @@ class WebSocketHandler:
             return
 
         try:
-            planned_path = await self._resolve_session_path(params)
+            planned_path, planned_radii = await self._resolve_session_path(params)
         except (FileNotFoundError, ValueError) as e:
             await self._send_error(conn_state, "PATH_NOT_FOUND", str(e))
             return
 
-        # Full-length vessels the physical guidewire cannot traverse default to
-        # kinematic centerline-follow. Sealed built-ins and explicit Newton demo
-        # runs must remain physical so the selected backend actually owns motion.
-        ships_centerline = _builtin_phantom_centerline(params.phantom) is not None
-        force_guided_builtin = (
-            ships_centerline and params.phantom not in _PHYSICS_CAPABLE_BUILTIN
-        )
-        guided = (
-            params.guided
-            or (planned_path is not None and params.phantom.endswith("_vpp"))
-            or force_guided_builtin
-        )
-        newton_demo = os.environ.get("CATHSIM_PHYSICS_ENGINE", "").lower() in {
-            "newton",
-            "newton_demo",
-        }
-        if newton_demo:
-            guided = False
+        # Full-length VPP/centerline vessels still default to kinematic guidance,
+        # but VPP development can now explicitly request MuJoCo or Newton so real
+        # backend motion owns the session.
+        guided, physics_engine = _resolve_session_backend(params, planned_path)
 
         try:
             session_id, state = await self._run_blocking(
@@ -389,7 +408,9 @@ class WebSocketHandler:
                 n_bodies=params.n_bodies,
                 n_substeps=params.n_substeps,
                 planned_path=planned_path,
+                planned_radii=planned_radii,
                 guided=guided,
+                physics_engine=physics_engine,
                 route_target=params.route_target,
             )
             conn_state.session_id = session_id
@@ -405,6 +426,10 @@ class WebSocketHandler:
                 data={
                     "phantom": params.phantom,
                     "target": params.target,
+                    "guided": guided,
+                    "physics_engine": physics_engine,
+                    "engine": type(engine._engine).__name__,
+                    "fidelity_mode": state.fidelity_mode,
                     "state": self._state_to_dict(state),
                     "routes": engine.available_routes,
                 },
@@ -418,7 +443,7 @@ class WebSocketHandler:
 
     async def _resolve_session_path(
         self, params: SessionStartData
-    ) -> list[list[float]] | None:
+    ) -> tuple[list[list[float]] | None, list[float] | None]:
         """Resolve the planned path (MuJoCo meters) for a navigation session.
 
         An explicit ``planned_path`` is used as-is. Otherwise, when both
@@ -427,10 +452,10 @@ class WebSocketHandler:
         path is requested (e.g. plain low_tort sessions).
         """
         if params.planned_path is not None:
-            return params.planned_path
+            return params.planned_path, None
 
         if params.start_position is None or params.end_position is None:
-            return None
+            return None, None
 
         planner = _get_path_planner(params.case_id)
         result = await self._run_blocking(
@@ -440,10 +465,17 @@ class WebSocketHandler:
             smooth=params.smooth,
             smooth_factor=params.smooth_factor,
         )
-        waypoints = result.smooth_waypoints or result.waypoints
+        if result.smooth_waypoints is not None:
+            waypoints = result.smooth_waypoints
+            radii = result.smooth_radii
+        else:
+            waypoints = result.waypoints
+            radii = result.radii
         # Graph/planner coordinates are LPS millimeters; the MuJoCo phantom frame
         # is meters (V-HACD applied a /1000 scale with no axis change).
-        return [[c / 1000.0 for c in point] for point in waypoints]
+        path_m = [[c / 1000.0 for c in point] for point in waypoints]
+        radii_m = [r / 1000.0 for r in radii] if radii is not None else None
+        return path_m, radii_m
 
     async def _handle_session_stop(self, conn_state: ConnectionState) -> None:
         """Handle session_stop message."""

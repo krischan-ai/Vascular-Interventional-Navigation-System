@@ -189,6 +189,36 @@ class TestMakeEngine:
         engine = make_engine(guided=True, path=degenerate, phantom="x", target="y")
         assert isinstance(engine, MuJoCoEngine)
 
+    def test_mujoco_mode_overrides_guided(self):
+        engine = make_engine(
+            guided=True,
+            path=PlannedPath(STRAIGHT_PATH),
+            phantom="x",
+            target="y",
+            engine_mode="mujoco",
+        )
+        assert isinstance(engine, MuJoCoEngine)
+
+    def test_guided_mode_overrides_physics(self):
+        engine = make_engine(
+            guided=False,
+            path=PlannedPath(STRAIGHT_PATH),
+            phantom="x",
+            target="y",
+            engine_mode="guided",
+        )
+        assert isinstance(engine, KinematicEngine)
+
+    def test_unknown_engine_mode_is_rejected(self):
+        with pytest.raises(ValueError):
+            make_engine(
+                guided=False,
+                path=PlannedPath(STRAIGHT_PATH),
+                phantom="x",
+                target="y",
+                engine_mode="bogus",
+            )
+
 
 # ---------------------------------------------------------------------------
 # PlannedPath geometry

@@ -34,6 +34,7 @@ def make_engine(
     entry_direction: Sequence[float] | None = None,
     advance_per_step: float = 0.01,
     wall_lean: float = 0.0025,
+    engine_mode: str | None = None,
 ) -> PhysicsEngine:
     """Construct the appropriate physics backend.
 
@@ -42,7 +43,11 @@ def make_engine(
     physical MuJoCo simulation is used. This mirrors the pre-refactor
     ``_is_guided()`` gate so ``guided=True`` without a path falls back to physics.
     """
-    if os.environ.get("CATHSIM_PHYSICS_ENGINE", "").lower() in {"newton", "newton_demo"}:
+    requested = (engine_mode or "auto").lower()
+    if requested == "auto":
+        requested = os.environ.get("CATHSIM_PHYSICS_ENGINE", "").lower() or "auto"
+
+    if requested in {"newton", "newton_demo"}:
         from services.physics.newton_engine import NewtonEngine
 
         return NewtonEngine(
@@ -51,6 +56,13 @@ def make_engine(
             entry_point=entry_point,
             entry_direction=entry_direction,
         )
+
+    if requested in {"mujoco", "physics"}:
+        guided = False
+    elif requested in {"guided", "kinematic"}:
+        guided = True
+    elif requested != "auto":
+        raise ValueError(f"Unknown physics engine mode: {engine_mode!r}")
 
     if guided and path is not None and path.total_len > 0.0:
         return KinematicEngine(
