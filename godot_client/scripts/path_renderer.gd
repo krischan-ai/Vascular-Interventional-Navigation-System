@@ -23,6 +23,10 @@ extends Node3D
 @export var color_safe: Color = Color(0.85, 0.95, 1.0)    # 骞崇洿娈?鐧介潚
 @export var color_warn: Color = Color(1.0, 0.83, 0.28)    # medium curvature: amber
 @export var color_high_curvature: Color = Color(1.0, 0.62, 0.42)  # high curvature: warm hint
+@export var safety_color_safe: Color = Color(1.0, 1.0, 1.0)
+@export var safety_color_warning: Color = Color(1.0, 0.82, 0.20)
+@export var safety_color_stop: Color = Color(1.0, 0.18, 0.14)
+@export var safety_color_stale: Color = Color(0.42, 0.45, 0.48)
 # Curvature (1/m) that maps to the warm endpoint; smaller = the ramp saturates earlier.
 @export var curvature_red: float = 120.0
 # Radius by view. Overview/follow see the route from outside, so the line must be
@@ -52,6 +56,9 @@ var _path_radius: float = 0.00055    # active radius (set_endoscope swaps)
 var _endoscope: bool = false
 var _drawn_count: int = -1
 var _drawn_signature: String = ""
+var _visual_level: String = "stale"
+var _visual_score: float = 0.0
+var _visual_stale: bool = true
 
 
 func _ready() -> void:
@@ -103,6 +110,22 @@ func set_progress(p: float) -> void:
 	_material.set_shader_parameter("progress", clampf(p, 0.0, 1.0))
 
 
+## Source-backed safety visual state. Missing mechanics data intentionally maps to
+## stale gray, not to safe white; the path never infers safety from curvature.
+func set_visual_state(level: String, score: float = 0.0, stale: bool = false) -> void:
+	var next_level := level.to_lower()
+	if stale or next_level == "":
+		next_level = "stale"
+	var next_score := clampf(score, 0.0, 1.0)
+	if next_level == _visual_level and is_equal_approx(next_score, _visual_score) and stale == _visual_stale:
+		return
+	_visual_level = next_level
+	_visual_score = next_score
+	_visual_stale = stale
+	if _points.size() >= 2:
+		_build_tube(_points, _path_radius)
+
+
 ## Legacy compatibility entry point. Forced route ranges are intentionally ignored:
 ## real spatial risks must arrive through backend `risk_regions` and the dedicated
 ## risk renderer, not as path-index color overrides.
@@ -131,6 +154,7 @@ func set_endoscope(thin: bool) -> void:
 
 
 func update_from_batch(batch: Dictionary) -> void:
+	_update_visual_state_from_safety(batch.get("safety", {}) as Dictionary)
 	var path: Dictionary = batch.get("path", {})
 	if path.has("progress"):
 		set_progress(float(path.get("progress", 0.0)))
@@ -205,11 +229,41 @@ func _compute_curvature_hint(points: PackedVector3Array) -> PackedFloat32Array:
 	return out
 
 
-# White-cyan -> yellow -> warm-orange heat ramp for a curvature hint value.
+func _update_visual_state_from_safety(safety: Dictionary) -> void:
+	var mechanics: Variant = safety.get("guidewire_mechanics", {})
+	if typeof(mechanics) != TYPE_DICTIONARY or (mechanics as Dictionary).is_empty():
+		set_visual_state("stale", 0.0, true)
+		return
+	var mech := mechanics as Dictionary
+	var level := str(mech.get("safety_level", "stale"))
+	var score := float(mech.get("risk_score", 0.0))
+	var wall_distance := float(mech.get("wall_distance_m", safety.get("wall_distance", 0.0)))
+	if bool(mech.get("stop_required", false)):
+		level = "stop"
+	elif score >= 0.75:
+		level = "danger"
+	elif score >= 0.35:
+		level = "warning"
+	elif wall_distance > 0.0 and wall_distance < 0.0008:
+		level = "danger"
+	elif wall_distance > 0.0 and wall_distance < 0.0015:
+		level = "warning"
+	elif level != "stale":
+		level = "safe"
+	set_visual_state(level, score, false)
+
+# Safety state overrides route curvature: curvature is a readability cue only,
+# while safety color must come from source-backed guidewire mechanics.
 func _gradient(d: float) -> Color:
-	if d < 0.5:
-		return color_safe.lerp(color_warn, d * 2.0)
-	return color_warn.lerp(color_high_curvature, (d - 0.5) * 2.0)
+	match _visual_level:
+		"safe":
+			return safety_color_safe
+		"warning":
+			return safety_color_warning.lerp(safety_color_stop, maxf(0.0, _visual_score - 0.75) * 4.0)
+		"danger", "stop":
+			return safety_color_stop
+		_:
+			return safety_color_stale
 
 
 func _build_tube(points: PackedVector3Array, radius: float) -> void:

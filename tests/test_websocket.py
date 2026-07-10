@@ -113,6 +113,15 @@ class TestWebSocketHandlerUnit:
             vessel_radius=0.004,
             eta_seconds=3.0,
             risk_score=0.2,
+            risk_assessment={
+                "metrics": {
+                    "wall_distance": {"level": "WARNING"},
+                    "curvature": {"level": "SAFE"},
+                }
+            },
+            contact_force=0.12,
+            wall_distance=0.0012,
+            safety_status="DANGER_WARNING",
             fidelity_mode="physics",
         )
         batch = WebSocketHandler(SessionManager())._state_to_batch(state, DummyEngine())
@@ -123,9 +132,138 @@ class TestWebSocketHandlerUnit:
         assert batch["path"]["eta_seconds"] == 3.0
         assert batch["safety"]["risk_score"] == 0.2
         assert batch["safety"]["risk_regions"] == []
+        assert batch["schema_version"] == "navigation_visual_v2"
+        assert isinstance(batch["timestamp_ms"], int)
+        mechanics = batch["safety"]["guidewire_mechanics"]
+        assert mechanics["source"] == "navigation_engine.risk_assessor"
+        assert mechanics["tip_force_n"] == 0.12
+        assert mechanics["wall_distance_m"] == 0.0012
+        assert mechanics["lateral_force_n"] is None
+        assert mechanics["torque_nm"] is None
+        assert mechanics["safety_level"] == "warning"
+        assert mechanics["stop_required"] is False
+        assert mechanics["reason_codes"] == ["WALL_DISTANCE_WARNING"]
         assert batch["engine"] == "DummyBackend"
         assert batch["diagnostics"]["drive"] == "force"
         assert batch["diagnostics"]["slack_m"] == 0.002
+
+    def test_state_batch_visual_level_uses_real_risk_level_before_stop(self):
+        from services.navigation_engine import NavigationState
+        from services.session_manager import SessionManager
+        from services.websocket_handler import WebSocketHandler
+
+        class DummyEngine:
+            _engine = None
+            planned_path = []
+            entry_pose = {}
+
+            def get_render_bodies(self):
+                return []
+
+        state = NavigationState(
+            risk_score=0.92,
+            risk_assessment={
+                "risk_level": "CRITICAL",
+                "metrics": {
+                    "wall_distance": {"level": "CRITICAL"},
+                },
+            },
+            safety_status="SAFE_NAV",
+        )
+
+        batch = WebSocketHandler(SessionManager())._state_to_batch(state, DummyEngine())
+        mechanics = batch["safety"]["guidewire_mechanics"]
+
+        assert mechanics["safety_level"] == "danger"
+        assert mechanics["stop_required"] is False
+        assert mechanics["reason_codes"] == ["WALL_DISTANCE_CRITICAL"]
+
+    def test_state_batch_visual_level_uses_real_risk_score_bands(self):
+        from services.navigation_engine import NavigationState
+        from services.session_manager import SessionManager
+        from services.websocket_handler import WebSocketHandler
+
+        class DummyEngine:
+            _engine = None
+            planned_path = []
+            entry_pose = {}
+
+            def get_render_bodies(self):
+                return []
+
+        handler = WebSocketHandler(SessionManager())
+
+        medium = NavigationState(
+            risk_score=0.4,
+            risk_assessment={"risk_level": "SAFE", "metrics": {}},
+            wall_distance=0.002,
+            safety_status="SAFE_NAV",
+        )
+        normal = NavigationState(
+            risk_score=0.1,
+            risk_assessment={"risk_level": "SAFE", "metrics": {}},
+            wall_distance=0.002,
+            safety_status="SAFE_NAV",
+        )
+
+        medium_batch = handler._state_to_batch(medium, DummyEngine())
+        normal_batch = handler._state_to_batch(normal, DummyEngine())
+
+        assert medium_batch["safety"]["guidewire_mechanics"]["safety_level"] == "warning"
+        assert normal_batch["safety"]["guidewire_mechanics"]["safety_level"] == "safe"
+
+    def test_state_batch_visual_level_recovers_when_risk_score_is_normal(self):
+        from services.navigation_engine import NavigationState
+        from services.session_manager import SessionManager
+        from services.websocket_handler import WebSocketHandler
+
+        class DummyEngine:
+            _engine = None
+            planned_path = []
+            entry_pose = {}
+
+            def get_render_bodies(self):
+                return []
+
+        state = NavigationState(
+            risk_score=0.0,
+            wall_distance=0.002,
+            risk_assessment={
+                "risk_level": "CRITICAL",
+                "metrics": {
+                    "wall_distance": {"level": "CRITICAL"},
+                },
+            },
+            safety_status="SAFE_NAV",
+        )
+
+        batch = WebSocketHandler(SessionManager())._state_to_batch(state, DummyEngine())
+
+        assert batch["safety"]["guidewire_mechanics"]["safety_level"] == "safe"
+
+    def test_state_batch_visual_level_uses_real_wall_distance_bands(self):
+        from services.navigation_engine import NavigationState
+        from services.session_manager import SessionManager
+        from services.websocket_handler import WebSocketHandler
+
+        class DummyEngine:
+            _engine = None
+            planned_path = []
+            entry_pose = {}
+
+            def get_render_bodies(self):
+                return []
+
+        near_wall = NavigationState(
+            risk_score=0.1,
+            wall_distance=0.0005,
+            risk_assessment={"risk_level": "SAFE", "metrics": {}},
+            safety_status="SAFE_NAV",
+        )
+
+        batch = WebSocketHandler(SessionManager())._state_to_batch(near_wall, DummyEngine())
+
+        assert batch["safety"]["guidewire_mechanics"]["safety_level"] == "danger"
 
     def test_session_start_batch_mode_embeds_initial_batch(self):
         import asyncio

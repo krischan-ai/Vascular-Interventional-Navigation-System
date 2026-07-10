@@ -775,6 +775,94 @@ class WebSocketHandler:
                 conn_state, "SESSION_EXPIRED", "Session no longer exists"
             )
 
+    def _safety_level_from_status(
+        self,
+        status: str,
+        assessment: dict[str, Any],
+        risk_score: float,
+        wall_distance: float,
+    ) -> str:
+        """Map source-backed safety/risk state to the visual safety vocabulary."""
+        if status == "COLLISION_STOP":
+            return "stop"
+        if status == "STANDBY":
+            return "stale"
+
+        if risk_score >= 0.75:
+            return "danger"
+        if risk_score >= 0.35:
+            return "warning"
+        if 0.0 < wall_distance < 0.0008:
+            return "danger"
+        if 0.0 < wall_distance < 0.0015:
+            return "warning"
+
+        risk_level = (
+            str(assessment.get("risk_level", "SAFE")).upper()
+            if isinstance(assessment, dict)
+            else "SAFE"
+        )
+        if risk_level in {"CRITICAL", "WARNING"} and risk_score > 0.0:
+            return "warning"
+        if status == "DANGER_WARNING" and risk_score > 0.0:
+            return "warning"
+        if status == "SAFE_NAV":
+            return "safe"
+        return "stale"
+
+    def _reason_codes_from_assessment(self, assessment: dict[str, Any], status: str) -> list[str]:
+        """Expose reason codes from real risk-assessment metrics only."""
+        reason_codes: list[str] = []
+        metrics = assessment.get("metrics", {}) if isinstance(assessment, dict) else {}
+        if isinstance(metrics, dict):
+            for name, metric in metrics.items():
+                if not isinstance(metric, dict):
+                    continue
+                level = str(metric.get("level", "SAFE"))
+                if level != "SAFE":
+                    reason_codes.append(f"{str(name).upper()}_{level}")
+        if status == "COLLISION_STOP" and not reason_codes:
+            reason_codes.append("BACKEND_COLLISION_STOP")
+        elif status == "DANGER_WARNING" and not reason_codes:
+            reason_codes.append("BACKEND_DANGER_WARNING")
+        elif status == "STANDBY":
+            reason_codes.append("NOT_RUNNING")
+        return reason_codes
+
+    def _guidewire_mechanics(self, state: NavigationState, timestamp_ms: int) -> dict[str, Any]:
+        """Build source-backed mechanics data without inventing unavailable forces."""
+        safety_level = self._safety_level_from_status(
+            state.safety_status,
+            state.risk_assessment,
+            state.risk_score,
+            state.wall_distance,
+        )
+        return {
+            "timestamp_ms": timestamp_ms,
+            "tip_force_n": state.contact_force,
+            "wall_distance_m": state.wall_distance,
+            "lateral_force_n": None,
+            "axial_force_n": None,
+            "torque_nm": None,
+            "contact_count": 1 if state.contact_force > 0.0 else 0,
+            "risk_score": state.risk_score,
+            "safety_level": safety_level,
+            "stop_required": state.safety_status == "COLLISION_STOP",
+            "reason_codes": self._reason_codes_from_assessment(
+                state.risk_assessment, state.safety_status
+            ),
+            "source": "navigation_engine.risk_assessor",
+            "source_fields": [
+                "contact_force",
+                "wall_distance",
+                "curvature",
+                "velocity",
+                "path_deviation",
+                "safety_status",
+                "risk_score",
+            ],
+        }
+
     def _state_to_dict(self, state: NavigationState) -> dict:
         """Convert NavigationState to dictionary for WebSocket transmission.
 
@@ -802,11 +890,14 @@ class WebSocketHandler:
         frame small. The client keeps its existing path drawing when waypoints is
         empty.
         """
+        timestamp_ms = int(time.time() * 1000)
         backend = getattr(engine, "_engine", None)
         diagnostics = {}
         if backend is not None and hasattr(backend, "diagnostics"):
             diagnostics = backend.diagnostics()
         return {
+            "schema_version": "navigation_visual_v2",
+            "timestamp_ms": timestamp_ms,
             "engine": type(backend).__name__ if backend is not None else "",
             "fidelity_mode": state.fidelity_mode,
             "diagnostics": diagnostics,
@@ -837,6 +928,7 @@ class WebSocketHandler:
                 "speed": state.velocity,
                 "risk_score": state.risk_score,
                 "risk_regions": state.risk_regions,
+                "guidewire_mechanics": self._guidewire_mechanics(state, timestamp_ms),
             },
             "episode": {
                 "length": state.episode_length,

@@ -92,6 +92,7 @@ class NavigationState:
     joint_velocities: list[float] = field(default_factory=list)
     safety_status: str = "STANDBY"
     risk_score: float = 0.0
+    risk_assessment: dict[str, Any] = field(default_factory=dict)
     reward: float = 0.0
     done: bool = False
 
@@ -119,6 +120,7 @@ class NavigationState:
             "joint_velocities": self.joint_velocities,
             "safety_status": self.safety_status,
             "risk_score": self.risk_score,
+            "risk_assessment": self.risk_assessment,
             "reward": self.reward,
             "done": self.done,
         }
@@ -788,9 +790,11 @@ class NavigationEngine:
             done=raw.done,
         )
         contact_ke = float(getattr(self._engine, "contact_ke", 0.0)) if force_mode else 0.0
-        state.risk_score = self._risk_assessor.assess(
+        risk_assessment = self._risk_assessor.assess(
             state, force_mode=force_mode, contact_ke=contact_ke
-        )["risk_score"]
+        )
+        state.risk_score = risk_assessment["risk_score"]
+        state.risk_assessment = risk_assessment
         return state
 
     def _compute_remaining_distance(self, path_progress: float) -> float:

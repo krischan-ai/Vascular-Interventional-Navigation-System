@@ -70,6 +70,10 @@ def test_hud_uses_backend_dashboard_fields():
     assert "_curvature_hint" in path
     assert "path_radius_main: float = 0.00055" in path
     assert "mix(0.72, 0.10, behind)" in path
+    assert "func set_visual_state" in path
+    assert "guidewire_mechanics" in path
+    assert "set_visual_state(\"stale\", 0.0, true)" in path
+    assert "safety_color_stale" in path
     assert "tip_radius_overview: float = 0.0011" in guidewire
     assert "func set_landmarks_visible" in entry
     assert "_landmarks_visible: bool = false" in entry
