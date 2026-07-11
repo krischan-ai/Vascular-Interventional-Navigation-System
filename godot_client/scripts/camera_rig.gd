@@ -8,7 +8,7 @@ extends Node3D
 ##
 ## Owns two close-range cameras; the overview camera stays owned by the main
 ## controller. The controller decides which camera is current.
-##   - FOLLOW    : third-person close-up trailing the tip (smoothed).
+##   - FOLLOW    : third-person close-up trailing the planned-route tangent.
 ##   - ENDOSCOPE : first-person view from the tip looking down the guidewire.
 
 ## Third-person follow tuning (meters). Chase configuration: the camera trails the
@@ -18,6 +18,7 @@ extends Node3D
 ## near/inside the lumen no longer fogs the view.
 @export var follow_back: float = 0.045      ## trailing distance along travel
 @export var follow_height: float = 0.015    ## height above the tip
+@export var follow_focus_lookahead: float = 0.012  ## route point used as chase focus
 @export var follow_lookahead: float = 0.03  ## look-at point ahead of the tip
 @export var follow_smooth: float = 12.0     ## position/look lerp speed (1/s)
 @export var follow_fov: float = 55.0
@@ -39,6 +40,7 @@ var _has_tip := false
 var _follow_pos := Vector3.ZERO
 var _follow_look := Vector3.ZERO
 var _follow_init := false
+var _nav_camera = preload("res://scripts/navigation_camera_controller.gd").new()
 
 
 func _ready() -> void:
@@ -72,6 +74,16 @@ func update_tip(pos: Vector3, dir: Vector3, quat: Quaternion) -> void:
 	_has_tip = true
 
 
+func set_navigation_route(waypoints: Array) -> void:
+	_nav_camera.set_route_points(waypoints)
+	_follow_init = false
+
+
+func clear_navigation_route() -> void:
+	_nav_camera.clear_route()
+	_follow_init = false
+
+
 func _process(delta: float) -> void:
 	if not _has_tip:
 		return
@@ -80,12 +92,19 @@ func _process(delta: float) -> void:
 
 
 func _update_follow(delta: float) -> void:
-	# Chase pose: behind the tip along travel, slightly raised, looking ahead of
-	# the tip so the view direction rotates with the wire through bends. The lerp
-	# smoothing below turns sharp direction changes into a smooth camera swing.
+	# Chase pose: use the planned route tangent first, so the view follows the
+	# vessel lane through bends instead of trusting a transient guidewire body
+	# direction. If no backend route is available, fall back to the streamed tip
+	# direction.
 	var up := _safe_up(_dir, Vector3.UP)
 	var desired_pos := _tip - _dir * follow_back + up * follow_height
 	var desired_look := _tip + _dir * follow_lookahead
+	var pose := _nav_camera.navigation_pose(
+		_tip, _dir, follow_back, follow_height, follow_focus_lookahead, follow_lookahead)
+	if not pose.is_empty():
+		up = pose["up"]
+		desired_pos = pose["position"]
+		desired_look = pose["look"]
 	if not _follow_init:
 		_follow_pos = desired_pos
 		_follow_look = desired_look
@@ -96,7 +115,7 @@ func _update_follow(delta: float) -> void:
 		_follow_look = _follow_look.lerp(desired_look, t)
 	follow_cam.position = _follow_pos
 	if (_follow_look - _follow_pos).length() > 1e-5:
-		follow_cam.look_at(_follow_look, _safe_up(_follow_look - _follow_pos, Vector3.UP))
+		follow_cam.look_at(_follow_look, _safe_up(_follow_look - _follow_pos, up))
 
 
 func _update_endoscope() -> void:

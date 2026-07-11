@@ -10,6 +10,8 @@ def test_hud_uses_backend_dashboard_fields():
     path = (ROOT / "godot_client/scripts/path_renderer.gd").read_text(encoding="utf-8")
     guidewire = (ROOT / "godot_client/scripts/guidewire_renderer.gd").read_text(encoding="utf-8")
     entry = (ROOT / "godot_client/scripts/entry_marker.gd").read_text(encoding="utf-8")
+    rig = (ROOT / "godot_client/scripts/camera_rig.gd").read_text(encoding="utf-8")
+    navcam = (ROOT / "godot_client/scripts/navigation_camera_controller.gd").read_text(encoding="utf-8")
     ws = (ROOT / "godot_client/scripts/websocket_client.gd").read_text(encoding="utf-8")
 
     for field in ("remaining_distance", "vessel_radius", "eta_seconds", "latency_ms"):
@@ -54,11 +56,29 @@ def test_hud_uses_backend_dashboard_fields():
     assert "func _apply_clinical_orbit" in main
     assert "_set_orbit_preset(OrbitPreset.CLINICAL, true)" in main
     assert "_set_orbit_preset(OrbitPreset.TREE, true)" in main
+    assert "navigation_camera_controller.gd" in rig
+    assert "func set_navigation_route" in rig
+    assert "func clear_navigation_route" in rig
+    assert "var pose := _nav_camera.navigation_pose" in rig
+    assert "_rig.set_navigation_route(path_wps)" in main
+    assert "_rig.clear_navigation_route()" in main
+    assert "_set_camera_mode(CamMode.FOLLOW)" in main
+    assert "func navigation_pose" in navcam
+    assert "func _closest_arclength" in navcam
+    assert "func _transport_up" in navcam
     assert "back_wall_color" in main
     assert "focus_alpha_far" in main
     assert "focus_emission_far" in main
     assert "func _update_vessel_focus_tip" in main
     assert "_update_vessel_focus_tip(tip_world, true)" in main
+    assert "func _update_vessel_route_visibility" in main
+    assert "route_points[96]" in main
+    assert "route_visibility(world_pos)" in main
+    assert "path_info.get(\"vessel_radius\", null)" in main
+    assert "_update_vessel_route_visibility(path_wps, true, route_radius)" in main
+    assert "_update_vessel_route_visibility([], false)" in main
+    assert "max(tip_prox * (1.0 - route_focus_enabled), route_prox * route_focus_enabled)" in main
+    assert "corridor_radius = maxf(route_vessel_radius, radius_m * 1.35)" in main
     assert "rim_alpha = 0.46" in main
     assert "core_alpha = 0.014" in main
     assert "relief_light_dir" in main

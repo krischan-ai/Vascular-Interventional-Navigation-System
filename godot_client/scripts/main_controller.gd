@@ -27,6 +27,10 @@ extends Node3D
 # The overview stays the whole-tree translucent 演示视图.
 @export var surgical_fade_near: float = 0.03
 @export var surgical_fade_far: float = 0.11
+# Minimum route corridor size. FOLLOW expands this with backend path.vessel_radius
+# when available, so the planned vessel wall remains visible beyond the guidewire.
+@export var route_vessel_radius: float = 0.024
+@export var route_vessel_feather: float = 0.018
 
 # Switchable phantom models, cycled at runtime with the M key. The exported
 # phantom above selects which entry is active on launch (matched by phantom
@@ -150,6 +154,7 @@ var _last_aabb := AABB()  # last framed vessel AABB, for the 复位 tool
 const _ORBIT_SPEED := 0.008     # rad per drag px
 const _PAN_SPEED := 0.0012      # pivot m per drag px per m of distance
 const _WHEEL_STEP := 0.88       # dist multiplier per wheel notch
+const _VESSEL_ROUTE_SHADER_SAMPLES := 96
 # 3D-pane pointer gesture state: a left press inside the pane is a pending click;
 # once cumulative travel exceeds the threshold it becomes an orbit drag instead of
 # a click-to-navigate on release.
@@ -854,10 +859,13 @@ func _apply_vessel_material(node: Node) -> void:
 	_vessel_mat_surgical = _make_fresnel_material(true)
 	_vessel_mat_surgical.set_shader_parameter("fade_near", surgical_fade_near)
 	_vessel_mat_surgical.set_shader_parameter("fade_far", surgical_fade_far)
+	_vessel_mat_surgical.set_shader_parameter("route_corridor_radius", route_vessel_radius)
+	_vessel_mat_surgical.set_shader_parameter("route_corridor_feather", route_vessel_feather)
 	_vessel_mat_surgical.set_shader_parameter("relief_light_dir", Vector3(-0.35, 0.72, 0.59))
 	_vessel_mat_surgical.set_shader_parameter("relief_strength", 0.34)
 	_vessel_mat_surgical.set_shader_parameter("relief_shadow", 0.26)
 	_update_vessel_focus_tip(Vector3.ZERO, false)
+	_update_vessel_route_visibility([], false)
 
 	_vessel_meshes = node.find_children("*", "MeshInstance3D", true, false)
 	_set_vessel_view_material(CamMode.OVERVIEW)
@@ -885,8 +893,10 @@ func _make_fresnel_material(with_fade: bool) -> ShaderMaterial:
 	if with_fade:
 		fade_decl = "uniform float fade_near = 0.03;\n" \
 			+ "uniform float fade_far = 0.11;\n"
-		alpha_line = "	float prox = 1.0 - smoothstep(fade_near, fade_far, distance(tip_world_pos, world_pos));\n" \
-			+ "	ALPHA = clamp(core_alpha + rim_alpha * rim, 0.0, 0.52) * prox * cam_fade;\n"
+		alpha_line = "	float tip_prox = 1.0 - smoothstep(fade_near, fade_far, distance(tip_world_pos, world_pos));\n" \
+			+ "	float route_prox = route_visibility(world_pos);\n" \
+			+ "	float keep = max(tip_prox * (1.0 - route_focus_enabled), route_prox * route_focus_enabled);\n" \
+			+ "	ALPHA = clamp(core_alpha + rim_alpha * rim, 0.0, 0.52) * keep * cam_fade;\n"
 	else:
 		alpha_line = "	ALPHA = clamp(core_alpha + rim_alpha * rim, 0.0, 0.68) * focus_alpha * cam_fade;\n"
 	var shader := Shader.new()
@@ -910,9 +920,30 @@ func _make_fresnel_material(with_fade: bool) -> ShaderMaterial:
 		+ "uniform float focus_far = 0.22;\n" \
 		+ "uniform float focus_alpha_far = 0.30;\n" \
 		+ "uniform float focus_emission_far = 0.24;\n" \
+		+ "uniform float route_focus_enabled = 0.0;\n" \
+		+ "uniform int route_point_count = 0;\n" \
+		+ "uniform vec3 route_points[96];\n" \
+		+ "uniform float route_corridor_radius = 0.024;\n" \
+		+ "uniform float route_corridor_feather = 0.018;\n" \
 		+ fade_decl \
 		+ "varying vec3 world_pos;\n" \
 		+ "void vertex() { world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz; }\n" \
+		+ "float dist_to_segment(vec3 p, vec3 a, vec3 b) {\n" \
+		+ "	vec3 ab = b - a;\n" \
+		+ "	float d = dot(ab, ab);\n" \
+		+ "	if (d < 0.0000000001) { return distance(p, a); }\n" \
+		+ "	float t = clamp(dot(p - a, ab) / d, 0.0, 1.0);\n" \
+		+ "	return distance(p, a + ab * t);\n" \
+		+ "}\n" \
+		+ "float route_visibility(vec3 p) {\n" \
+		+ "	if (route_point_count < 2) { return 0.0; }\n" \
+		+ "	float best = 1000000.0;\n" \
+		+ "	for (int i = 0; i < 95; i++) {\n" \
+		+ "		if (i >= route_point_count - 1) { break; }\n" \
+		+ "		best = min(best, dist_to_segment(p, route_points[i], route_points[i + 1]));\n" \
+		+ "	}\n" \
+		+ "	return 1.0 - smoothstep(route_corridor_radius, route_corridor_radius + route_corridor_feather, best);\n" \
+		+ "}\n" \
 		+ "void fragment() {\n" \
 		+ "	float f = 1.0 - clamp(dot(normalize(NORMAL), normalize(VIEW)), 0.0, 1.0);\n" \
 		+ "	float rim = pow(f, rim_power);\n" \
@@ -953,6 +984,41 @@ func _update_vessel_focus_tip(tip_world: Vector3, enabled: bool) -> void:
 		mat.set_shader_parameter("focus_far", focus_far)
 
 
+func _update_vessel_route_visibility(waypoints: Array, enabled: bool, vessel_radius: float = -1.0) -> void:
+	var route_points: Array = []
+	route_points.resize(_VESSEL_ROUTE_SHADER_SAMPLES)
+	for i in range(_VESSEL_ROUTE_SHADER_SAMPLES):
+		route_points[i] = Vector3.ZERO
+
+	var route_count := 0
+	var radius_m := vessel_radius
+	if radius_m > 1.0:
+		radius_m *= 0.001
+	var corridor_radius := route_vessel_radius
+	if radius_m > 0.0:
+		corridor_radius = maxf(route_vessel_radius, radius_m * 1.35)
+	var corridor_feather := maxf(route_vessel_feather, corridor_radius * 0.35)
+	if enabled and waypoints.size() >= 2:
+		route_count = min(_VESSEL_ROUTE_SHADER_SAMPLES, waypoints.size())
+		var route_xform := Transform3D.IDENTITY
+		if _path != null and is_instance_valid(_path):
+			route_xform = _path.global_transform
+		elif _vessel != null and is_instance_valid(_vessel):
+			route_xform = _vessel.global_transform
+		for i in range(route_count):
+			var src_idx := int(round(float(i) * float(waypoints.size() - 1) / float(route_count - 1)))
+			route_points[i] = route_xform * _vec3_from_backend_point(waypoints[src_idx])
+
+	for mat in [_vessel_mat_overlay, _vessel_mat_surgical]:
+		if mat == null:
+			continue
+		mat.set_shader_parameter("route_focus_enabled", 1.0 if route_count >= 2 else 0.0)
+		mat.set_shader_parameter("route_point_count", route_count)
+		mat.set_shader_parameter("route_points", route_points)
+		mat.set_shader_parameter("route_corridor_radius", corridor_radius)
+		mat.set_shader_parameter("route_corridor_feather", corridor_feather)
+
+
 func _set_vessel_view_material(mode: int) -> void:
 	var mat: Material
 	match mode:
@@ -989,6 +1055,8 @@ func _setup_rig(parent: Node) -> void:
 	# Parent under the vessel frame so tip coordinates need no conversion.
 	_rig = preload("res://scripts/camera_rig.gd").new()
 	parent.add_child(_rig)
+	if not _path_waypoints.is_empty():
+		_rig.set_navigation_route(_path_waypoints)
 
 
 func _setup_hud() -> void:
@@ -1111,6 +1179,9 @@ func _cycle_branch() -> void:
 	var target := str(_branch_targets[_branch_index])
 	_ws.send_select_route(target)
 	_path_waypoints = []  # the new branch re-streams its route
+	if _rig != null and is_instance_valid(_rig):
+		_rig.clear_navigation_route()
+	_update_vessel_route_visibility([], false)
 	_camera_user_controlled = false
 	_disengage_autopilot()
 	_auto_followed = false  # re-drop into follow view on the new branch's first pose
@@ -1134,9 +1205,17 @@ func _on_batch(batch: Dictionary) -> void:
 		])
 	# Capture the route waypoints (backend meter frame) for click-to-navigate;
 	# they arrive only on the first batch / after a reset or route switch.
-	var path_wps: Array = batch.get("path", {}).get("waypoints", [])
+	var path_info: Dictionary = batch.get("path", {})
+	var path_wps: Array = path_info.get("waypoints", [])
 	if not path_wps.is_empty():
 		_path_waypoints = path_wps
+		if _rig != null and is_instance_valid(_rig):
+			_rig.set_navigation_route(path_wps)
+		var route_radius := -1.0
+		var radius_value: Variant = path_info.get("vessel_radius", null)
+		if typeof(radius_value) == TYPE_FLOAT or typeof(radius_value) == TYPE_INT:
+			route_radius = float(radius_value)
+		_update_vessel_route_visibility(path_wps, true, route_radius)
 		_apply_route_features()
 	_guidewire.update_from_batch(batch)
 	_path.update_from_batch(batch)
@@ -1160,7 +1239,6 @@ func _on_batch(batch: Dictionary) -> void:
 	elif _autopilot_active:
 		mode = "自动"
 	_hud.set_control_mode(mode)
-	var path_info: Dictionary = batch.get("path", {})
 	var progress := float(path_info.get("progress", 0.0))
 	var remaining := float(path_info.get("remaining_distance", -1.0))
 	if remaining < 0.0 or (remaining == 0.0 and progress > 0.0 and progress < 0.999):
@@ -1406,11 +1484,11 @@ func _feed_rig(tip: Dictionary) -> void:
 	# stack into a solid cyan blob; OVERVIEW shows the whole vessel tree cleanly (the
 	# fresnel glow reads as a glass tree). The operator can still press C for follow.
 	if not _auto_followed:
+		# Current behavior: first real tip pose enters FOLLOW unless the operator
+		# already moved the camera. The route-aware rig handles fallback internally.
 		_auto_followed = true
-		if _cam_mode != CamMode.OVERVIEW:
-			_set_camera_mode(CamMode.OVERVIEW)
-		if _orbit_preset == OrbitPreset.CLINICAL and not _camera_user_controlled:
-			_apply_clinical_orbit(true)
+		if not _camera_user_controlled:
+			_set_camera_mode(CamMode.FOLLOW)
 
 
 # Camera orbit/follow uses the same front point the renderer draws as the
@@ -1458,6 +1536,9 @@ func _cycle_model() -> void:
 	_branch_index = 0
 	_logged_first_batch = false
 	_path_waypoints = []
+	if _rig != null and is_instance_valid(_rig):
+		_rig.clear_navigation_route()
+	_update_vessel_route_visibility([], false)
 	_disengage_autopilot()
 	_load_model_scene()
 	_ws.restart_session(phantom, target, case_id, start_position, end_position, physics_engine)
