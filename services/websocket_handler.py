@@ -929,7 +929,9 @@ class WebSocketHandler:
                 "risk_score": state.risk_score,
                 "risk_regions": state.risk_regions,
                 "guidewire_mechanics": self._guidewire_mechanics(state, timestamp_ms),
+                "flow_guidance": state.flow_guidance,
             },
+            "flow_guidance": state.flow_guidance,
             "episode": {
                 "length": state.episode_length,
                 "reward": state.reward,

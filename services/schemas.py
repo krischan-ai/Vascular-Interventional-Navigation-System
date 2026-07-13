@@ -105,6 +105,7 @@ class NavigationStateResponse(BaseModel):
     fidelity_mode: FidelityMode = Field(default="physics", description="guided / physics / rl fidelity mode")
     risk_score: float = Field(default=0.0, description="Aggregated risk score [0, 1]")
     risk_regions: list[dict[str, Any]] = Field(default_factory=list, description="Spatial risk regions")
+    flow_guidance: dict[str, Any] = Field(default_factory=dict, description="Large-curvature workflow guidance")
     reward: float = Field(description="Reward from last step")
     done: bool = Field(description="Episode terminated")
     safety_status: SafetyStatus = Field(default="STANDBY", description="Safety status")

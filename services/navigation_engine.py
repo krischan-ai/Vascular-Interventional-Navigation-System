@@ -93,6 +93,7 @@ class NavigationState:
     safety_status: str = "STANDBY"
     risk_score: float = 0.0
     risk_assessment: dict[str, Any] = field(default_factory=dict)
+    flow_guidance: dict[str, Any] = field(default_factory=dict)
     reward: float = 0.0
     done: bool = False
 
@@ -121,6 +122,7 @@ class NavigationState:
             "safety_status": self.safety_status,
             "risk_score": self.risk_score,
             "risk_assessment": self.risk_assessment,
+            "flow_guidance": self.flow_guidance,
             "reward": self.reward,
             "done": self.done,
         }
@@ -795,7 +797,197 @@ class NavigationEngine:
         )
         state.risk_score = risk_assessment["risk_score"]
         state.risk_assessment = risk_assessment
+        state.flow_guidance = self._flow_guidance(state)
         return state
+
+    def _flow_guidance(self, state: NavigationState) -> dict[str, Any]:
+        """Derive the large-curvature workflow block from source-backed fields.
+
+        This is intentionally conservative: fields that need a real guidewire
+        shape model, support tube model, or force decomposition stay
+        ``unknown``/``None`` until those sources exist.
+        """
+        orientation_score = self._orientation_score(state)
+        phase = self._workflow_phase(state, orientation_score)
+        step_index = {
+            "STANDBY": 0,
+            "TIP_SHAPE": 1,
+            "ORIENTATION": 2,
+            "SUPPORT": 3,
+            "MICRO_ADVANCE": 4,
+            "WALL_SLIDE": 5,
+            "STRATEGY_SWITCH": 6,
+        }[phase]
+        allowed, blocked, suggestion = self._workflow_actions(phase)
+        reason_codes = self._flow_reason_codes(state, orientation_score)
+
+        orientation_state = "unknown"
+        if orientation_score is not None:
+            orientation_state = "aligned" if orientation_score >= 0.75 else "needs_alignment"
+
+        return {
+            "workflow": {
+                "phase": phase,
+                "step_index": step_index,
+                "step_label": self._workflow_label(phase),
+                "allowed_actions": allowed,
+                "blocked_actions": blocked,
+                "suggestion": suggestion,
+                "reason_codes": reason_codes,
+                "source": "navigation_engine.flow_guidance",
+                "source_fields": [
+                    "episode_length",
+                    "tip_direction",
+                    "planned_path",
+                    "path_progress",
+                    "path_deviation",
+                    "wall_distance",
+                    "contact_force",
+                    "risk_score",
+                    "safety_status",
+                ],
+            },
+            "tip_shape": {
+                "tip_shape_state": "unknown",
+                "shape_type": None,
+                "curve_angle_deg": None,
+                "source": "not_modeled",
+                "source_fields": [],
+            },
+            "orientation": {
+                "orientation_state": orientation_state,
+                "orientation_score": orientation_score,
+                "source": "planned_path_tangent" if orientation_score is not None else "unknown",
+                "source_fields": ["tip_direction", "planned_path", "path_progress"]
+                if orientation_score is not None
+                else [],
+            },
+            "support": {
+                "support_state": "unknown",
+                "effective_support_type": None,
+                "free_wire_length_m": None,
+                "support_ratio": None,
+                "source": "not_modeled",
+                "source_fields": [],
+            },
+            "micro_advance": {
+                "micro_advance_state": self._micro_advance_state(state),
+                "source": "navigation_engine.risk_state",
+                "source_fields": ["risk_score", "wall_distance", "safety_status"],
+            },
+            "wall_slide": {
+                "wall_slide_state": self._wall_slide_state(state),
+                "source": "navigation_engine.risk_state",
+                "source_fields": ["wall_distance", "contact_force", "safety_status"],
+            },
+            "strategy_switch": {
+                "strategy_switch_state": self._strategy_switch_state(state),
+                "source": "navigation_engine.risk_state",
+                "source_fields": ["risk_score", "safety_status", "path_deviation"],
+            },
+        }
+
+    def _orientation_score(self, state: NavigationState) -> float | None:
+        """Tip/path alignment in [0, 1], or None when no planned path exists."""
+        if self._path is None or self._path.total_len <= 0.0:
+            return None
+        tip_dir = np.asarray(state.tip_direction, dtype=np.float64)
+        tip_norm = float(np.linalg.norm(tip_dir))
+        if tip_norm <= 1e-9:
+            return None
+        tangent = self._path.tangent_at_arclen(state.path_progress * self._path.total_len)
+        score = float(np.dot(tip_dir / tip_norm, tangent))
+        return float(np.clip(score, 0.0, 1.0))
+
+    def _workflow_phase(self, state: NavigationState, orientation_score: float | None) -> str:
+        if state.episode_length == 0 or state.safety_status == "STANDBY":
+            return "STANDBY"
+        if state.safety_status == "COLLISION_STOP" or state.risk_score >= 0.75:
+            return "STRATEGY_SWITCH"
+        if state.contact_force > 0.0 or (0.0 < state.wall_distance < 0.0015):
+            return "WALL_SLIDE"
+        if orientation_score is not None and orientation_score < 0.75:
+            return "ORIENTATION"
+        return "MICRO_ADVANCE"
+
+    @staticmethod
+    def _workflow_label(phase: str) -> str:
+        return {
+            "STANDBY": "Standby",
+            "TIP_SHAPE": "Tip shape",
+            "ORIENTATION": "Orientation",
+            "SUPPORT": "Support",
+            "MICRO_ADVANCE": "Micro advance",
+            "WALL_SLIDE": "Wall slide",
+            "STRATEGY_SWITCH": "Strategy switch",
+        }[phase]
+
+    @staticmethod
+    def _workflow_actions(phase: str) -> tuple[list[str], list[str], str]:
+        if phase == "STANDBY":
+            return [], ["hard_push"], "Wait for a valid navigation state"
+        if phase == "STRATEGY_SWITCH":
+            return ["pause", "pullback", "rotate", "change_strategy"], ["hard_push"], "Pause push, pull back, or reorient"
+        if phase == "WALL_SLIDE":
+            return ["micro_push", "rotate", "pause", "pullback"], ["hard_push"], "Use micro-advance while monitoring wall distance and contact force"
+        if phase == "ORIENTATION":
+            return ["rotate", "pause", "micro_push"], ["hard_push"], "Align by rotation before micro-advance"
+        return ["micro_push", "rotate", "pause"], ["hard_push"], "Advance in small steps and keep monitoring risk"
+
+    @staticmethod
+    def _micro_advance_state(state: NavigationState) -> str:
+        if state.safety_status == "COLLISION_STOP" or state.risk_score >= 0.75:
+            return "blocked"
+        if state.risk_score >= 0.35 or (0.0 < state.wall_distance < 0.0015):
+            return "caution"
+        if state.safety_status == "STANDBY":
+            return "unknown"
+        return "ready"
+
+    @staticmethod
+    def _wall_slide_state(state: NavigationState) -> str:
+        if state.safety_status == "COLLISION_STOP":
+            return "unsafe"
+        if state.contact_force > 0.0 or (0.0 < state.wall_distance < 0.0015):
+            return "active"
+        if state.safety_status == "STANDBY":
+            return "unknown"
+        return "clear"
+
+    @staticmethod
+    def _strategy_switch_state(state: NavigationState) -> str:
+        if state.safety_status == "COLLISION_STOP":
+            return "required"
+        if state.risk_score >= 0.75:
+            return "recommended"
+        if state.path_deviation >= 0.003:
+            return "consider"
+        if state.safety_status == "STANDBY":
+            return "unknown"
+        return "not_required"
+
+    @staticmethod
+    def _flow_reason_codes(state: NavigationState, orientation_score: float | None) -> list[str]:
+        reasons: list[str] = []
+        if state.safety_status == "COLLISION_STOP":
+            reasons.append("COLLISION_STOP")
+        if state.risk_score >= 0.75:
+            reasons.append("HIGH_RISK_SCORE")
+        elif state.risk_score >= 0.35:
+            reasons.append("WARNING_RISK_SCORE")
+        if 0.0 < state.wall_distance < 0.0008:
+            reasons.append("WALL_DISTANCE_DANGER")
+        elif 0.0 < state.wall_distance < 0.0015:
+            reasons.append("WALL_DISTANCE_WARNING")
+        if state.contact_force > 0.0:
+            reasons.append("CONTACT_FORCE_PRESENT")
+        if orientation_score is not None and orientation_score < 0.75:
+            reasons.append("TIP_NOT_ALIGNED_TO_PATH")
+        if state.path_deviation >= 0.003:
+            reasons.append("PATH_DEVIATION_HIGH")
+        if state.safety_status == "STANDBY":
+            reasons.append("NOT_RUNNING")
+        return reasons
 
     def _compute_remaining_distance(self, path_progress: float) -> float:
         """Remaining arc length to target in meters."""

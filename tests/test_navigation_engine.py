@@ -51,6 +51,7 @@ class TestNavigationStateDataclass:
         assert result["vessel_radius"] is None
         assert result["fidelity_mode"] == "physics"
         assert result["risk_regions"] == []
+        assert result["flow_guidance"] == {}
 
 
 class TestSessionManagerUnit:
@@ -148,6 +149,7 @@ class TestNavigationStateExtended:
         assert state.path_progress == 0.0
         assert state.path_deviation == 0.0
         assert state.safety_status == "STANDBY"
+        assert state.flow_guidance == {}
 
     def test_as_dict_contains_extended_fields(self):
         from services.navigation_engine import NavigationState
@@ -166,9 +168,63 @@ class TestNavigationStateExtended:
             "fidelity_mode",
             "risk_score",
             "risk_regions",
+            "flow_guidance",
             "safety_status",
         ):
             assert key in result
+
+    def test_flow_guidance_unknown_fields_do_not_invent_sources(self):
+        from services.navigation_engine import NavigationEngine, NavigationState
+
+        engine = NavigationEngine(
+            guided=True,
+            planned_path=[[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+        )
+        state = NavigationState(
+            episode_length=1,
+            tip_direction=[0.0, 0.0, 1.0],
+            path_progress=0.5,
+            wall_distance=0.05,
+            safety_status="SAFE_NAV",
+            risk_score=0.0,
+        )
+
+        guidance = engine._flow_guidance(state)
+
+        assert guidance["workflow"]["phase"] == "MICRO_ADVANCE"
+        assert guidance["orientation"]["orientation_state"] == "aligned"
+        assert guidance["orientation"]["orientation_score"] == pytest.approx(1.0)
+        assert guidance["tip_shape"]["tip_shape_state"] == "unknown"
+        assert guidance["tip_shape"]["shape_type"] is None
+        assert guidance["tip_shape"]["source"] == "not_modeled"
+        assert guidance["support"]["support_state"] == "unknown"
+        assert guidance["support"]["effective_support_type"] is None
+
+    def test_flow_guidance_high_risk_requires_strategy_switch(self):
+        from services.navigation_engine import NavigationEngine, NavigationState
+
+        engine = NavigationEngine(
+            guided=True,
+            planned_path=[[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+        )
+        state = NavigationState(
+            episode_length=4,
+            tip_direction=[0.0, 0.0, 1.0],
+            path_progress=0.5,
+            wall_distance=0.0002,
+            safety_status="COLLISION_STOP",
+            risk_score=0.9,
+        )
+
+        guidance = engine._flow_guidance(state)
+
+        assert guidance["workflow"]["phase"] == "STRATEGY_SWITCH"
+        assert guidance["workflow"]["step_index"] == 6
+        assert "hard_push" in guidance["workflow"]["blocked_actions"]
+        assert guidance["micro_advance"]["micro_advance_state"] == "blocked"
+        assert guidance["wall_slide"]["wall_slide_state"] == "unsafe"
+        assert guidance["strategy_switch"]["strategy_switch_state"] == "required"
+        assert "COLLISION_STOP" in guidance["workflow"]["reason_codes"]
 
 
 class TestNavigationEngineHelpers:

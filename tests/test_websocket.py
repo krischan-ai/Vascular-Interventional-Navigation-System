@@ -123,6 +123,15 @@ class TestWebSocketHandlerUnit:
             wall_distance=0.0012,
             safety_status="DANGER_WARNING",
             fidelity_mode="physics",
+            flow_guidance={
+                "workflow": {
+                    "phase": "WALL_SLIDE",
+                    "step_index": 5,
+                    "source": "navigation_engine.flow_guidance",
+                },
+                "tip_shape": {"tip_shape_state": "unknown", "shape_type": None},
+                "support": {"support_state": "unknown", "effective_support_type": None},
+            },
         )
         batch = WebSocketHandler(SessionManager())._state_to_batch(state, DummyEngine())
 
@@ -132,6 +141,8 @@ class TestWebSocketHandlerUnit:
         assert batch["path"]["eta_seconds"] == 3.0
         assert batch["safety"]["risk_score"] == 0.2
         assert batch["safety"]["risk_regions"] == []
+        assert batch["flow_guidance"]["workflow"]["phase"] == "WALL_SLIDE"
+        assert batch["safety"]["flow_guidance"] == batch["flow_guidance"]
         assert batch["schema_version"] == "navigation_visual_v2"
         assert isinstance(batch["timestamp_ms"], int)
         mechanics = batch["safety"]["guidewire_mechanics"]

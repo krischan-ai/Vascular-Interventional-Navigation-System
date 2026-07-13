@@ -163,6 +163,7 @@ def _state_to_response(state, engine=None) -> NavigationStateResponse:
         fidelity_mode=state.fidelity_mode,
         risk_score=state.risk_score,
         risk_regions=state.risk_regions,
+        flow_guidance=state.flow_guidance,
         reward=state.reward,
         done=state.done,
         safety_status=state.safety_status,
