@@ -291,6 +291,19 @@ class NavigationEngine:
         self._last_tip_pos: list[float] | None = None
         self._last_tip_dir: list[float] | None = None
         self._last_contact_force = 0.0
+        self._last_path_progress = 0.0
+        self._pending_control: dict[str, float] = {
+            "delta_push": 0.0,
+            "delta_rotate": 0.0,
+            "microcatheter_advance": 0.0,
+        }
+        self._last_control_metrics: dict[str, Any] = {
+            "push_command": 0.0,
+            "rotate_command": 0.0,
+            "support_command": 0.0,
+            "progress_delta": 0.0,
+            "progress_delta_m": 0.0,
+        }
 
         from services.risk_assessor import RiskAssessor
 
@@ -681,17 +694,36 @@ class NavigationEngine:
         raw = self._engine.reset()
         self._episode_length = 0
         self._previous_tip_pos = None
+        self._last_path_progress = 0.0
+        self._pending_control = {
+            "delta_push": 0.0,
+            "delta_rotate": 0.0,
+            "microcatheter_advance": 0.0,
+        }
+        self._last_control_metrics = {
+            "push_command": 0.0,
+            "rotate_command": 0.0,
+            "support_command": 0.0,
+            "progress_delta": 0.0,
+            "progress_delta_m": 0.0,
+        }
         self._tip_history.clear()
         if self._controller is not None:
             self._controller.reset()
         return self._assemble_state(raw)
 
-    def step(self, delta_push: float, delta_rotate: float) -> NavigationState:
+    def step(
+        self,
+        delta_push: float,
+        delta_rotate: float,
+        microcatheter_advance: float = 0.0,
+    ) -> NavigationState:
         """Execute one simulation step.
 
         Args:
             delta_push: Push force coefficient [-1.0, 1.0], positive = forward
             delta_rotate: Rotation force coefficient [-1.0, 1.0], positive = clockwise
+            microcatheter_advance: Optional support advance coefficient [-1.0, 1.0].
 
         Returns:
             NavigationState after the step
@@ -709,6 +741,14 @@ class NavigationEngine:
 
         delta_push = float(np.clip(delta_push, -1.0, 1.0))
         delta_rotate = float(np.clip(delta_rotate, -1.0, 1.0))
+        microcatheter_advance = float(np.clip(microcatheter_advance, -1.0, 1.0))
+        self._pending_control = {
+            "delta_push": delta_push,
+            "delta_rotate": delta_rotate,
+            "microcatheter_advance": microcatheter_advance,
+        }
+        if microcatheter_advance != 0.0 and hasattr(self._engine, "apply_support_control"):
+            self._engine.apply_support_control(microcatheter_advance)
 
         raw = self._engine.step(delta_push, delta_rotate)
         self._episode_length += 1
@@ -762,6 +802,19 @@ class NavigationEngine:
         remaining_distance = self._compute_remaining_distance(path_progress)
         vessel_radius = self._compute_vessel_radius(path_progress)
         eta_seconds = self._compute_eta_seconds(remaining_distance, velocity)
+        progress_delta = float(path_progress - self._last_path_progress)
+        progress_delta_m = (
+            progress_delta * self._path.total_len
+            if self._path is not None and self._path.total_len > 0.0
+            else 0.0
+        )
+        self._last_control_metrics = {
+            "push_command": float(self._pending_control.get("delta_push", 0.0)),
+            "rotate_command": float(self._pending_control.get("delta_rotate", 0.0)),
+            "support_command": float(self._pending_control.get("microcatheter_advance", 0.0)),
+            "progress_delta": progress_delta,
+            "progress_delta_m": float(progress_delta_m),
+        }
 
         force_mode = self._is_force_physics()
         safety_status = self._compute_safety_status(
@@ -798,14 +851,23 @@ class NavigationEngine:
         state.risk_score = risk_assessment["risk_score"]
         state.risk_assessment = risk_assessment
         state.flow_guidance = self._flow_guidance(state)
+        self._last_path_progress = float(path_progress)
         return state
+
+    def _engine_mechanics_state(self) -> dict[str, Any] | None:
+        """Return backend guidewire mechanics when the active engine models them."""
+        backend = getattr(self, "_engine", None)
+        if backend is None or not hasattr(backend, "mechanics_state"):
+            return None
+        mechanics = backend.mechanics_state()
+        return mechanics if isinstance(mechanics, dict) else None
 
     def _flow_guidance(self, state: NavigationState) -> dict[str, Any]:
         """Derive the large-curvature workflow block from source-backed fields.
 
-        This is intentionally conservative: fields that need a real guidewire
-        shape model, support tube model, or force decomposition stay
-        ``unknown``/``None`` until those sources exist.
+        Conservative fallback is preserved for backends that do not model
+        guidewire shape/support. Newton force mode can now supply those sources
+        through ``mechanics_state``.
         """
         orientation_score = self._orientation_score(state)
         phase = self._workflow_phase(state, orientation_score)
@@ -820,10 +882,87 @@ class NavigationEngine:
         }[phase]
         allowed, blocked, suggestion = self._workflow_actions(phase)
         reason_codes = self._flow_reason_codes(state, orientation_score)
+        mechanics = self._engine_mechanics_state()
+        mechanics_source = mechanics.get("source") if mechanics else None
+        mechanics_fields = mechanics.get("source_fields", []) if mechanics else []
+        guidewire = mechanics.get("guidewire", {}) if mechanics else {}
+        support = mechanics.get("support", {}) if mechanics else {}
+        mechanics_risk = mechanics.get("risk", {}) if mechanics else {}
 
         orientation_state = "unknown"
         if orientation_score is not None:
             orientation_state = "aligned" if orientation_score >= 0.75 else "needs_alignment"
+        tip_facing_score = guidewire.get("tip_facing_score")
+        if tip_facing_score is None:
+            tip_facing_score = orientation_score
+
+        tip_shape_block = {
+            "tip_shape_state": "unknown",
+            "shape_type": None,
+            "curve_angle_deg": None,
+            "tip_length_m": None,
+            "tip_facing_score": tip_facing_score,
+            "torsion_lag_deg": guidewire.get("torsion_lag_deg"),
+            "source": "not_modeled",
+            "source_fields": [],
+        }
+        if guidewire:
+            tip_shape_block.update({
+                "tip_shape_state": "modeled",
+                "shape_type": guidewire.get("shape_type") or guidewire.get("tip_shape"),
+                "curve_angle_deg": guidewire.get("curve_angle_deg"),
+                "tip_length_m": guidewire.get("tip_length_m"),
+                "source": mechanics_source,
+                "source_fields": mechanics_fields,
+            })
+
+        support_block = {
+            "support_state": "unknown",
+            "effective_support_type": None,
+            "effective_support_tip_m": None,
+            "free_wire_length_m": None,
+            "support_ratio": None,
+            "max_slack_m": None,
+            "source": "not_modeled",
+            "source_fields": [],
+        }
+        if support:
+            support_block.update({
+                "support_state": support.get("support_state", "modeled"),
+                "effective_support_type": support.get("effective_support_type"),
+                "effective_support_tip_m": support.get("effective_support_tip_m"),
+                "free_wire_length_m": support.get("free_wire_length_m"),
+                "support_ratio": support.get("support_ratio"),
+                "max_slack_m": support.get("max_slack_m"),
+                "source": mechanics_source,
+                "source_fields": mechanics_fields,
+            })
+
+        wall_slide_state = mechanics_risk.get("wall_slide_state") or self._wall_slide_state(state)
+        buckling_risk = mechanics_risk.get("buckling_risk")
+
+        strategy_state = self._strategy_switch_state(state)
+        micro_advance_block = self._micro_advance_block(state, mechanics_risk)
+        strategy_switch_block = self._strategy_switch_block(
+            state=state,
+            strategy_state=strategy_state,
+            reason_codes=reason_codes,
+            buckling_risk=buckling_risk,
+            mechanics_risk=mechanics_risk,
+            micro_advance=micro_advance_block,
+        )
+        training_score = self._large_curvature_training_score(
+            state=state,
+            orientation_score=orientation_score,
+            phase=phase,
+            tip_shape=tip_shape_block,
+            support=support_block,
+            micro_advance=micro_advance_block,
+            wall_slide_state=wall_slide_state,
+            strategy_state=strategy_state,
+            buckling_risk=buckling_risk,
+            mechanics_risk=mechanics_risk,
+        )
 
         return {
             "workflow": {
@@ -847,44 +986,264 @@ class NavigationEngine:
                     "safety_status",
                 ],
             },
-            "tip_shape": {
-                "tip_shape_state": "unknown",
-                "shape_type": None,
-                "curve_angle_deg": None,
-                "source": "not_modeled",
-                "source_fields": [],
-            },
+            "tip_shape": tip_shape_block,
             "orientation": {
                 "orientation_state": orientation_state,
                 "orientation_score": orientation_score,
+                "tip_facing_score": tip_facing_score,
+                "proximal_rotation_deg": guidewire.get("proximal_rotation_deg"),
+                "distal_tip_rotation_deg": guidewire.get("distal_tip_rotation_deg"),
+                "torsion_lag_deg": guidewire.get("torsion_lag_deg"),
+                "tip_deflection_score": guidewire.get("tip_deflection_score"),
                 "source": "planned_path_tangent" if orientation_score is not None else "unknown",
                 "source_fields": ["tip_direction", "planned_path", "path_progress"]
                 if orientation_score is not None
                 else [],
             },
-            "support": {
-                "support_state": "unknown",
-                "effective_support_type": None,
-                "free_wire_length_m": None,
-                "support_ratio": None,
-                "source": "not_modeled",
-                "source_fields": [],
-            },
-            "micro_advance": {
-                "micro_advance_state": self._micro_advance_state(state),
-                "source": "navigation_engine.risk_state",
-                "source_fields": ["risk_score", "wall_distance", "safety_status"],
-            },
+            "support": support_block,
+            "micro_advance": micro_advance_block,
             "wall_slide": {
-                "wall_slide_state": self._wall_slide_state(state),
-                "source": "navigation_engine.risk_state",
-                "source_fields": ["wall_distance", "contact_force", "safety_status"],
+                "wall_slide_state": wall_slide_state,
+                "normal_poking_score": mechanics_risk.get("normal_poking_score"),
+                "tangential_slide_score": mechanics_risk.get("tangential_slide_score"),
+                "source": mechanics_source or "navigation_engine.risk_state",
+                "source_fields": mechanics_fields or ["wall_distance", "contact_force", "safety_status"],
             },
-            "strategy_switch": {
-                "strategy_switch_state": self._strategy_switch_state(state),
-                "source": "navigation_engine.risk_state",
-                "source_fields": ["risk_score", "safety_status", "path_deviation"],
-            },
+            "strategy_switch": strategy_switch_block,
+            "training_score": training_score,
+        }
+
+    @staticmethod
+    def _large_curvature_training_score(
+        *,
+        state: NavigationState,
+        orientation_score: float | None,
+        phase: str,
+        tip_shape: dict[str, Any],
+        support: dict[str, Any],
+        micro_advance: dict[str, Any],
+        wall_slide_state: str,
+        strategy_state: str,
+        buckling_risk: str | None,
+        mechanics_risk: dict[str, Any],
+    ) -> dict[str, Any]:
+        def clamp_score(value: float) -> int:
+            return int(round(float(np.clip(value, 0.0, 100.0))))
+
+        source_fields = [
+            "tip_shape",
+            "orientation_score",
+            "support_ratio",
+            "risk_score",
+            "wall_distance",
+            "contact_force",
+            "safety_status",
+        ]
+        reasons: list[str] = []
+
+        shape_state = str(tip_shape.get("tip_shape_state", "unknown"))
+        shape_type = tip_shape.get("shape_type")
+        curve_angle = tip_shape.get("curve_angle_deg")
+        if shape_state == "modeled":
+            curve = 0.0 if curve_angle is None else abs(float(curve_angle))
+            if str(shape_type) in {"j_tip", "c_shape", "hook", "angled", "s_shape"} and curve > 1.0:
+                tip_shape_score = 100
+            else:
+                tip_shape_score = 70
+                reasons.append("TIP_SHAPE_LOW_CURVE")
+        else:
+            tip_shape_score = 50
+            reasons.append("TIP_SHAPE_NOT_MODELED")
+
+        if orientation_score is None:
+            orientation_component = 50
+            reasons.append("ORIENTATION_UNKNOWN")
+        else:
+            orientation_component = clamp_score(orientation_score * 100.0)
+            if orientation_score < 0.75:
+                reasons.append("TIP_NOT_ALIGNED_TO_PATH")
+
+        support_ratio = support.get("support_ratio")
+        free_wire = support.get("free_wire_length_m")
+        max_slack = support.get("max_slack_m")
+        if support.get("support_state") == "unknown":
+            support_component = 50
+            reasons.append("SUPPORT_NOT_MODELED")
+        elif buckling_risk == "HIGH":
+            support_component = 35
+            reasons.append("BUCKLING_RISK_HIGH")
+        elif support_ratio is not None:
+            support_component = clamp_score(45.0 + float(support_ratio) * 55.0)
+        elif free_wire is not None and max_slack is not None and float(max_slack) > 0.0:
+            support_component = clamp_score(100.0 - (float(free_wire) / float(max_slack)) * 45.0)
+        else:
+            support_component = 70
+
+        micro_state = str(micro_advance.get("micro_advance_state", NavigationEngine._micro_advance_state(state)))
+        hard_push_score = float(micro_advance.get("hard_push_score", 0.0) or 0.0)
+        cadence_state = str(micro_advance.get("cadence_state", "unknown"))
+        micro_component = {"ready": 100, "caution": 65, "blocked": 20, "unknown": 50}.get(micro_state, 50)
+        if cadence_state == "micro_push":
+            micro_component = max(micro_component, 90)
+        elif cadence_state == "pullback":
+            micro_component = max(micro_component, 80)
+        elif cadence_state == "hard_push":
+            micro_component = min(micro_component, 35)
+        if hard_push_score >= 0.7:
+            micro_component = min(micro_component, 25)
+            reasons.append("HARD_PUSH_DETECTED")
+        elif hard_push_score >= 0.35:
+            micro_component = min(micro_component, 60)
+            reasons.append("HARD_PUSH_WARNING")
+        if micro_state in {"caution", "blocked"}:
+            reasons.append("MICRO_ADVANCE_RISK")
+
+        normal_poking = mechanics_risk.get("normal_poking_score")
+        tangential_slide = mechanics_risk.get("tangential_slide_score")
+        if normal_poking is not None and float(normal_poking) >= 0.7:
+            wall_component = 25
+            reasons.append("TIP_POKING_WARNING")
+        elif tangential_slide is not None:
+            wall_component = clamp_score(float(tangential_slide) * 100.0)
+        else:
+            wall_component = {
+                "WALL_SLIDE_OK": 100,
+                "active": 80,
+                "clear": 75,
+                "CLEAR": 75,
+                "WALL_CONTACT_MONITOR": 60,
+                "TIP_POKING_WARNING": 25,
+                "BREACH_STOP": 10,
+                "unsafe": 10,
+                "unknown": 50,
+            }.get(str(wall_slide_state), 50)
+        if str(wall_slide_state) in {"TIP_POKING_WARNING", "BREACH_STOP", "unsafe"}:
+            reasons.append(str(wall_slide_state))
+
+        strategy_component = {
+            "not_required": 100,
+            "consider": 75,
+            "recommended": 55,
+            "required": 35,
+            "unknown": 50,
+        }.get(strategy_state, 50)
+        if strategy_state in {"consider", "recommended", "required"}:
+            reasons.append("STRATEGY_SWITCH_" + strategy_state.upper())
+
+        components = {
+            "tip_shape": tip_shape_score,
+            "orientation": orientation_component,
+            "support": support_component,
+            "micro_advance": micro_component,
+            "wall_slide": wall_component,
+            "strategy_switch": strategy_component,
+        }
+        weights = {
+            "tip_shape": 0.12,
+            "orientation": 0.18,
+            "support": 0.18,
+            "micro_advance": 0.18,
+            "wall_slide": 0.18,
+            "strategy_switch": 0.16,
+        }
+        overall = clamp_score(sum(components[key] * weights[key] for key in components))
+        return {
+            "overall": overall,
+            "components": components,
+            "deductions": sorted(set(reasons)),
+            "phase": phase,
+            "source": "navigation_engine.large_curvature_training_score",
+            "source_fields": source_fields,
+        }
+
+    @staticmethod
+    def _strategy_recommendations(reason_codes: list[str], buckling_risk: str | None) -> list[str]:
+        actions: list[str] = []
+        if "COLLISION_STOP" in reason_codes or "HIGH_RISK_SCORE" in reason_codes:
+            actions.extend(["pause", "pullback", "reorient_tip"])
+        if buckling_risk == "HIGH":
+            actions.extend(["advance_support", "reduce_free_span", "micro_pullback"])
+        if "TIP_NOT_ALIGNED_TO_PATH" in reason_codes:
+            actions.append("rotate_to_target_sector")
+        if "PATH_DEVIATION_HIGH" in reason_codes:
+            actions.extend(["pullback_to_known_path", "select_alternate_branch"])
+        if not actions:
+            actions.append("continue_micro_advance")
+        deduped: list[str] = []
+        for action in actions:
+            if action not in deduped:
+                deduped.append(action)
+        return deduped
+
+    def _strategy_switch_block(
+        self,
+        *,
+        state: NavigationState,
+        strategy_state: str,
+        reason_codes: list[str],
+        buckling_risk: str | None,
+        mechanics_risk: dict[str, Any],
+        micro_advance: dict[str, Any],
+    ) -> dict[str, Any]:
+        actions = self._strategy_recommendations(reason_codes, buckling_risk)
+        reasons: list[str] = []
+        if "COLLISION_STOP" in reason_codes:
+            reasons.append("collision_stop")
+        if "HIGH_RISK_SCORE" in reason_codes:
+            reasons.append("high_risk_score")
+        if mechanics_risk.get("wall_slide_state") in {"BREACH_STOP", "TIP_POKING_WARNING"}:
+            reasons.append(str(mechanics_risk.get("wall_slide_state")).lower())
+        if buckling_risk == "HIGH":
+            reasons.append("buckling_high")
+        elif buckling_risk == "MEDIUM":
+            reasons.append("buckling_medium")
+        if "TIP_NOT_ALIGNED_TO_PATH" in reason_codes:
+            reasons.append("tip_not_aligned")
+        if "PATH_DEVIATION_HIGH" in reason_codes:
+            reasons.append("path_deviation_high")
+        if micro_advance.get("hard_push_state") in {"warning", "unsafe"}:
+            reasons.append("hard_push")
+        if "NOT_RUNNING" in reason_codes:
+            reasons.append("not_running")
+        if not reasons:
+            reasons.append("none")
+
+        severity = "info"
+        if strategy_state == "required" or "collision_stop" in reasons:
+            severity = "critical"
+        elif strategy_state in {"recommended", "consider"} or any(
+            item not in {"none", "not_running"} for item in reasons
+        ):
+            severity = "warning"
+
+        primary_action = actions[0] if actions else "continue_micro_advance"
+        panel_title = {
+            "critical": "Strategy switch required",
+            "warning": "Strategy switch recommended",
+            "info": "Strategy stable",
+        }[severity]
+        return {
+            "strategy_switch_state": strategy_state,
+            "severity": severity,
+            "panel_title": panel_title,
+            "primary_failure_reason": reasons[0],
+            "failure_reasons": reasons,
+            "primary_action": primary_action,
+            "recommended_actions": actions,
+            "buckling_risk": buckling_risk,
+            "slack_m": mechanics_risk.get("slack_m"),
+            "feed_budget_m": mechanics_risk.get("feed_budget_m"),
+            "hard_push_state": micro_advance.get("hard_push_state"),
+            "hard_push_score": micro_advance.get("hard_push_score"),
+            "source": "navigation_engine.strategy_switch",
+            "source_fields": [
+                "risk_score",
+                "safety_status",
+                "path_deviation",
+                "buckling_risk",
+                "wall_slide_state",
+                "hard_push_state",
+            ],
         }
 
     def _orientation_score(self, state: NavigationState) -> float | None:
@@ -933,6 +1292,110 @@ class NavigationEngine:
         if phase == "ORIENTATION":
             return ["rotate", "pause", "micro_push"], ["hard_push"], "Align by rotation before micro-advance"
         return ["micro_push", "rotate", "pause"], ["hard_push"], "Advance in small steps and keep monitoring risk"
+
+    def _micro_advance_block(self, state: NavigationState, mechanics_risk: dict[str, Any]) -> dict[str, Any]:
+        base_state = self._micro_advance_state(state)
+        metrics = dict(self._last_control_metrics)
+        push = float(metrics.get("push_command", 0.0))
+        rotate = float(metrics.get("rotate_command", 0.0))
+        support_command = float(metrics.get("support_command", 0.0))
+        progress_delta = float(metrics.get("progress_delta", 0.0))
+        progress_delta_m = float(metrics.get("progress_delta_m", 0.0))
+
+        normal_poking = float(mechanics_risk.get("normal_poking_score") or 0.0)
+        tangential_slide = float(mechanics_risk.get("tangential_slide_score") or 0.0)
+        slack = mechanics_risk.get("slack_m")
+        feed_budget = mechanics_risk.get("feed_budget_m")
+        buckling_risk = str(mechanics_risk.get("buckling_risk", ""))
+
+        if push < -0.05:
+            cadence_state = "pullback"
+        elif abs(push) <= 0.05 and abs(rotate) <= 0.05:
+            cadence_state = "pause"
+        elif 0.0 < push <= 0.35:
+            cadence_state = "micro_push"
+        elif push > 0.35:
+            cadence_state = "hard_push"
+        else:
+            cadence_state = "rotate_only"
+
+        risk_pressure = 0.0
+        if state.risk_score >= 0.75 or state.safety_status == "COLLISION_STOP":
+            risk_pressure = max(risk_pressure, 1.0)
+        elif state.risk_score >= 0.35:
+            risk_pressure = max(risk_pressure, 0.5)
+        if state.contact_force > 0.0:
+            risk_pressure = max(risk_pressure, 0.65)
+        if normal_poking >= 0.7:
+            risk_pressure = max(risk_pressure, 1.0)
+        elif normal_poking >= 0.35:
+            risk_pressure = max(risk_pressure, 0.55)
+        if buckling_risk == "HIGH":
+            risk_pressure = max(risk_pressure, 1.0)
+        elif buckling_risk == "MEDIUM":
+            risk_pressure = max(risk_pressure, 0.55)
+        if feed_budget is not None:
+            try:
+                if float(feed_budget) <= 0.001:
+                    risk_pressure = max(risk_pressure, 0.8)
+            except (TypeError, ValueError):
+                pass
+
+        push_pressure = max(0.0, push)
+        stalled = bool(push > 0.2 and progress_delta_m < 0.00025 and state.episode_length > 1)
+        if stalled:
+            risk_pressure = max(risk_pressure, 0.6)
+        hard_push_score = float(np.clip(push_pressure * (0.35 + 0.65 * risk_pressure), 0.0, 1.0))
+        if push > 0.75 and risk_pressure >= 0.5:
+            hard_push_state = "unsafe"
+        elif push > 0.35 and risk_pressure >= 0.5:
+            hard_push_state = "warning"
+        elif push > 0.75:
+            hard_push_state = "excessive"
+        else:
+            hard_push_state = "clear"
+
+        if base_state == "blocked":
+            recommendation = "pullback_or_reorient"
+        elif hard_push_state in {"unsafe", "warning"}:
+            recommendation = "reduce_push_to_micro_steps"
+        elif cadence_state == "pullback":
+            recommendation = "recover_space_then_reorient"
+        elif cadence_state == "pause":
+            recommendation = "pause_observe_or_rotate"
+        else:
+            recommendation = "continue_micro_advance"
+
+        return {
+            "micro_advance_state": base_state,
+            "cadence_state": cadence_state,
+            "hard_push_state": hard_push_state,
+            "hard_push_score": hard_push_score,
+            "push_command": push,
+            "rotate_command": rotate,
+            "support_command": support_command,
+            "progress_delta": progress_delta,
+            "progress_delta_m": progress_delta_m,
+            "stalled": stalled,
+            "normal_poking_score": normal_poking,
+            "tangential_slide_score": tangential_slide,
+            "slack_m": slack,
+            "feed_budget_m": feed_budget,
+            "recommendation": recommendation,
+            "source": "navigation_engine.control_cadence",
+            "source_fields": [
+                "delta_push",
+                "delta_rotate",
+                "microcatheter_advance",
+                "path_progress",
+                "contact_force",
+                "risk_score",
+                "normal_poking_score",
+                "tangential_slide_score",
+                "slack_m",
+                "feed_budget_m",
+            ],
+        }
 
     @staticmethod
     def _micro_advance_state(state: NavigationState) -> str:

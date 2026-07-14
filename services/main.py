@@ -240,6 +240,7 @@ def session_step(session_id: str, request: StepRequest) -> StepResponse:
             session_id=session_id,
             delta_push=request.delta_push,
             delta_rotate=request.delta_rotate,
+            microcatheter_advance=request.microcatheter_advance,
         )
         info = manager.get_session_info(session_id)
         engine = manager.get_session(session_id)

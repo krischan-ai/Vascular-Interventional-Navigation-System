@@ -95,6 +95,10 @@ class TestSchemas:
         request = StepRequest(delta_push=0.5, delta_rotate=-0.3)
         assert request.delta_push == 0.5
         assert request.delta_rotate == -0.3
+        assert request.microcatheter_advance == 0.0
+
+        support = StepRequest(delta_push=0.0, delta_rotate=0.0, microcatheter_advance=0.8)
+        assert support.microcatheter_advance == 0.8
 
     def test_step_request_out_of_range(self):
         from services.schemas import StepRequest
@@ -105,6 +109,9 @@ class TestSchemas:
 
         with pytest.raises(ValidationError):
             StepRequest(delta_push=0.0, delta_rotate=-2.0)
+
+        with pytest.raises(ValidationError):
+            StepRequest(delta_push=0.0, delta_rotate=0.0, microcatheter_advance=2.0)
 
     def test_session_start_request_defaults(self):
         from services.schemas import SessionStartRequest
@@ -194,11 +201,18 @@ class TestNavigationStateExtended:
         assert guidance["workflow"]["phase"] == "MICRO_ADVANCE"
         assert guidance["orientation"]["orientation_state"] == "aligned"
         assert guidance["orientation"]["orientation_score"] == pytest.approx(1.0)
+        assert guidance["orientation"]["tip_facing_score"] == pytest.approx(1.0)
+        assert guidance["orientation"]["torsion_lag_deg"] is None
         assert guidance["tip_shape"]["tip_shape_state"] == "unknown"
         assert guidance["tip_shape"]["shape_type"] is None
         assert guidance["tip_shape"]["source"] == "not_modeled"
         assert guidance["support"]["support_state"] == "unknown"
         assert guidance["support"]["effective_support_type"] is None
+        assert guidance["micro_advance"]["cadence_state"] == "pause"
+        assert guidance["micro_advance"]["hard_push_state"] == "clear"
+        assert guidance["training_score"]["overall"] < 100
+        assert guidance["training_score"]["components"]["orientation"] == 100
+        assert "TIP_SHAPE_NOT_MODELED" in guidance["training_score"]["deductions"]
 
     def test_flow_guidance_high_risk_requires_strategy_switch(self):
         from services.navigation_engine import NavigationEngine, NavigationState
@@ -224,7 +238,160 @@ class TestNavigationStateExtended:
         assert guidance["micro_advance"]["micro_advance_state"] == "blocked"
         assert guidance["wall_slide"]["wall_slide_state"] == "unsafe"
         assert guidance["strategy_switch"]["strategy_switch_state"] == "required"
+        assert guidance["strategy_switch"]["severity"] == "critical"
+        assert guidance["strategy_switch"]["panel_title"] == "Strategy switch required"
+        assert guidance["strategy_switch"]["primary_failure_reason"] == "collision_stop"
+        assert guidance["strategy_switch"]["primary_action"] == "pause"
+        assert "pullback" in guidance["strategy_switch"]["recommended_actions"]
+        assert guidance["micro_advance"]["micro_advance_state"] == "blocked"
+        assert guidance["training_score"]["components"]["strategy_switch"] == 35
+        assert "STRATEGY_SWITCH_REQUIRED" in guidance["training_score"]["deductions"]
         assert "COLLISION_STOP" in guidance["workflow"]["reason_codes"]
+
+    def test_flow_guidance_uses_backend_mechanics_when_available(self):
+        from services.navigation_engine import NavigationEngine, NavigationState
+
+        class Backend:
+            def mechanics_state(self):
+                return {
+                    "source": "newton_engine.mechanics_state",
+                    "source_fields": ["jtip_deg", "free_len", "max_slack"],
+                    "guidewire": {
+                        "shape_type": "j_tip",
+                        "curve_angle_deg": 35.0,
+                        "tip_length_m": 0.009,
+                        "tip_facing_score": 0.82,
+                        "proximal_rotation_deg": 45.0,
+                        "distal_tip_rotation_deg": 30.0,
+                        "torsion_lag_deg": 15.0,
+                        "tip_deflection_score": 0.57,
+                    },
+                    "support": {
+                        "support_state": "modeled",
+                        "effective_support_type": "proximal_sheath",
+                        "effective_support_tip_m": 0.03,
+                        "free_wire_length_m": 0.03,
+                        "support_ratio": 0.52,
+                        "max_slack_m": 0.012,
+                    },
+                    "risk": {
+                        "wall_slide_state": "WALL_SLIDE_OK",
+                        "buckling_risk": "LOW",
+                        "slack_m": 0.002,
+                        "feed_budget_m": 0.010,
+                        "normal_poking_score": 0.05,
+                        "tangential_slide_score": 0.92,
+                    },
+                }
+
+            def close(self):
+                pass
+
+        engine = NavigationEngine(
+            guided=True,
+            planned_path=[[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+        )
+        engine._engine = Backend()
+        state = NavigationState(
+            episode_length=1,
+            tip_direction=[0.0, 0.0, 1.0],
+            path_progress=0.5,
+            wall_distance=0.05,
+            safety_status="SAFE_NAV",
+            risk_score=0.0,
+        )
+
+        guidance = engine._flow_guidance(state)
+
+        assert guidance["tip_shape"]["tip_shape_state"] == "modeled"
+        assert guidance["tip_shape"]["shape_type"] == "j_tip"
+        assert guidance["tip_shape"]["curve_angle_deg"] == pytest.approx(35.0)
+        assert guidance["tip_shape"]["source"] == "newton_engine.mechanics_state"
+        assert guidance["support"]["support_state"] == "modeled"
+        assert guidance["support"]["effective_support_type"] == "proximal_sheath"
+        assert guidance["support"]["free_wire_length_m"] == pytest.approx(0.03)
+        assert guidance["wall_slide"]["wall_slide_state"] == "WALL_SLIDE_OK"
+        assert guidance["wall_slide"]["normal_poking_score"] == pytest.approx(0.05)
+        assert guidance["wall_slide"]["tangential_slide_score"] == pytest.approx(0.92)
+        assert guidance["orientation"]["tip_facing_score"] == pytest.approx(0.82)
+        assert guidance["orientation"]["proximal_rotation_deg"] == pytest.approx(45.0)
+        assert guidance["orientation"]["distal_tip_rotation_deg"] == pytest.approx(30.0)
+        assert guidance["orientation"]["torsion_lag_deg"] == pytest.approx(15.0)
+        assert guidance["orientation"]["tip_deflection_score"] == pytest.approx(0.57)
+        assert guidance["strategy_switch"]["buckling_risk"] == "LOW"
+        assert guidance["strategy_switch"]["slack_m"] == pytest.approx(0.002)
+        assert guidance["strategy_switch"]["severity"] == "info"
+        assert guidance["strategy_switch"]["primary_failure_reason"] == "none"
+        assert guidance["strategy_switch"]["recommended_actions"] == ["continue_micro_advance"]
+        assert guidance["micro_advance"]["cadence_state"] == "pause"
+        assert guidance["micro_advance"]["hard_push_score"] == pytest.approx(0.0)
+        assert guidance["training_score"]["components"]["tip_shape"] == 100
+        assert guidance["training_score"]["components"]["support"] == 74
+        assert guidance["training_score"]["components"]["wall_slide"] == 92
+        assert guidance["training_score"]["source"] == "navigation_engine.large_curvature_training_score"
+
+    def test_micro_advance_detects_hard_push_under_contact_risk(self):
+        from services.navigation_engine import NavigationEngine, NavigationState
+
+        engine = NavigationEngine(
+            guided=True,
+            planned_path=[[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+        )
+        engine._last_control_metrics = {
+            "push_command": 0.85,
+            "rotate_command": 0.0,
+            "support_command": 0.0,
+            "progress_delta": 0.0,
+            "progress_delta_m": 0.0,
+        }
+        state = NavigationState(
+            episode_length=3,
+            tip_direction=[0.0, 0.0, 1.0],
+            path_progress=0.5,
+            wall_distance=0.001,
+            contact_force=0.2,
+            safety_status="DANGER_WARNING",
+            risk_score=0.4,
+        )
+
+        guidance = engine._flow_guidance(state)
+
+        assert guidance["micro_advance"]["cadence_state"] == "hard_push"
+        assert guidance["micro_advance"]["hard_push_state"] == "unsafe"
+        assert guidance["micro_advance"]["hard_push_score"] >= 0.5
+        assert "hard_push" in guidance["strategy_switch"]["failure_reasons"]
+        assert guidance["training_score"]["components"]["micro_advance"] <= 60
+        assert "HARD_PUSH_WARNING" in guidance["training_score"]["deductions"]
+
+    def test_micro_advance_allows_small_probe_push(self):
+        from services.navigation_engine import NavigationEngine, NavigationState
+
+        engine = NavigationEngine(
+            guided=True,
+            planned_path=[[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+        )
+        engine._last_control_metrics = {
+            "push_command": 0.2,
+            "rotate_command": 0.0,
+            "support_command": 0.0,
+            "progress_delta": 0.001,
+            "progress_delta_m": 0.001,
+        }
+        state = NavigationState(
+            episode_length=3,
+            tip_direction=[0.0, 0.0, 1.0],
+            path_progress=0.5,
+            wall_distance=0.05,
+            safety_status="SAFE_NAV",
+            risk_score=0.0,
+        )
+
+        guidance = engine._flow_guidance(state)
+
+        assert guidance["micro_advance"]["cadence_state"] == "micro_push"
+        assert guidance["micro_advance"]["hard_push_state"] == "clear"
+        assert guidance["micro_advance"]["hard_push_score"] < 0.1
+        assert guidance["training_score"]["components"]["micro_advance"] == 100
 
 
 class TestNavigationEngineHelpers:

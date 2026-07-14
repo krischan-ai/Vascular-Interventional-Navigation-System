@@ -226,6 +226,7 @@ class NewtonEngine:
         # Torsion steering: rotate input integrated (rad/s at rotate=1) into a
         # twist applied to the root anchor frame about the local tangent (D4c).
         self._rotate_speed = float(os.environ.get("CATHSIM_NEWTON_ROTATE_SPEED", "3.0"))
+        self._support_speed = float(os.environ.get("CATHSIM_NEWTON_SUPPORT_SPEED", "0.03"))
         # Pre-bent J-tip rest shape: the distal `jtip_bodies` segments curve off
         # the tangent by `jtip_deg` total, giving `rotate` real branch-selecting
         # authority at sharp bends (incidental curvature alone is too weak). 0 deg
@@ -427,7 +428,7 @@ class NewtonEngine:
     # the model geometry at build time (rebuild required).
     _LIVE_PARAMS = (
         "bend", "tip_bend", "soft_tip", "stretch", "push_speed", "rotate_speed",
-        "sheath_bodies", "free_len", "max_slack",
+        "sheath_bodies", "free_len", "max_slack", "support_speed",
     )
     _REBUILD_PARAMS = ("jtip_deg", "jtip_bodies", "contact_ke", "wall_thickness", "rod_length")
     # Live params that change the glue mask (recomputed in place, no rebuild).
@@ -466,7 +467,9 @@ class NewtonEngine:
 
     @property
     def deform_params(self) -> dict:
+        tip_shape = "j_tip" if self._jtip_deg > 0.0 and self._jtip_bodies > 0 else "straight"
         return {
+            "tip_shape": tip_shape,
             "bend": self._bend,
             "tip_bend": self._tip_bend,
             "soft_tip": self._soft_tip,
@@ -479,6 +482,7 @@ class NewtonEngine:
             "sheath_bodies": self._sheath_bodies,
             "free_len": self._free_len,
             "max_slack": self._max_slack,
+            "support_speed": self._support_speed,
             "bend_profile": self._bend_profile(max(0, int(round(self._rod_length / self._rod_seg_len)))).tolist(),
         }
 
@@ -639,6 +643,125 @@ class NewtonEngine:
         contact_force = max(0.0, worst) * self._contact_ke
         return worst, wall_distance, contact_force
 
+    def _wall_slide_metrics(self, xyz: np.ndarray) -> dict:
+        """Classify near-wall motion as tangential slide vs. normal poking.
+
+        Scores are source-backed by current rod geometry and the real route
+        radius. ``normal_poking_score`` rises when the distal local wire tangent
+        points outward into the nearest wall normal; ``tangential_slide_score``
+        rises when the tangent is mostly parallel to the wall surface.
+        """
+        if len(xyz) == 0:
+            return {
+                "normal_poking_score": None,
+                "tangential_slide_score": None,
+                "wall_contact_body_index": None,
+                "wall_contact_arclen_m": None,
+                "wall_normal": None,
+                "wall_tangent_alignment": None,
+            }
+
+        d2 = np.sum((xyz[:, None, :] - self._centerline[None, :, :]) ** 2, axis=2)
+        nearest = np.argmin(d2, axis=1)
+        dist = np.sqrt(d2[np.arange(len(xyz)), nearest])
+        breach = dist + self._rod_radius - self._radii[nearest]
+        contact_index = int(np.argmax(breach))
+        center = self._centerline[int(nearest[contact_index])]
+        radial = xyz[contact_index] - center
+        radial_norm = float(np.linalg.norm(radial))
+        normal = radial / radial_norm if radial_norm > 1e-9 else np.zeros(3, dtype=np.float64)
+
+        if len(xyz) >= 2:
+            if contact_index >= len(xyz) - 1:
+                tangent = xyz[-1] - xyz[-2]
+            elif contact_index <= 0:
+                tangent = xyz[1] - xyz[0]
+            else:
+                tangent = xyz[contact_index + 1] - xyz[contact_index - 1]
+        else:
+            tangent = np.zeros(3, dtype=np.float64)
+        tangent_norm = float(np.linalg.norm(tangent))
+        if tangent_norm > 1e-9:
+            tangent = tangent / tangent_norm
+            outward = float(np.clip(np.dot(tangent, normal), -1.0, 1.0))
+            normal_poking = max(0.0, outward)
+            tangential_slide = float(np.sqrt(max(0.0, 1.0 - outward * outward)))
+            tangent_alignment = abs(outward)
+        else:
+            normal_poking = 0.0
+            tangential_slide = 0.0
+            tangent_alignment = None
+
+        seg = np.linalg.norm(np.diff(self._centerline, axis=0), axis=1)
+        cl_cum = np.concatenate([[0.0], np.cumsum(seg)])
+        arclen = float(cl_cum[int(nearest[contact_index])])
+        near_wall = bool(float(breach[contact_index]) >= -0.0015)
+        return {
+            "normal_poking_score": float(normal_poking) if near_wall else 0.0,
+            "tangential_slide_score": float(tangential_slide) if near_wall else 0.0,
+            "wall_contact_body_index": contact_index,
+            "wall_contact_arclen_m": arclen,
+            "wall_normal": [float(v) for v in normal],
+            "wall_tangent_alignment": None if tangent_alignment is None else float(tangent_alignment),
+        }
+
+    def _tip_orientation_metrics(self, xyz: np.ndarray) -> dict:
+        """Distal tip orientation in the local vessel frame.
+
+        ``proximal_rotation_deg`` is the commanded/root twist. The distal angle is
+        derived from the final rod segment projected into the normal plane of the
+        nearest centerline tangent. Their wrapped difference is the observable
+        torsion lag used by the orientation HUD.
+        """
+        if len(xyz) < 2:
+            return {
+                "distal_tip_rotation_deg": None,
+                "torsion_lag_deg": None,
+                "tip_deflection_score": None,
+            }
+
+        tip = xyz[-1]
+        d2 = np.sum((self._centerline - tip) ** 2, axis=1)
+        idx = int(np.argmin(d2))
+        if len(self._centerline) >= 2:
+            if idx <= 0:
+                tangent = self._centerline[1] - self._centerline[0]
+            elif idx >= len(self._centerline) - 1:
+                tangent = self._centerline[-1] - self._centerline[-2]
+            else:
+                tangent = self._centerline[idx + 1] - self._centerline[idx - 1]
+        else:
+            tangent = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        tangent = tangent / (np.linalg.norm(tangent) + 1e-12)
+
+        radial = tip - self._centerline[idx]
+        normal = radial - tangent * float(np.dot(radial, tangent))
+        if float(np.linalg.norm(normal)) <= 1e-9:
+            ref = np.array([0.0, 1.0, 0.0]) if abs(tangent[1]) < 0.9 else np.array([1.0, 0.0, 0.0])
+            normal = ref - tangent * float(np.dot(ref, tangent))
+        normal = normal / (np.linalg.norm(normal) + 1e-12)
+        binormal = np.cross(tangent, normal)
+        binormal = binormal / (np.linalg.norm(binormal) + 1e-12)
+
+        tip_axis = xyz[-1] - xyz[-2]
+        tip_axis = tip_axis / (np.linalg.norm(tip_axis) + 1e-12)
+        projected = tip_axis - tangent * float(np.dot(tip_axis, tangent))
+        tip_deflection = float(np.linalg.norm(projected))
+        if tip_deflection <= 1e-9:
+            distal_deg = None
+            lag_deg = None
+        else:
+            projected = projected / tip_deflection
+            distal_deg = math.degrees(math.atan2(float(np.dot(projected, binormal)), float(np.dot(projected, normal))))
+            proximal_deg = math.degrees(self._twist)
+            lag_deg = ((proximal_deg - distal_deg + 180.0) % 360.0) - 180.0
+
+        return {
+            "distal_tip_rotation_deg": None if distal_deg is None else float(distal_deg),
+            "torsion_lag_deg": None if lag_deg is None else float(lag_deg),
+            "tip_deflection_score": float(np.clip(tip_deflection, 0.0, 1.0)),
+        }
+
     def diagnostics(self) -> dict:
         """Human-facing Newton debug metrics streamed to the front end.
 
@@ -687,6 +810,162 @@ class NewtonEngine:
             "contact_force": contact_force,
         })
         return out
+
+    def apply_support_control(self, microcatheter_advance: float) -> dict:
+        """Advance/retract the effective proximal support point.
+
+        Positive input means the microcatheter/support follows the wire forward,
+        shortening the distal free span. Negative input retracts support and
+        lengthens the free span. The value is a normalized coefficient in
+        [-1, 1], converted to meters per control tick by ``support_speed``.
+        """
+        command = float(np.clip(microcatheter_advance, -1.0, 1.0))
+        if abs(command) <= 1e-9:
+            return self.mechanics_state()
+        delta = command * self._support_speed * self._control_dt
+        min_free = max(self._rod_seg_len * max(1, self._jtip_bodies + 1), self._rod_seg_len)
+        max_free = max(min_free, self._rod_length)
+        # Support advance moves the support tip distally, so the unsupported
+        # free span shrinks; retracting support grows it again.
+        self._free_len = float(np.clip(self._free_len - delta, min_free, max_free))
+        if self._initialized and self._rod_bodies:
+            self._alpha = self._glue_alpha(len(self._rod_bodies))
+        return self.mechanics_state()
+
+    def mechanics_state(self) -> dict:
+        """Source-backed guidewire mechanics for clinical workflow guidance.
+
+        Unlike ``diagnostics`` this is a stable, semantic payload intended for
+        ``state_batch`` / HUD consumers. It deliberately exposes only values this
+        engine actually models today: pre-bent J-tip configuration, proximal
+        support/free-span state, slack budget, and wall breach/contact state.
+        """
+        body_count = len(self._rod_bodies)
+        estimated_body_count = max(1, int(round(self._rod_length / self._rod_seg_len)) + 1)
+        support_count = self._sheath_count(body_count or estimated_body_count)
+        total_wire_length_m = (
+            float(self._base_arc[-1])
+            if self._base_arc is not None and len(self._base_arc) > 0
+            else self._rod_length
+        )
+        free_wire_length_m = float(np.clip(self._free_len, 0.0, total_wire_length_m))
+        supported_length_m = max(0.0, total_wire_length_m - free_wire_length_m)
+        support_ratio = supported_length_m / total_wire_length_m if total_wire_length_m > 0.0 else 0.0
+
+        tip_shape = "j_tip" if self._jtip_deg > 0.0 and self._jtip_bodies > 0 else "straight"
+        guidewire = {
+            "profile_name": "newton_force_j_tip" if tip_shape == "j_tip" else "newton_force_straight",
+            "tip_shape": tip_shape,
+            "shape_type": tip_shape,
+            "curve_angle_deg": float(self._jtip_deg if tip_shape == "j_tip" else 0.0),
+            "tip_length_m": float(max(0, self._jtip_bodies) * self._rod_seg_len),
+            "soft_tip_joint_count": int(self._soft_tip),
+            "tip_bend_stiffness": float(self._tip_bend),
+            "shaft_bend_stiffness": float(self._bend),
+            "proximal_rotation_deg": float(math.degrees(self._twist)),
+            "distal_tip_rotation_deg": None,
+            "torsion_lag_deg": None,
+            "tip_deflection_score": None,
+            "tip_facing_score": None,
+        }
+        support = {
+            "support_state": "modeled",
+            "effective_support_type": "proximal_sheath" if self._drive == "force" else "graded_anchor",
+            "sheath_bodies": int(self._sheath_bodies),
+            "sheath_bodies_resolved": int(support_count),
+            "effective_support_tip_m": float(self._insert_s + supported_length_m),
+            "free_wire_length_m": float(free_wire_length_m),
+            "support_ratio": float(np.clip(support_ratio, 0.0, 1.0)),
+            "max_slack_m": float(self._max_slack),
+        }
+        risk = {
+            "slack_m": None,
+            "feed_budget_m": None,
+            "max_breach_m": None,
+            "contact_force": None,
+            "wall_distance_m": None,
+            "normal_poking_score": None,
+            "tangential_slide_score": None,
+            "wall_contact_body_index": None,
+            "wall_contact_arclen_m": None,
+            "wall_normal": None,
+            "wall_tangent_alignment": None,
+            "wall_slide_state": "unknown",
+            "buckling_risk": "unknown",
+        }
+
+        if self._initialized and self._base_arc is not None and self._s0 is not None:
+            xyz = self._s0.body_q.numpy()[self._rod_bodies, :3]
+            orientation_metrics = self._tip_orientation_metrics(xyz)
+            tip_arclen = self._tip_arclen()
+            fed_arclen = self._insert_s + float(self._base_arc[-1])
+            slack = fed_arclen - tip_arclen
+            worst, wall_distance, contact_force = self._breach_stats(xyz)
+            wall_metrics = self._wall_slide_metrics(xyz)
+            normal_poking = float(wall_metrics.get("normal_poking_score") or 0.0)
+            tangential_slide = float(wall_metrics.get("tangential_slide_score") or 0.0)
+            near_wall = contact_force > 0.0 or wall_distance < 0.0015
+            budget = (
+                max(0.0, self._max_slack - slack)
+                if self._drive == "force" and self._max_slack > 0.0
+                else float("inf")
+            )
+            if worst >= 0.0003:
+                wall_slide_state = "BREACH_STOP"
+            elif near_wall and normal_poking >= 0.7:
+                wall_slide_state = "TIP_POKING_WARNING"
+            elif contact_force > 0.0 and slack > max(0.001, self._max_slack * 0.5):
+                wall_slide_state = "TIP_POKING_WARNING"
+            elif near_wall and tangential_slide >= 0.7:
+                wall_slide_state = "WALL_SLIDE_OK"
+            elif near_wall:
+                wall_slide_state = "WALL_CONTACT_MONITOR"
+            else:
+                wall_slide_state = "CLEAR"
+
+            if self._max_slack > 0.0 and slack >= self._max_slack:
+                buckling_risk = "HIGH"
+            elif self._max_slack > 0.0 and slack >= self._max_slack * 0.5:
+                buckling_risk = "MEDIUM"
+            else:
+                buckling_risk = "LOW"
+
+            risk.update({
+                "slack_m": float(slack),
+                "feed_budget_m": float(budget),
+                "max_breach_m": float(worst),
+                "contact_force": float(contact_force),
+                "wall_distance_m": float(min(wall_distance, MAX_WALL_DISTANCE)),
+                **wall_metrics,
+                "wall_slide_state": wall_slide_state,
+                "buckling_risk": buckling_risk,
+            })
+            guidewire.update(orientation_metrics)
+
+        return {
+            "source": "newton_engine.mechanics_state",
+            "source_fields": [
+                "jtip_deg",
+                "jtip_bodies",
+                "soft_tip",
+                "tip_bend",
+                "bend",
+                "sheath_bodies",
+                "free_len",
+                "max_slack",
+                "insert_s",
+                "rod_bodies",
+                "contact_force",
+                "wall_distance",
+                "tip_tangent",
+                "wall_normal",
+                "distal_tip_rotation",
+                "torsion_lag",
+            ],
+            "guidewire": guidewire,
+            "support": support,
+            "risk": risk,
+        }
 
     def step(self, push: float, rotate: float) -> RawPose:
         self._ensure_initialized()

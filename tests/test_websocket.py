@@ -48,12 +48,42 @@ class TestWebSocketHandlerUnit:
         valid = ControlData(delta_push=0.5, delta_rotate=-0.3)
         assert valid.delta_push == 0.5
         assert valid.delta_rotate == -0.3
+        assert valid.microcatheter_advance == 0.0
+
+        support = ControlData(delta_push=0.0, delta_rotate=0.0, microcatheter_advance=0.6)
+        assert support.microcatheter_advance == 0.6
 
         with pytest.raises(ValidationError):
             ControlData(delta_push=1.5, delta_rotate=0.0)
 
         with pytest.raises(ValidationError):
             ControlData(delta_push=0.0, delta_rotate=-2.0)
+
+        with pytest.raises(ValidationError):
+            ControlData(delta_push=0.0, delta_rotate=0.0, microcatheter_advance=-2.0)
+
+    def test_device_config_maps_tip_shape_to_engine_params(self):
+        from services.websocket_handler import DeviceConfigData, WebSocketHandler
+
+        straight = DeviceConfigData(guidewire={"tip_shape": "straight"})
+        mapped = WebSocketHandler._device_config_to_engine_params(straight)
+        assert mapped["tip_shape"] == "straight"
+        assert mapped["jtip_deg"] == pytest.approx(0.0)
+        assert mapped["jtip_bodies"] == 0
+
+        j_tip = DeviceConfigData(guidewire={
+            "tip_shape": "j_tip",
+            "tip_curve_angle_deg": 45.0,
+            "tip_length_mm": 12.0,
+            "soft_tip_length_mm": 15.0,
+            "tip_stiffness": 0.25,
+        })
+        mapped = WebSocketHandler._device_config_to_engine_params(j_tip)
+        assert mapped["tip_shape"] == "j_tip"
+        assert mapped["jtip_deg"] == pytest.approx(45.0)
+        assert mapped["jtip_bodies"] == 4
+        assert mapped["soft_tip"] == 5
+        assert mapped["tip_bend"] == pytest.approx(5.375)
 
     def test_session_start_data_defaults(self):
         from services.websocket_handler import SessionStartData
@@ -77,6 +107,71 @@ class TestWebSocketHandlerUnit:
         assert msg.session_id == "test-id"
         assert msg.data["delta_push"] == 0.5
 
+    def test_control_data_forwards_microcatheter_advance(self):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        from services.navigation_engine import NavigationState
+        from services.websocket_handler import WebSocketHandler
+
+        handler = WebSocketHandler(MagicMock())
+        handler._session_manager.step.return_value = NavigationState()
+        send_mock = AsyncMock()
+        handler._send_message = send_mock
+        conn = MagicMock()
+        conn.session_id = "session-1"
+        conn.batch_mode = False
+        conn.control_rate_limiter = 0.0
+
+        asyncio.run(handler._handle_control(conn, {
+            "delta_push": 0.1,
+            "delta_rotate": 0.2,
+            "microcatheter_advance": 0.7,
+        }))
+
+        handler._session_manager.step.assert_called_once_with(
+            session_id="session-1",
+            delta_push=0.1,
+            delta_rotate=0.2,
+            microcatheter_advance=0.7,
+        )
+
+    def test_device_config_applies_engine_params(self):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        from services.websocket_handler import MessageType, WebSocketHandler
+
+        engine = MagicMock()
+        engine.set_engine_params.return_value = {
+            "tip_shape": "j_tip",
+            "jtip_deg": 45.0,
+            "jtip_bodies": 4,
+        }
+        handler = WebSocketHandler(MagicMock())
+        handler._session_manager.get_session.return_value = engine
+        send_mock = AsyncMock()
+        handler._send_message = send_mock
+        conn = MagicMock()
+        conn.session_id = "session-1"
+
+        asyncio.run(handler._handle_device_config(conn, {
+            "guidewire": {
+                "tip_shape": "j_tip",
+                "tip_curve_angle_deg": 45.0,
+                "tip_length_mm": 12.0,
+            }
+        }))
+
+        engine.set_engine_params.assert_called_once_with({
+            "jtip_deg": 45.0,
+            "jtip_bodies": 4,
+        })
+        _, args, kwargs = send_mock.mock_calls[0]
+        assert args[1] == MessageType.DEVICE_CONFIG
+        assert kwargs["data"]["effective"]["jtip_deg"] == pytest.approx(45.0)
+        assert kwargs["data"]["guidewire"]["tip_shape"] == "j_tip"
+
     def test_connection_state_defaults(self):
         from services.websocket_handler import ConnectionState
         from unittest.mock import MagicMock
@@ -97,6 +192,37 @@ class TestWebSocketHandlerUnit:
         class DummyBackend:
             def diagnostics(self):
                 return {"drive": "force", "slack_m": 0.002, "feed_budget_m": 0.010}
+
+            def mechanics_state(self):
+                return {
+                    "source": "newton_engine.mechanics_state",
+                    "source_fields": ["jtip_deg", "free_len", "max_slack"],
+                    "guidewire": {
+                        "shape_type": "j_tip",
+                        "curve_angle_deg": 35.0,
+                        "tip_length_m": 0.009,
+                        "proximal_rotation_deg": 45.0,
+                        "distal_tip_rotation_deg": 30.0,
+                        "torsion_lag_deg": 15.0,
+                        "tip_deflection_score": 0.57,
+                    },
+                    "support": {
+                        "support_state": "modeled",
+                        "effective_support_type": "proximal_sheath",
+                        "effective_support_tip_m": 0.03,
+                        "free_wire_length_m": 0.03,
+                        "support_ratio": 0.5,
+                        "max_slack_m": 0.012,
+                    },
+                    "risk": {
+                        "slack_m": 0.002,
+                        "feed_budget_m": 0.010,
+                        "wall_slide_state": "WALL_SLIDE_OK",
+                        "buckling_risk": "LOW",
+                        "normal_poking_score": 0.04,
+                        "tangential_slide_score": 0.88,
+                    },
+                }
 
         class DummyEngine:
             _engine = DummyBackend()
@@ -131,6 +257,17 @@ class TestWebSocketHandlerUnit:
                 },
                 "tip_shape": {"tip_shape_state": "unknown", "shape_type": None},
                 "support": {"support_state": "unknown", "effective_support_type": None},
+                "micro_advance": {
+                    "micro_advance_state": "caution",
+                    "cadence_state": "micro_push",
+                    "hard_push_state": "clear",
+                    "hard_push_score": 0.1,
+                },
+                "training_score": {
+                    "overall": 82,
+                    "components": {"wall_slide": 90},
+                    "source": "navigation_engine.large_curvature_training_score",
+                },
             },
         )
         batch = WebSocketHandler(SessionManager())._state_to_batch(state, DummyEngine())
@@ -143,6 +280,10 @@ class TestWebSocketHandlerUnit:
         assert batch["safety"]["risk_regions"] == []
         assert batch["flow_guidance"]["workflow"]["phase"] == "WALL_SLIDE"
         assert batch["safety"]["flow_guidance"] == batch["flow_guidance"]
+        assert batch["training_score"]["overall"] == 82
+        assert batch["training_score"] == batch["flow_guidance"]["training_score"]
+        assert batch["flow_guidance"]["micro_advance"]["cadence_state"] == "micro_push"
+        assert batch["flow_guidance"]["micro_advance"]["hard_push_score"] == pytest.approx(0.1)
         assert batch["schema_version"] == "navigation_visual_v2"
         assert isinstance(batch["timestamp_ms"], int)
         mechanics = batch["safety"]["guidewire_mechanics"]
@@ -157,6 +298,16 @@ class TestWebSocketHandlerUnit:
         assert batch["engine"] == "DummyBackend"
         assert batch["diagnostics"]["drive"] == "force"
         assert batch["diagnostics"]["slack_m"] == 0.002
+        assert batch["guidewire"]["shape_type"] == "j_tip"
+        assert batch["guidewire"]["curve_angle_deg"] == pytest.approx(35.0)
+        assert batch["guidewire"]["distal_tip_rotation_deg"] == pytest.approx(30.0)
+        assert batch["guidewire"]["torsion_lag_deg"] == pytest.approx(15.0)
+        assert batch["support"]["effective_support_type"] == "proximal_sheath"
+        assert batch["support"]["free_wire_length_m"] == pytest.approx(0.03)
+        assert batch["risk"]["slack_m"] == pytest.approx(0.002)
+        assert batch["risk"]["normal_poking_score"] == pytest.approx(0.04)
+        assert batch["risk"]["tangential_slide_score"] == pytest.approx(0.88)
+        assert batch["risk"]["safety_status"] == "DANGER_WARNING"
 
     def test_state_batch_visual_level_uses_real_risk_level_before_stop(self):
         from services.navigation_engine import NavigationState

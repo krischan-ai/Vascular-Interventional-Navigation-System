@@ -39,6 +39,50 @@ def test_hud_uses_backend_dashboard_fields():
     assert "var b0: Dictionary = bodies[0]" not in main
     assert "func _free_look" not in main
     assert "_smooth_wall_mm" in hud
+    assert "func update_clinical_guidance" in hud
+    assert "flow_guidance" in hud
+    assert "free_wire_length_m" in hud
+    assert "curve_angle_deg" in hud
+    assert "tip_facing_score" in hud
+    assert "torsion_lag_deg" in hud
+    assert 'connp.add_kv("Orient", "-")' in hud
+    assert "func _format_orientation" in hud
+    assert "buckling_risk" in hud
+    assert "TIP_POKING_WARNING" in hud
+    assert "tangential_slide_score" in hud
+    assert "normal_poking_score" in hud
+    assert "training_score" in hud
+    assert 'connp.add_kv("Wall", "-")' in hud
+    assert 'connp.add_kv("Push", "-")' in hud
+    assert "cadence_state" in hud
+    assert "hard_push_score" in hud
+    assert 'connp.add_kv("Score", "-")' in hud
+    assert '"overall"' in hud
+    assert "_hud.update_clinical_guidance(batch)" in main
+    assert "_hud.update_clinical_guidance(state)" in main
+    assert "microcatheter_advance" in ws
+    assert "send_device_config" in ws
+    assert '"device_config"' in ws
+    assert "signal support_command" in hud
+    assert "signal tip_shape_command" in hud
+    assert "signal strategy_action" in hud
+    assert "Straight" in hud
+    assert "J-tip" in hud
+    assert "Support+" in hud
+    assert "Support-" in hud
+    assert "Pullback" in hud
+    assert "Reorient" in hud
+    assert "AltTip" in hud
+    assert 'connp.add_kv("Strategy", "-")' in hud
+    assert "primary_failure_reason" in hud
+    assert "primary_action" in hud
+    assert "_hud.support_command.connect(_on_support_command)" in main
+    assert "_hud.tip_shape_command.connect(_on_tip_shape_command)" in main
+    assert "_hud.strategy_action.connect(_on_strategy_action)" in main
+    assert "func _on_support_command" in main
+    assert "func _on_tip_shape_command" in main
+    assert "func _on_strategy_action" in main
+    assert "tip_curve_angle_deg" in main
     assert "TODO backend" not in hud
     assert '"23.6"' not in hud
     assert '"02:35"' not in hud

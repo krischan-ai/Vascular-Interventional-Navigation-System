@@ -112,6 +112,7 @@ class TestLiveTuning:
 
     def test_deform_params_exposes_antibuckle_params(self, engine):
         params = engine.deform_params
+        assert params["tip_shape"] == "j_tip"
         assert params["sheath_bodies"] == -1
         assert params["free_len"] == pytest.approx(0.03)
         assert params["max_slack"] == pytest.approx(0.012)
@@ -126,14 +127,78 @@ class TestLiveTuning:
         assert diag["sheath_bodies"] == -1
         assert "slack_m" not in diag
 
+    def test_mechanics_state_exposes_clinical_contract_before_init(self, engine):
+        state = engine.mechanics_state()
+
+        assert state["source"] == "newton_engine.mechanics_state"
+        assert state["guidewire"]["shape_type"] == "j_tip"
+        assert state["guidewire"]["curve_angle_deg"] == pytest.approx(35.0)
+        assert state["support"]["support_state"] == "modeled"
+        assert state["support"]["effective_support_type"] == "proximal_sheath"
+        assert state["support"]["free_wire_length_m"] == pytest.approx(0.03, abs=0.003)
+        assert state["support"]["support_ratio"] > 0.0
+        assert state["risk"]["buckling_risk"] == "unknown"
+        assert state["risk"]["normal_poking_score"] is None
+        assert state["risk"]["tangential_slide_score"] is None
+
+    def test_wall_slide_metrics_detect_tangential_slide(self, engine):
+        xyz = np.array([
+            [0.00255, 0.0, 0.090],
+            [0.00255, 0.0, 0.100],
+            [0.00255, 0.0, 0.110],
+        ])
+
+        metrics = engine._wall_slide_metrics(xyz)
+
+        assert metrics["tangential_slide_score"] == pytest.approx(1.0)
+        assert metrics["normal_poking_score"] == pytest.approx(0.0)
+        assert metrics["wall_contact_body_index"] == 0
+        assert metrics["wall_normal"][0] == pytest.approx(1.0)
+
+    def test_wall_slide_metrics_detect_normal_poking(self, engine):
+        xyz = np.array([
+            [0.0018, 0.0, 0.100],
+            [0.0024, 0.0, 0.100],
+            [0.0030, 0.0, 0.100],
+        ])
+
+        metrics = engine._wall_slide_metrics(xyz)
+
+        assert metrics["normal_poking_score"] > 0.95
+        assert metrics["tangential_slide_score"] < 0.1
+
+    def test_tip_orientation_metrics_reports_distal_angle_and_lag(self, engine):
+        engine._twist = np.deg2rad(45.0)
+        xyz = np.array([
+            [0.0010, 0.0, 0.090],
+            [0.0020, 0.0, 0.100],
+            [0.0030, 0.0, 0.100],
+        ])
+
+        metrics = engine._tip_orientation_metrics(xyz)
+
+        assert metrics["distal_tip_rotation_deg"] == pytest.approx(0.0, abs=1e-3)
+        assert metrics["torsion_lag_deg"] == pytest.approx(45.0, abs=1e-3)
+        assert metrics["tip_deflection_score"] > 0.5
+
+    def test_support_control_advances_and_retracts_free_span(self, engine):
+        start = engine.mechanics_state()["support"]["free_wire_length_m"]
+
+        advanced = engine.apply_support_control(1.0)["support"]["free_wire_length_m"]
+        retracted = engine.apply_support_control(-1.0)["support"]["free_wire_length_m"]
+
+        assert advanced < start
+        assert retracted > advanced
+
     def test_set_deform_params_updates_before_init(self, engine):
         # Not initialized (no newton locally): values update, no rebuild/crash.
         effective = engine.set_deform_params(
-            sheath_bodies=5, free_len=0.05, max_slack=0.02
+            sheath_bodies=5, free_len=0.05, max_slack=0.02, jtip_deg=0.0, jtip_bodies=0
         )
         assert effective["sheath_bodies"] == 5
         assert effective["free_len"] == pytest.approx(0.05)
         assert effective["max_slack"] == pytest.approx(0.02)
+        assert effective["tip_shape"] == "straight"
         assert engine._sheath_count(20) == 5
 
 

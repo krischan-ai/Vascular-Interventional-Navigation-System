@@ -166,6 +166,7 @@ class SessionManager:
         session_id: str,
         delta_push: float,
         delta_rotate: float,
+        microcatheter_advance: float = 0.0,
     ) -> NavigationState:
         """Execute a step in the specified session.
 
@@ -173,12 +174,13 @@ class SessionManager:
             session_id: Session UUID
             delta_push: Push force coefficient [-1.0, 1.0]
             delta_rotate: Rotation force coefficient [-1.0, 1.0]
+            microcatheter_advance: Optional support advance coefficient [-1.0, 1.0]
 
         Returns:
             NavigationState after the step
         """
         engine = self.get_session(session_id)
-        state = engine.step(delta_push, delta_rotate)
+        state = engine.step(delta_push, delta_rotate, microcatheter_advance)
 
         with self._lock:
             info = self._session_info[session_id]

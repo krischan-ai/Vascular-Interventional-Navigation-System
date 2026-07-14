@@ -141,6 +141,12 @@ class StepRequest(BaseModel):
         le=1.0,
         description="Rotation force coefficient [-1.0, 1.0], positive = clockwise",
     )
+    microcatheter_advance: float = Field(
+        default=0.0,
+        ge=-1.0,
+        le=1.0,
+        description="Support advance coefficient [-1.0, 1.0], positive = advance support",
+    )
 
 
 class StepResponse(BaseModel):

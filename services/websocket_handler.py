@@ -91,6 +91,7 @@ class MessageType(str, Enum):
     SESSION_STOP = "session_stop"
     PATH_REQUEST = "path_request"
     SELECT_ROUTE = "select_route"
+    DEVICE_CONFIG = "device_config"
     ENGINE_PARAMS = "engine_params"
     SHAPE_INTENT = "shape_intent"
     RESET = "reset"
@@ -111,6 +112,7 @@ class ControlData(BaseModel):
 
     delta_push: float = Field(ge=-1.0, le=1.0)
     delta_rotate: float = Field(ge=-1.0, le=1.0)
+    microcatheter_advance: float = Field(default=0.0, ge=-1.0, le=1.0)
 
 
 class ShapeIntentData(BaseModel):
@@ -126,6 +128,26 @@ class ShapeIntentData(BaseModel):
     target_waypoint: list[float] | None = Field(default=None, min_length=3, max_length=3)
     target_direction: list[float] | None = Field(default=None, min_length=3, max_length=3)
     intensity: float = Field(default=1.0, ge=0.0, le=1.0)
+
+
+class GuidewireConfigData(BaseModel):
+    """Semantic guidewire/tip-shape configuration for clinical workflow P1."""
+
+    tip_shape: Literal["straight", "angled", "j_tip", "j", "c_shape", "hook"] = "j_tip"
+    tip_curve_angle_deg: float | None = Field(default=None, ge=0.0, le=120.0)
+    tip_length_mm: float | None = Field(default=None, ge=0.0, le=60.0)
+    soft_tip_length_mm: float | None = Field(default=None, ge=0.0, le=80.0)
+    tip_stiffness: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class DeviceConfigData(BaseModel):
+    """Device configuration message.
+
+    The public protocol is semantic (guidewire.tip_shape), while Newton still
+    consumes low-level deformation params. The handler maps between them.
+    """
+
+    guidewire: GuidewireConfigData
 
 
 class SessionStartData(BaseModel):
@@ -359,6 +381,9 @@ class WebSocketHandler:
         elif msg_type == MessageType.SELECT_ROUTE:
             await self._handle_select_route(conn_state, message.data)
 
+        elif msg_type == MessageType.DEVICE_CONFIG:
+            await self._handle_device_config(conn_state, message.data)
+
         elif msg_type == MessageType.ENGINE_PARAMS:
             await self._handle_engine_params(conn_state, message.data)
 
@@ -536,6 +561,7 @@ class WebSocketHandler:
                 session_id=conn_state.session_id,
                 delta_push=control.delta_push,
                 delta_rotate=control.delta_rotate,
+                microcatheter_advance=control.microcatheter_advance,
             )
 
             if conn_state.batch_mode:
@@ -652,6 +678,82 @@ class WebSocketHandler:
 
         await self._send_message(
             conn_state, msg_type, session_id=conn_state.session_id, data=payload
+        )
+
+    @staticmethod
+    def _device_config_to_engine_params(config: DeviceConfigData) -> dict[str, Any]:
+        guidewire = config.guidewire
+        shape = "j_tip" if guidewire.tip_shape == "j" else guidewire.tip_shape
+        default_angle = {
+            "straight": 0.0,
+            "angled": 25.0,
+            "j_tip": 35.0,
+            "c_shape": 55.0,
+            "hook": 75.0,
+        }.get(shape, 35.0)
+        angle = default_angle if guidewire.tip_curve_angle_deg is None else float(guidewire.tip_curve_angle_deg)
+        if shape == "straight":
+            angle = 0.0
+
+        params: dict[str, Any] = {
+            "jtip_deg": angle,
+        }
+        if guidewire.tip_length_mm is not None:
+            params["jtip_bodies"] = max(0, int(round(float(guidewire.tip_length_mm) / 3.0)))
+        elif shape == "straight":
+            params["jtip_bodies"] = 0
+        elif shape in {"c_shape", "hook"}:
+            params["jtip_bodies"] = 5
+        else:
+            params["jtip_bodies"] = 3
+
+        if guidewire.soft_tip_length_mm is not None:
+            params["soft_tip"] = max(0, int(round(float(guidewire.soft_tip_length_mm) / 3.0)))
+        if guidewire.tip_stiffness is not None:
+            # Public config uses 0=very soft, 1=shaft-like. Newton uses bend
+            # stiffness, so map onto the existing soft-tip range.
+            params["tip_bend"] = 0.5 + float(guidewire.tip_stiffness) * 19.5
+        params["tip_shape"] = shape
+        return params
+
+    async def _handle_device_config(
+        self, conn_state: ConnectionState, data: dict
+    ) -> None:
+        """Apply semantic guidewire device configuration to the live backend."""
+        if not conn_state.session_id:
+            await self._send_error(conn_state, "NO_SESSION", "No active session")
+            return
+        try:
+            config = DeviceConfigData(**data)
+        except ValidationError as e:
+            await self._send_error(conn_state, "INVALID_PARAMS", str(e))
+            return
+        try:
+            engine = self._session_manager.get_session(conn_state.session_id)
+        except KeyError:
+            conn_state.session_id = None
+            await self._send_error(conn_state, "SESSION_EXPIRED", "Session no longer exists")
+            return
+
+        mapped = self._device_config_to_engine_params(config)
+        engine_params = {key: value for key, value in mapped.items() if key != "tip_shape"}
+        try:
+            effective = await self._run_blocking(engine.set_engine_params, engine_params)
+        except Exception as e:  # noqa: BLE001
+            await self._send_error(conn_state, "DEVICE_CONFIG_ERROR", f"{type(e).__name__}: {e}")
+            return
+
+        await self._send_message(
+            conn_state,
+            MessageType.DEVICE_CONFIG,
+            session_id=conn_state.session_id,
+            data={
+                "effective": effective or {},
+                "guidewire": {
+                    **config.guidewire.model_dump(),
+                    "tip_shape": mapped["tip_shape"],
+                },
+            },
         )
 
     async def _handle_engine_params(
@@ -895,12 +997,29 @@ class WebSocketHandler:
         diagnostics = {}
         if backend is not None and hasattr(backend, "diagnostics"):
             diagnostics = backend.diagnostics()
+        mechanics = {}
+        if backend is not None and hasattr(backend, "mechanics_state"):
+            mechanics = backend.mechanics_state()
+        guidewire_state = mechanics.get("guidewire", {}) if isinstance(mechanics, dict) else {}
+        support_state = mechanics.get("support", {}) if isinstance(mechanics, dict) else {}
+        mechanics_risk = mechanics.get("risk", {}) if isinstance(mechanics, dict) else {}
+        flow_tip_shape = state.flow_guidance.get("tip_shape", {}) if isinstance(state.flow_guidance, dict) else {}
+        flow_support = state.flow_guidance.get("support", {}) if isinstance(state.flow_guidance, dict) else {}
+        training_score = state.flow_guidance.get("training_score", {}) if isinstance(state.flow_guidance, dict) else {}
         return {
             "schema_version": "navigation_visual_v2",
             "timestamp_ms": timestamp_ms,
             "engine": type(backend).__name__ if backend is not None else "",
             "fidelity_mode": state.fidelity_mode,
             "diagnostics": diagnostics,
+            "guidewire": guidewire_state or flow_tip_shape,
+            "support": support_state or flow_support,
+            "risk": {
+                **mechanics_risk,
+                "safety_status": state.safety_status,
+                "risk_score": state.risk_score,
+                "risk_regions": state.risk_regions,
+            },
             "tip": {
                 "position": state.tip_position,
                 "direction": state.tip_direction,
@@ -932,6 +1051,7 @@ class WebSocketHandler:
                 "flow_guidance": state.flow_guidance,
             },
             "flow_guidance": state.flow_guidance,
+            "training_score": training_score,
             "episode": {
                 "length": state.episode_length,
                 "reward": state.reward,

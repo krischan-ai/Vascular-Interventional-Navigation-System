@@ -18,6 +18,7 @@ signal batch_received(batch: Dictionary)        ## state_batch payload
 signal path_received(path: Dictionary)          ## path_response payload
 signal error_received(error: Dictionary)        ## error payload
 signal engine_params_received(effective: Dictionary)  ## engine_params echo (live deform panel)
+signal device_config_received(effective: Dictionary)  ## device_config echo
 signal shape_intent_received(result: Dictionary)      ## shape_intent echo {active, mode}
 
 @export var server_url: String = "ws://localhost:9000/ws/session"
@@ -176,6 +177,8 @@ func _handle_packet(packet: String) -> void:
 			path_received.emit(data)
 		"engine_params":
 			engine_params_received.emit(data.get("effective", {}))
+		"device_config":
+			device_config_received.emit(data.get("effective", {}))
 		"shape_intent":
 			shape_intent_received.emit(data)
 		"error":
@@ -194,7 +197,7 @@ func _handle_packet(packet: String) -> void:
 			pass
 
 
-func send_control(delta_push: float, delta_rotate: float) -> void:
+func send_control(delta_push: float, delta_rotate: float, microcatheter_advance: float = 0.0) -> void:
 	# Do not send control until the server has created a session, otherwise the
 	# backend replies NO_SESSION for every command (and that spam hides the real
 	# session_start result).
@@ -207,12 +210,14 @@ func send_control(delta_push: float, delta_rotate: float) -> void:
 		return
 	if not _control_sent:
 		_control_sent = true
-		print("[WS] first control sent (push=%.2f rot=%.2f)" % [delta_push, delta_rotate])
+		print("[WS] first control sent (push=%.2f rot=%.2f support=%.2f)" % [
+			delta_push, delta_rotate, microcatheter_advance])
 	_awaiting = true
 	_awaiting_since = Time.get_ticks_msec() / 1000.0
 	_send("control", {
 		"delta_push": clampf(delta_push, -1.0, 1.0),
 		"delta_rotate": clampf(delta_rotate, -1.0, 1.0),
+		"microcatheter_advance": clampf(microcatheter_advance, -1.0, 1.0),
 	})
 
 
@@ -229,6 +234,11 @@ func send_reset() -> void:
 func send_engine_params(params: Dictionary) -> void:
 	if _was_open and session_id != "":
 		_send("engine_params", params)
+
+
+func send_device_config(guidewire: Dictionary) -> void:
+	if _was_open and session_id != "":
+		_send("device_config", {"guidewire": guidewire})
 
 
 ## Engage/adjust ShapeIntent (autopilot) control of push/rotate (doc/09).

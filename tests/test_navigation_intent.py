@@ -21,6 +21,7 @@ class FakeEngine:
     def __init__(self, **kwargs):
         self._z = 0.1
         self.calls: list[tuple[float, float]] = []
+        self.support_calls: list[float] = []
 
     def _pose(self) -> RawPose:
         return RawPose(
@@ -38,6 +39,9 @@ class FakeEngine:
         self.calls.append((push, rotate))
         self._z += max(push, 0.0) * 0.01
         return self._pose()
+
+    def apply_support_control(self, amount: float):
+        self.support_calls.append(amount)
 
     def render_bodies(self):
         return []
@@ -135,3 +139,18 @@ def test_guided_mode_rejects_intent(monkeypatch):
     engine.reset()
     result = engine.set_shape_intent(None, active=True)
     assert result == {"active": False, "mode": "off"}
+
+
+def test_support_control_calls_backend_without_changing_push_rotate(monkeypatch):
+    engine = _make_engine(monkeypatch)
+    engine.step(0.2, 0.1, microcatheter_advance=0.7)
+
+    assert engine._engine.support_calls == pytest.approx([0.7])
+    assert engine._engine.calls[-1] == pytest.approx((0.2, 0.1))
+
+
+def test_support_control_is_clamped(monkeypatch):
+    engine = _make_engine(monkeypatch)
+    engine.step(0.0, 0.0, microcatheter_advance=3.0)
+
+    assert engine._engine.support_calls == pytest.approx([1.0])

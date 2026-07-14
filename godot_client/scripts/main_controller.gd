@@ -1119,6 +1119,9 @@ func _setup_network_and_input() -> void:
 	_hud.manual_takeover.connect(_disengage_autopilot)
 	_hud.resume_nav.connect(_on_resume_nav)
 	_hud.motion_command.connect(_on_motion)
+	_hud.support_command.connect(_on_support_command)
+	_hud.tip_shape_command.connect(_on_tip_shape_command)
+	_hud.strategy_action.connect(_on_strategy_action)
 	_hud.view_cycle_requested.connect(_cycle_camera_mode)
 	_hud.model_cycle_requested.connect(_cycle_model)
 	_hud.branch_cycle_requested.connect(_cycle_branch)
@@ -1229,6 +1232,7 @@ func _on_batch(batch: Dictionary) -> void:
 		str(batch.get("fidelity_mode", "")),
 		batch.get("diagnostics", {}) as Dictionary
 	)
+	_hud.update_clinical_guidance(batch)
 	var status := str(safety.get("status", "STANDBY"))
 	_hud.update_safety(status)
 	# Fixed control-mode display (VPP §2.1/§2.4): SAFE HOLD on a collision stop,
@@ -1276,6 +1280,7 @@ func _on_state(state: Dictionary) -> void:
 		state["remaining_distance"] = _remaining_from_waypoints(progress)
 	state["latency_ms"] = _ws.last_latency_ms
 	_hud.update_metrics(state)
+	_hud.update_clinical_guidance(state)
 	_msg_count += 1
 	_last_msg = "state_update"
 	_update_debug()
@@ -1455,6 +1460,49 @@ func _on_motion(push: float, rotate: float) -> void:
 	_disengage_autopilot()
 	if _ws != null and is_instance_valid(_ws):
 		_ws.send_control(push, rotate)
+
+
+func _on_support_command(amount: float) -> void:
+	_disengage_autopilot()
+	if _ws != null and is_instance_valid(_ws):
+		_ws.send_control(0.0, 0.0, amount)
+
+
+func _on_tip_shape_command(shape: String) -> void:
+	_disengage_autopilot()
+	if _ws == null or not is_instance_valid(_ws):
+		return
+	var guidewire := {"tip_shape": shape}
+	if shape == "straight":
+		guidewire["tip_curve_angle_deg"] = 0.0
+		guidewire["tip_length_mm"] = 0.0
+	else:
+		guidewire["tip_curve_angle_deg"] = 35.0
+		guidewire["tip_length_mm"] = 9.0
+		guidewire["soft_tip_length_mm"] = 12.0
+	_ws.send_device_config(guidewire)
+
+
+func _on_strategy_action(action: String) -> void:
+	_disengage_autopilot()
+	if _ws == null or not is_instance_valid(_ws):
+		return
+	match action:
+		"pullback", "micro_pullback", "pullback_to_known_path":
+			_ws.send_control(-0.35, 0.0, 0.0)
+		"reorient_tip", "rotate_to_target_sector":
+			_ws.send_control(0.0, 1.0, 0.0)
+		"advance_support", "reduce_free_span":
+			_ws.send_control(0.0, 0.0, 1.0)
+		"change_tip":
+			_ws.send_device_config({
+				"tip_shape": "j_tip",
+				"tip_curve_angle_deg": 45.0,
+				"tip_length_mm": 12.0,
+				"soft_tip_length_mm": 15.0,
+			})
+		_:
+			_ws.send_control(0.0, 0.0, 0.0)
 
 
 func _on_shape_intent(result: Dictionary) -> void:

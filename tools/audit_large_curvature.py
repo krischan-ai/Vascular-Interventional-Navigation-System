@@ -31,6 +31,21 @@ class ScenarioMetrics:
     min_feed_budget_m: float | None = None
     final_safety_status: str = "STANDBY"
     final_phase: str | None = None
+    phase_counts: dict[str, int] = field(default_factory=dict)
+    final_tip_shape: str | None = None
+    final_support_state: str | None = None
+    final_training_score: int | None = None
+    min_training_score: int | None = None
+    min_component_scores: dict[str, int] = field(default_factory=dict)
+    deduction_counts: dict[str, int] = field(default_factory=dict)
+    strategy_state_counts: dict[str, int] = field(default_factory=dict)
+    strategy_action_counts: dict[str, int] = field(default_factory=dict)
+    hard_push_warning_count: int = 0
+    max_hard_push_score: float = 0.0
+    wall_slide_state_counts: dict[str, int] = field(default_factory=dict)
+    max_normal_poking_score: float | None = None
+    max_tangential_slide_score: float | None = None
+    flow_guidance_missing_count: int = 0
     elapsed_s: float = 0.0
     error: str | None = None
     diagnostics: dict[str, Any] = field(default_factory=dict)
@@ -52,6 +67,21 @@ class ScenarioMetrics:
             "min_feed_budget_m": self.min_feed_budget_m,
             "final_safety_status": self.final_safety_status,
             "final_phase": self.final_phase,
+            "phase_counts": self.phase_counts,
+            "final_tip_shape": self.final_tip_shape,
+            "final_support_state": self.final_support_state,
+            "final_training_score": self.final_training_score,
+            "min_training_score": self.min_training_score,
+            "min_component_scores": self.min_component_scores,
+            "deduction_counts": self.deduction_counts,
+            "strategy_state_counts": self.strategy_state_counts,
+            "strategy_action_counts": self.strategy_action_counts,
+            "hard_push_warning_count": self.hard_push_warning_count,
+            "max_hard_push_score": self.max_hard_push_score,
+            "wall_slide_state_counts": self.wall_slide_state_counts,
+            "max_normal_poking_score": self.max_normal_poking_score,
+            "max_tangential_slide_score": self.max_tangential_slide_score,
+            "flow_guidance_missing_count": self.flow_guidance_missing_count,
             "elapsed_s": self.elapsed_s,
             "error": self.error,
             "diagnostics": self.diagnostics,
@@ -77,9 +107,72 @@ def update_metrics(metrics: ScenarioMetrics, state, diagnostics: dict[str, Any] 
     elif state.safety_status == "DANGER_WARNING":
         metrics.warning_count += 1
     flow = getattr(state, "flow_guidance", {}) or {}
+    if not isinstance(flow, dict) or not flow:
+        metrics.flow_guidance_missing_count += 1
+        flow = {}
     workflow = flow.get("workflow", {}) if isinstance(flow, dict) else {}
     if isinstance(workflow, dict):
-        metrics.final_phase = workflow.get("phase")
+        phase = workflow.get("phase")
+        metrics.final_phase = phase
+        if phase:
+            _bump(metrics.phase_counts, str(phase))
+
+    tip_shape = flow.get("tip_shape", {}) if isinstance(flow, dict) else {}
+    if isinstance(tip_shape, dict):
+        shape = tip_shape.get("shape_type") or tip_shape.get("tip_shape")
+        if shape is not None:
+            metrics.final_tip_shape = str(shape)
+
+    support = flow.get("support", {}) if isinstance(flow, dict) else {}
+    if isinstance(support, dict):
+        support_state = support.get("support_state")
+        if support_state is not None:
+            metrics.final_support_state = str(support_state)
+
+    micro = flow.get("micro_advance", {}) if isinstance(flow, dict) else {}
+    if isinstance(micro, dict):
+        hard_push_score = _float_or_none(micro.get("hard_push_score"))
+        if hard_push_score is not None:
+            metrics.max_hard_push_score = max(metrics.max_hard_push_score, hard_push_score)
+        if micro.get("hard_push_state") in {"warning", "unsafe", "excessive"}:
+            metrics.hard_push_warning_count += 1
+
+    wall = flow.get("wall_slide", {}) if isinstance(flow, dict) else {}
+    if isinstance(wall, dict):
+        wall_state = wall.get("wall_slide_state")
+        if wall_state is not None:
+            _bump(metrics.wall_slide_state_counts, str(wall_state))
+        _max_optional(metrics, "max_normal_poking_score", wall.get("normal_poking_score"))
+        _max_optional(metrics, "max_tangential_slide_score", wall.get("tangential_slide_score"))
+
+    strategy = flow.get("strategy_switch", {}) if isinstance(flow, dict) else {}
+    if isinstance(strategy, dict):
+        strategy_state = strategy.get("strategy_switch_state")
+        if strategy_state is not None:
+            _bump(metrics.strategy_state_counts, str(strategy_state))
+        for action in strategy.get("recommended_actions", []) or []:
+            _bump(metrics.strategy_action_counts, str(action))
+
+    training = flow.get("training_score", {}) if isinstance(flow, dict) else {}
+    if isinstance(training, dict):
+        overall = _int_or_none(training.get("overall"))
+        if overall is not None:
+            metrics.final_training_score = overall
+            metrics.min_training_score = (
+                overall if metrics.min_training_score is None else min(metrics.min_training_score, overall)
+            )
+        components = training.get("components", {})
+        if isinstance(components, dict):
+            for key, value in components.items():
+                component_score = _int_or_none(value)
+                if component_score is None:
+                    continue
+                current = metrics.min_component_scores.get(str(key))
+                metrics.min_component_scores[str(key)] = (
+                    component_score if current is None else min(current, component_score)
+                )
+        for reason in training.get("deductions", []) or []:
+            _bump(metrics.deduction_counts, str(reason))
 
     if diagnostics:
         metrics.diagnostics = dict(diagnostics)
@@ -88,7 +181,14 @@ def update_metrics(metrics: ScenarioMetrics, state, diagnostics: dict[str, Any] 
         _min_optional(metrics, "min_feed_budget_m", diagnostics.get("feed_budget_m"))
 
 
-def verdict(metrics: ScenarioMetrics, *, min_progress: float, max_stop_count: int = 0) -> dict[str, Any]:
+def verdict(
+    metrics: ScenarioMetrics,
+    *,
+    min_progress: float,
+    max_stop_count: int = 0,
+    min_training_score: int | None = None,
+    require_flow_guidance: bool = False,
+) -> dict[str, Any]:
     """Return a simple pass/fail verdict for a large-curvature scenario."""
     failed_reasons: list[str] = []
     if metrics.error:
@@ -99,11 +199,21 @@ def verdict(metrics: ScenarioMetrics, *, min_progress: float, max_stop_count: in
         failed_reasons.append("collision_stop")
     if metrics.max_breach_m is not None and metrics.max_breach_m > 0.0003:
         failed_reasons.append("breach_over_0.3mm")
+    if require_flow_guidance and metrics.flow_guidance_missing_count > 0:
+        failed_reasons.append("flow_guidance_missing")
+    if (
+        min_training_score is not None
+        and metrics.min_training_score is not None
+        and metrics.min_training_score < min_training_score
+    ):
+        failed_reasons.append("training_score_below_threshold")
     return {
         "passed": not failed_reasons,
         "failed_reasons": failed_reasons,
         "min_progress": min_progress,
         "max_stop_count": max_stop_count,
+        "min_training_score": min_training_score,
+        "require_flow_guidance": require_flow_guidance,
     }
 
 
@@ -169,10 +279,15 @@ def build_report(args: argparse.Namespace, scenario_metrics: list[ScenarioMetric
     scenarios = []
     for metrics in scenario_metrics:
         data = metrics.as_dict()
-        data["verdict"] = verdict(metrics, min_progress=args.min_progress)
+        data["verdict"] = verdict(
+            metrics,
+            min_progress=args.min_progress,
+            min_training_score=args.min_training_score,
+            require_flow_guidance=args.require_flow_guidance,
+        )
         scenarios.append(data)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "large_curvature_audit",
         "phantom": args.phantom,
         "target": args.target,
@@ -189,6 +304,8 @@ def build_report(args: argparse.Namespace, scenario_metrics: list[ScenarioMetric
             "min_progress": args.min_progress,
             "max_stop_count": 0,
             "max_breach_m": 0.0003,
+            "min_training_score": args.min_training_score,
+            "require_flow_guidance": args.require_flow_guidance,
         },
         "scenarios": scenarios,
         "summary": {
@@ -216,6 +333,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--insertion-max", type=float, default=0.2)
     parser.add_argument("--prethread", action="store_true")
     parser.add_argument("--min-progress", type=float, default=0.25)
+    parser.add_argument("--min-training-score", type=int, default=None)
+    parser.add_argument("--require-flow-guidance", action="store_true")
     parser.add_argument("--output", type=Path, default=Path("data") / "large_curvature_audit.json")
     return parser.parse_args()
 
@@ -257,6 +376,24 @@ def _min_optional(metrics: ScenarioMetrics, attr: str, value: Any) -> None:
         return
     current = getattr(metrics, attr)
     setattr(metrics, attr, val if current is None else min(current, val))
+
+
+def _bump(counts: dict[str, int], key: str) -> None:
+    counts[key] = counts.get(key, 0) + 1
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 if __name__ == "__main__":

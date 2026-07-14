@@ -29,7 +29,33 @@ def test_update_metrics_accumulates_state_and_diagnostics():
             contact_force=0.5,
             risk_score=0.2,
             safety_status="DANGER_WARNING",
-            flow_guidance={"workflow": {"phase": "WALL_SLIDE"}},
+            flow_guidance={
+                "workflow": {"phase": "WALL_SLIDE"},
+                "tip_shape": {"shape_type": "j_tip"},
+                "support": {"support_state": "modeled"},
+                "micro_advance": {"hard_push_state": "clear", "hard_push_score": 0.1},
+                "wall_slide": {
+                    "wall_slide_state": "WALL_SLIDE_OK",
+                    "normal_poking_score": 0.05,
+                    "tangential_slide_score": 0.9,
+                },
+                "strategy_switch": {
+                    "strategy_switch_state": "not_required",
+                    "recommended_actions": ["continue_micro_advance"],
+                },
+                "training_score": {
+                    "overall": 88,
+                    "components": {
+                        "tip_shape": 100,
+                        "orientation": 90,
+                        "support": 85,
+                        "micro_advance": 100,
+                        "wall_slide": 90,
+                        "strategy_switch": 100,
+                    },
+                    "deductions": [],
+                },
+            },
         ),
         {
             "slack_m": 0.006,
@@ -46,7 +72,33 @@ def test_update_metrics_accumulates_state_and_diagnostics():
             contact_force=3.0,
             risk_score=0.8,
             safety_status="COLLISION_STOP",
-            flow_guidance={"workflow": {"phase": "STRATEGY_SWITCH"}},
+            flow_guidance={
+                "workflow": {"phase": "STRATEGY_SWITCH"},
+                "tip_shape": {"shape_type": "j_tip"},
+                "support": {"support_state": "modeled"},
+                "micro_advance": {"hard_push_state": "unsafe", "hard_push_score": 0.82},
+                "wall_slide": {
+                    "wall_slide_state": "TIP_POKING_WARNING",
+                    "normal_poking_score": 0.8,
+                    "tangential_slide_score": 0.2,
+                },
+                "strategy_switch": {
+                    "strategy_switch_state": "required",
+                    "recommended_actions": ["pause", "pullback", "reorient_tip"],
+                },
+                "training_score": {
+                    "overall": 45,
+                    "components": {
+                        "tip_shape": 100,
+                        "orientation": 60,
+                        "support": 35,
+                        "micro_advance": 25,
+                        "wall_slide": 25,
+                        "strategy_switch": 35,
+                    },
+                    "deductions": ["HARD_PUSH_DETECTED", "STRATEGY_SWITCH_REQUIRED"],
+                },
+            },
         ),
         {
             "slack_m": 0.012,
@@ -67,6 +119,31 @@ def test_update_metrics_accumulates_state_and_diagnostics():
     assert metrics.max_breach_m == 0.0004
     assert metrics.min_feed_budget_m == 0.0
     assert metrics.final_phase == "STRATEGY_SWITCH"
+    assert metrics.phase_counts == {"WALL_SLIDE": 1, "STRATEGY_SWITCH": 1}
+    assert metrics.final_tip_shape == "j_tip"
+    assert metrics.final_support_state == "modeled"
+    assert metrics.final_training_score == 45
+    assert metrics.min_training_score == 45
+    assert metrics.min_component_scores["micro_advance"] == 25
+    assert metrics.deduction_counts == {
+        "HARD_PUSH_DETECTED": 1,
+        "STRATEGY_SWITCH_REQUIRED": 1,
+    }
+    assert metrics.strategy_state_counts == {"not_required": 1, "required": 1}
+    assert metrics.strategy_action_counts == {
+        "continue_micro_advance": 1,
+        "pause": 1,
+        "pullback": 1,
+        "reorient_tip": 1,
+    }
+    assert metrics.hard_push_warning_count == 1
+    assert metrics.max_hard_push_score == 0.82
+    assert metrics.wall_slide_state_counts == {
+        "WALL_SLIDE_OK": 1,
+        "TIP_POKING_WARNING": 1,
+    }
+    assert metrics.max_normal_poking_score == 0.8
+    assert metrics.max_tangential_slide_score == 0.9
 
 
 def test_verdict_fails_on_low_progress_stop_and_breach():
@@ -75,15 +152,24 @@ def test_verdict_fails_on_low_progress_stop_and_breach():
         max_progress=0.1,
         stop_count=1,
         max_breach_m=0.0004,
+        min_training_score=40,
+        flow_guidance_missing_count=1,
     )
 
-    result = verdict(metrics, min_progress=0.25)
+    result = verdict(
+        metrics,
+        min_progress=0.25,
+        min_training_score=70,
+        require_flow_guidance=True,
+    )
 
     assert result["passed"] is False
     assert result["failed_reasons"] == [
         "insufficient_progress",
         "collision_stop",
         "breach_over_0.3mm",
+        "flow_guidance_missing",
+        "training_score_below_threshold",
     ]
 
 
@@ -99,6 +185,8 @@ def test_build_report_counts_passed_and_failed_scenarios():
         base_push=0.35,
         lookahead=0.025,
         min_progress=0.25,
+        min_training_score=None,
+        require_flow_guidance=False,
     )
     passing = ScenarioMetrics(route_target="endpoints_1", max_progress=0.4)
     failing = ScenarioMetrics(route_target="endpoints_2", max_progress=0.1)

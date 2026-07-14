@@ -15,6 +15,9 @@ signal emergency_stop
 signal manual_takeover
 signal resume_nav
 signal motion_command(push: float, rotate: float)
+signal support_command(amount: float)
+signal tip_shape_command(shape: String)
+signal strategy_action(action: String)
 signal view_cycle_requested
 signal model_cycle_requested
 signal branch_cycle_requested
@@ -42,6 +45,7 @@ var _rotate_btn: Button
 var _stop_btn: Button
 var _uptime_ms := 0
 var _last_alarm := ""
+var _last_guidance_alert := ""
 var _estopped := false
 var _smooth_wall_mm := -1.0
 var _smooth_curv_per_mm := -1.0
@@ -187,7 +191,15 @@ func _build_bottom(root: Control) -> void:
 	_conn["latency"] = connp.add_kv("延迟", "— ms")
 	_conn["engine"] = connp.add_kv("Engine", "-")
 	_conn["mode"] = connp.add_kv("Mode", "-")
+	_conn["phase"] = connp.add_kv("Phase", "-")
+	_conn["tip"] = connp.add_kv("Tip", "-")
+	_conn["orient"] = connp.add_kv("Orient", "-")
+	_conn["free"] = connp.add_kv("Free", "-")
 	_conn["slack"] = connp.add_kv("Slack", "-")
+	_conn["wall"] = connp.add_kv("Wall", "-")
+	_conn["push"] = connp.add_kv("Push", "-")
+	_conn["strategy"] = connp.add_kv("Strategy", "-")
+	_conn["score"] = connp.add_kv("Score", "-")
 	# 信号强度: 5 格信号条 (§16).
 	var sigrow := HBoxContainer.new()
 	var sigt := UiStyle.label("信号强度", UiStyle.TEXT_MID, 12)
@@ -232,6 +244,13 @@ func _build_bottom(root: Control) -> void:
 	srow.add_child(_tool("视角", func(): view_cycle_requested.emit()))
 	srow.add_child(_tool("模型", func(): model_cycle_requested.emit()))
 	srow.add_child(_tool("分支", func(): branch_cycle_requested.emit()))
+	srow.add_child(_tool("Straight", func(): tip_shape_command.emit("straight")))
+	srow.add_child(_tool("J-tip", func(): tip_shape_command.emit("j_tip")))
+	srow.add_child(_tool("Support+", func(): support_command.emit(1.0)))
+	srow.add_child(_tool("Support-", func(): support_command.emit(-1.0)))
+	srow.add_child(_tool("Pullback", func(): strategy_action.emit("pullback")))
+	srow.add_child(_tool("Reorient", func(): strategy_action.emit("reorient_tip")))
+	srow.add_child(_tool("AltTip", func(): strategy_action.emit("change_tip")))
 	srow.add_child(_tool("重置", func(): reset_requested.emit()))
 	srow.add_child(_tool("形变", func(): deform_toggle.emit()))
 	motionp.content.add_child(srow)
@@ -296,7 +315,20 @@ func set_connection(connected: bool) -> void:
 	_conn["latency"].text = "— ms"
 	_conn["engine"].text = "-"
 	_conn["mode"].text = "-"
+	_conn["phase"].text = "-"
+	_conn["tip"].text = "-"
+	if _conn.has("orient"):
+		_conn["orient"].text = "-"
+	_conn["free"].text = "-"
 	_conn["slack"].text = "-"
+	if _conn.has("wall"):
+		_conn["wall"].text = "-"
+	if _conn.has("score"):
+		_conn["score"].text = "-"
+	if _conn.has("push"):
+		_conn["push"].text = "-"
+	if _conn.has("strategy"):
+		_conn["strategy"].text = "-"
 	for i in _signal_bars.size():
 		_signal_bars[i].color = (UiStyle.GREEN if connected and i < 4 else UiStyle.TRACK)
 	add_log_line("后端已连接" if connected else "后端连接断开")
@@ -343,6 +375,80 @@ func set_backend(engine: String, mode: String, diagnostics: Dictionary) -> void:
 			_conn["slack"].text = "%.1f / %.1f mm" % [slack_mm, budget_mm]
 		else:
 			_conn["slack"].text = "-"
+
+
+func update_clinical_guidance(payload: Dictionary) -> void:
+	var guidance: Dictionary = payload.get("flow_guidance", {}) as Dictionary
+	var workflow: Dictionary = guidance.get("workflow", {}) as Dictionary
+	var tip_shape: Dictionary = guidance.get("tip_shape", {}) as Dictionary
+	var support: Dictionary = guidance.get("support", {}) as Dictionary
+	var orientation: Dictionary = guidance.get("orientation", {}) as Dictionary
+	var strategy: Dictionary = guidance.get("strategy_switch", {}) as Dictionary
+	var wall_slide: Dictionary = guidance.get("wall_slide", {}) as Dictionary
+	var micro: Dictionary = guidance.get("micro_advance", {}) as Dictionary
+	var training: Dictionary = guidance.get("training_score", payload.get("training_score", {})) as Dictionary
+	var guidewire: Dictionary = payload.get("guidewire", {}) as Dictionary
+	var support_top: Dictionary = payload.get("support", {}) as Dictionary
+	var risk_top: Dictionary = payload.get("risk", {}) as Dictionary
+
+	var phase := str(workflow.get("step_label", workflow.get("phase", "-")))
+	if _conn.has("phase"):
+		_conn["phase"].text = phase
+
+	var shape := str(guidewire.get("shape_type", tip_shape.get("shape_type", "-")))
+	var angle_value: Variant = guidewire.get("curve_angle_deg", tip_shape.get("curve_angle_deg", null))
+	if angle_value != null and shape != "-":
+		shape = "%s %.0fdeg" % [shape, float(angle_value)]
+	if _conn.has("tip"):
+		_conn["tip"].text = shape
+
+	if _conn.has("orient"):
+		_conn["orient"].text = _format_orientation(orientation)
+
+	var free_value: Variant = support_top.get("free_wire_length_m", support.get("free_wire_length_m", null))
+	if _conn.has("free"):
+		_conn["free"].text = _format_meters_as_mm(free_value)
+
+	var slack_value: Variant = risk_top.get("slack_m", strategy.get("slack_m", null))
+	var budget_value: Variant = risk_top.get("feed_budget_m", strategy.get("feed_budget_m", null))
+	if _conn.has("slack") and slack_value != null:
+		_conn["slack"].text = "%s / %s" % [_format_meters_as_mm(slack_value), _format_meters_as_mm(budget_value)]
+
+	if _conn.has("wall"):
+		var slide_value: Variant = risk_top.get("tangential_slide_score", wall_slide.get("tangential_slide_score", null))
+		var poke_value: Variant = risk_top.get("normal_poking_score", wall_slide.get("normal_poking_score", null))
+		_conn["wall"].text = _format_wall_scores(slide_value, poke_value)
+
+	if _conn.has("push"):
+		_conn["push"].text = _format_push_cadence(micro)
+
+	if _conn.has("strategy"):
+		_conn["strategy"].text = _format_strategy(strategy)
+
+	if _conn.has("score"):
+		var score_value: Variant = training.get("overall", null)
+		if score_value == null:
+			_conn["score"].text = "-"
+		else:
+			_conn["score"].text = "%d / 100" % int(score_value)
+
+	var suggestion := str(workflow.get("suggestion", ""))
+	if suggestion != "" and not _estopped:
+		set_nav("%s - %s" % [phase, suggestion], true)
+
+	var alert_key := "%s|%s|%s" % [
+		str(workflow.get("phase", "")),
+		str(strategy.get("buckling_risk", risk_top.get("buckling_risk", ""))),
+		str(wall_slide.get("wall_slide_state", risk_top.get("wall_slide_state", ""))),
+	]
+	if alert_key != _last_guidance_alert:
+		_last_guidance_alert = alert_key
+		if str(workflow.get("phase", "")) == "STRATEGY_SWITCH":
+			_alarm.add_alert(Time.get_time_string_from_system(), "Strategy switch: stop hard push", "warning")
+		elif str(strategy.get("buckling_risk", risk_top.get("buckling_risk", ""))) == "HIGH":
+			_alarm.add_alert(Time.get_time_string_from_system(), "Support warning: free span or slack high", "warning")
+		elif str(wall_slide.get("wall_slide_state", risk_top.get("wall_slide_state", ""))) == "TIP_POKING_WARNING":
+			_alarm.add_alert(Time.get_time_string_from_system(), "Tip poking: pull back and reorient", "danger")
 
 
 func update_metrics(metrics: Dictionary) -> void:
@@ -394,6 +500,61 @@ func _smooth_value(slot: String, raw: float, alpha: float) -> float:
 		return _smooth_deviation_mm
 	_smooth_curv_per_mm = raw if _smooth_curv_per_mm < 0.0 else lerpf(_smooth_curv_per_mm, raw, alpha)
 	return _smooth_curv_per_mm
+
+
+func _format_meters_as_mm(value: Variant) -> String:
+	if value == null:
+		return "-"
+	var mm := float(value) * 1000.0
+	if is_nan(mm) or is_inf(mm):
+		return "-"
+	return "%.1f mm" % mm
+
+
+func _format_wall_scores(slide_value: Variant, poke_value: Variant) -> String:
+	if slide_value == null and poke_value == null:
+		return "-"
+	var slide := 0.0 if slide_value == null else clampf(float(slide_value), 0.0, 1.0)
+	var poke := 0.0 if poke_value == null else clampf(float(poke_value), 0.0, 1.0)
+	return "S%.0f P%.0f" % [slide * 100.0, poke * 100.0]
+
+
+func _format_push_cadence(micro: Dictionary) -> String:
+	if micro.is_empty():
+		return "-"
+	var cadence := str(micro.get("cadence_state", "-"))
+	var hard := clampf(float(micro.get("hard_push_score", 0.0)), 0.0, 1.0)
+	return "%s %.0f" % [cadence, hard * 100.0]
+
+
+func _format_strategy(strategy: Dictionary) -> String:
+	if strategy.is_empty():
+		return "-"
+	var state := str(strategy.get("strategy_switch_state", "-"))
+	var action := str(strategy.get("primary_action", ""))
+	if action == "":
+		var actions: Array = strategy.get("recommended_actions", [])
+		if not actions.is_empty():
+			action = str(actions[0])
+	var reason := str(strategy.get("primary_failure_reason", ""))
+	if action == "":
+		return state
+	if reason == "" or reason == "none":
+		return "%s: %s" % [state, action]
+	return "%s: %s -> %s" % [state, reason, action]
+
+
+func _format_orientation(orientation: Dictionary) -> String:
+	if orientation.is_empty():
+		return "-"
+	var score_value: Variant = orientation.get("tip_facing_score", orientation.get("orientation_score", null))
+	var lag_value: Variant = orientation.get("torsion_lag_deg", null)
+	var score_text := "-"
+	if score_value != null:
+		score_text = "%.0f" % (clampf(float(score_value), 0.0, 1.0) * 100.0)
+	if lag_value == null:
+		return "F%s" % score_text
+	return "F%s L%.0fdeg" % [score_text, float(lag_value)]
 
 
 func _format_optional(value: float, decimals: int) -> String:
