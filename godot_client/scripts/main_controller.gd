@@ -1488,6 +1488,10 @@ func _on_strategy_action(action: String) -> void:
 	if _ws == null or not is_instance_valid(_ws):
 		return
 	match action:
+		"continue_micro_advance":
+			_ws.send_control(0.25, 0.0, 0.0)
+		"pause":
+			_ws.send_control(0.0, 0.0, 0.0)
 		"pullback", "micro_pullback", "pullback_to_known_path":
 			_ws.send_control(-0.35, 0.0, 0.0)
 		"reorient_tip", "rotate_to_target_sector":
@@ -1501,6 +1505,8 @@ func _on_strategy_action(action: String) -> void:
 				"tip_length_mm": 12.0,
 				"soft_tip_length_mm": 15.0,
 			})
+		"select_alternate_branch":
+			_cycle_branch()
 		_:
 			_ws.send_control(0.0, 0.0, 0.0)
 

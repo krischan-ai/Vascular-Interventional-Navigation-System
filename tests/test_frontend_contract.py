@@ -1,4 +1,4 @@
-from pathlib import Path
+﻿from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,6 +51,16 @@ def test_hud_uses_backend_dashboard_fields():
     assert "TIP_POKING_WARNING" in hud
     assert "tangential_slide_score" in hud
     assert "normal_poking_score" in hud
+    assert "wall_slide_state" in hud
+    assert "wall_contact_body_index" in hud
+    assert "wall_contact_arclen_m" in hud
+    assert "func _build_debug_status" in hud
+    assert "func _update_debug_status_bar" in hud
+    assert "_debug_status" in hud
+    assert "调试状态" in hud
+    assert "等待 flow_guidance" in hud
+    assert "来源%s" in hud
+    assert "components" in hud
     assert "training_score" in hud
     assert 'connp.add_kv("Wall", "-")' in hud
     assert 'connp.add_kv("Push", "-")' in hud
@@ -66,13 +76,21 @@ def test_hud_uses_backend_dashboard_fields():
     assert "signal support_command" in hud
     assert "signal tip_shape_command" in hud
     assert "signal strategy_action" in hud
-    assert "Straight" in hud
-    assert "J-tip" in hud
-    assert "Support+" in hud
-    assert "Support-" in hud
-    assert "Pullback" in hud
-    assert "Reorient" in hud
-    assert "AltTip" in hud
+    assert "直头导丝" in hud
+    assert "J形头" in hud
+    assert "支撑前进" in hud
+    assert "支撑后撤" in hud
+    assert "回撤" in hud
+    assert "重定向" in hud
+    assert "换尖端" in hud
+    assert '"执行建议"' in hud
+    assert "_strategy_primary_action" in hud
+    assert "_strategy_primary_btn.disabled" in hud
+    assert "func _primary_strategy_action_from" in hud
+    assert "func _emit_primary_strategy_action" in hud
+    assert "GridContainer.new()" in hud
+    assert "tool_grid.columns = 4" in hud
+    assert "Vector2(92, 24)" in hud
     assert 'connp.add_kv("Strategy", "-")' in hud
     assert "primary_failure_reason" in hud
     assert "primary_action" in hud
@@ -83,6 +101,9 @@ def test_hud_uses_backend_dashboard_fields():
     assert "func _on_tip_shape_command" in main
     assert "func _on_strategy_action" in main
     assert "tip_curve_angle_deg" in main
+    assert '"continue_micro_advance"' in main
+    assert '"pause"' in main
+    assert '"select_alternate_branch"' in main
     assert "TODO backend" not in hud
     assert '"23.6"' not in hud
     assert '"02:35"' not in hud

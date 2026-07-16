@@ -1,4 +1,4 @@
-extends CanvasLayer
+﻿extends CanvasLayer
 ## Navigation-workstation dashboard (doc/11 前端设计方案), composed from reusable UI
 ## components (StatusCard / StatusIcon / CircularProgress / DataCard / DashPanel)
 ## styled by UiStyle. This script only LAYS OUT and BINDS DATA. Three zones on the
@@ -40,9 +40,12 @@ var _log: DashPanel
 var _alarm: DashPanel
 var _clock: Label
 var _nav_state: Label
+var _debug_status: Label
 var _push_btn: Button
 var _rotate_btn: Button
 var _stop_btn: Button
+var _strategy_primary_btn: Button
+var _strategy_primary_action := ""
 var _uptime_ms := 0
 var _last_alarm := ""
 var _last_guidance_alert := ""
@@ -62,6 +65,7 @@ func _ready() -> void:
 
 	_build_top(root)
 	_build_data(root)
+	_build_debug_status(root)
 	_build_bottom(root)
 
 
@@ -161,6 +165,24 @@ func _build_data(root: Control) -> void:
 	_data["risk"] = risk
 
 
+func _build_debug_status(root: Control) -> void:
+	var bar := PanelContainer.new()
+	bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	bar.add_theme_stylebox_override("panel", UiStyle.bordered_box(Color(0.027, 0.063, 0.098, 0.78), UiStyle.BLUE, 6))
+	UiStyle.place(bar, Rect2(12, 838, 1896, 28))
+	root.add_child(bar)
+
+	var row := HBoxContainer.new()
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_theme_constant_override("separation", 8)
+	bar.add_child(row)
+
+	var title := UiStyle.label("调试状态", UiStyle.BLUE, 12)
+	row.add_child(title)
+	_debug_status = UiStyle.label("等待 flow_guidance", UiStyle.TEXT_MID, 12)
+	_debug_status.clip_text = true
+	_debug_status.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(_debug_status)
 func _dcard(grid: GridContainer, title: String, value: String, unit: String,
 		color: Color) -> DataCard:
 	var card := DataCard.new(title, value, unit, color)
@@ -224,36 +246,42 @@ func _build_bottom(root: Control) -> void:
 	var mrow := HBoxContainer.new()
 	mrow.add_theme_constant_override("separation", 10)
 	_push_btn = UiStyle.button("推进", UiStyle.BLUE_BG, UiStyle.BLUE, UiStyle.TEXT, 16)
-	_push_btn.custom_minimum_size = Vector2(130, 62)
+	_push_btn.custom_minimum_size = Vector2(130, 50)
 	_push_btn.pressed.connect(func(): motion_command.emit(1.0, 0.0))
 	mrow.add_child(_push_btn)
 	_rotate_btn = UiStyle.button("旋转", UiStyle.GRAY_BTN, UiStyle.GRAY_BORDER, UiStyle.TEXT, 16)
-	_rotate_btn.custom_minimum_size = Vector2(130, 62)
+	_rotate_btn.custom_minimum_size = Vector2(130, 50)
 	_rotate_btn.pressed.connect(func(): motion_command.emit(0.0, 1.0))
 	mrow.add_child(_rotate_btn)
 	_stop_btn = UiStyle.button("停止", UiStyle.RED_BG, UiStyle.RED, UiStyle.RED, 16)
-	_stop_btn.custom_minimum_size = Vector2(130, 62)
+	_stop_btn.custom_minimum_size = Vector2(130, 50)
 	_stop_btn.pressed.connect(_on_estop_pressed)
 	mrow.add_child(_stop_btn)
 	motionp.content.add_child(mrow)
-	# Secondary tools + live nav/input readout.
-	var srow := HBoxContainer.new()
-	srow.add_theme_constant_override("separation", 6)
-	srow.add_child(_tool("恢复", func(): _on_resume_pressed()))
-	srow.add_child(_tool("接管", func(): manual_takeover.emit()))
-	srow.add_child(_tool("视角", func(): view_cycle_requested.emit()))
-	srow.add_child(_tool("模型", func(): model_cycle_requested.emit()))
-	srow.add_child(_tool("分支", func(): branch_cycle_requested.emit()))
-	srow.add_child(_tool("Straight", func(): tip_shape_command.emit("straight")))
-	srow.add_child(_tool("J-tip", func(): tip_shape_command.emit("j_tip")))
-	srow.add_child(_tool("Support+", func(): support_command.emit(1.0)))
-	srow.add_child(_tool("Support-", func(): support_command.emit(-1.0)))
-	srow.add_child(_tool("Pullback", func(): strategy_action.emit("pullback")))
-	srow.add_child(_tool("Reorient", func(): strategy_action.emit("reorient_tip")))
-	srow.add_child(_tool("AltTip", func(): strategy_action.emit("change_tip")))
-	srow.add_child(_tool("重置", func(): reset_requested.emit()))
-	srow.add_child(_tool("形变", func(): deform_toggle.emit()))
-	motionp.content.add_child(srow)
+	# Secondary tools: a 4-column panel, not a long single toolbar.
+	var tool_grid := GridContainer.new()
+	tool_grid.columns = 4
+	tool_grid.add_theme_constant_override("h_separation", 8)
+	tool_grid.add_theme_constant_override("v_separation", 5)
+	motionp.content.add_child(tool_grid)
+	tool_grid.add_child(_tool("恢复导航", func(): _on_resume_pressed()))
+	tool_grid.add_child(_tool("人工接管", func(): manual_takeover.emit()))
+	tool_grid.add_child(_tool("切换视角", func(): view_cycle_requested.emit()))
+	tool_grid.add_child(_tool("切换模型", func(): model_cycle_requested.emit()))
+	tool_grid.add_child(_tool("切换分支", func(): branch_cycle_requested.emit()))
+	tool_grid.add_child(_tool("直头导丝", func(): tip_shape_command.emit("straight")))
+	tool_grid.add_child(_tool("J形头", func(): tip_shape_command.emit("j_tip")))
+	tool_grid.add_child(_tool("支撑前进", func(): support_command.emit(1.0)))
+	tool_grid.add_child(_tool("支撑后撤", func(): support_command.emit(-1.0)))
+	tool_grid.add_child(_tool("回撤", func(): strategy_action.emit("pullback")))
+	tool_grid.add_child(_tool("重定向", func(): strategy_action.emit("reorient_tip")))
+	tool_grid.add_child(_tool("换尖端", func(): strategy_action.emit("change_tip")))
+	_strategy_primary_btn = _tool("执行建议", func(): _emit_primary_strategy_action())
+	_strategy_primary_btn.disabled = true
+	_strategy_primary_btn.tooltip_text = "暂无策略建议"
+	tool_grid.add_child(_strategy_primary_btn)
+	tool_grid.add_child(_tool("重置仿真", func(): reset_requested.emit()))
+	tool_grid.add_child(_tool("形变面板", func(): deform_toggle.emit()))
 	_nav_state = UiStyle.label("导航 手动 · Input p+0.0 r+0.0", UiStyle.TEXT2, 12)
 	motionp.content.add_child(_nav_state)
 	row.add_child(motionp)
@@ -272,7 +300,8 @@ func _build_bottom(root: Control) -> void:
 
 func _tool(text: String, cb: Callable) -> Button:
 	var b := UiStyle.button(text, UiStyle.GRAY_BTN, UiStyle.BORDER, UiStyle.TEXT_MID, 12, 6)
-	b.custom_minimum_size = Vector2(52, 24)
+	b.custom_minimum_size = Vector2(92, 24)
+	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	b.pressed.connect(cb)
 	return b
 
@@ -329,6 +358,9 @@ func set_connection(connected: bool) -> void:
 		_conn["push"].text = "-"
 	if _conn.has("strategy"):
 		_conn["strategy"].text = "-"
+	_set_primary_strategy_action("")
+	if _debug_status != null:
+		_debug_status.text = "等待 flow_guidance"
 	for i in _signal_bars.size():
 		_signal_bars[i].color = (UiStyle.GREEN if connected and i < 4 else UiStyle.TRACK)
 	add_log_line("后端已连接" if connected else "后端连接断开")
@@ -424,6 +456,9 @@ func update_clinical_guidance(payload: Dictionary) -> void:
 
 	if _conn.has("strategy"):
 		_conn["strategy"].text = _format_strategy(strategy)
+	_set_primary_strategy_action(_primary_strategy_action_from(strategy))
+
+	_update_debug_status_bar(phase, wall_slide, support, strategy, micro, training, risk_top, support_top)
 
 	if _conn.has("score"):
 		var score_value: Variant = training.get("overall", null)
@@ -449,6 +484,90 @@ func update_clinical_guidance(payload: Dictionary) -> void:
 			_alarm.add_alert(Time.get_time_string_from_system(), "Support warning: free span or slack high", "warning")
 		elif str(wall_slide.get("wall_slide_state", risk_top.get("wall_slide_state", ""))) == "TIP_POKING_WARNING":
 			_alarm.add_alert(Time.get_time_string_from_system(), "Tip poking: pull back and reorient", "danger")
+
+
+func _update_debug_status_bar(
+		phase: String,
+		wall_slide: Dictionary,
+		support: Dictionary,
+		strategy: Dictionary,
+		micro: Dictionary,
+		training: Dictionary,
+		risk_top: Dictionary,
+		support_top: Dictionary) -> void:
+	if _debug_status == null:
+		return
+	var wall_state := str(wall_slide.get("wall_slide_state", risk_top.get("wall_slide_state", "-")))
+	var slide_value: Variant = risk_top.get("tangential_slide_score", wall_slide.get("tangential_slide_score", null))
+	var poke_value: Variant = risk_top.get("normal_poking_score", wall_slide.get("normal_poking_score", null))
+	var contact_index := _format_debug_value(wall_slide.get("wall_contact_body_index", risk_top.get("wall_contact_body_index", null)))
+	var contact_arclen: Variant = wall_slide.get("wall_contact_arclen_m", risk_top.get("wall_contact_arclen_m", null))
+	var wall_source := str(wall_slide.get("source", "-"))
+
+	var free_value: Variant = support_top.get("free_wire_length_m", support.get("free_wire_length_m", null))
+	var slack_value: Variant = risk_top.get("slack_m", strategy.get("slack_m", null))
+	var hard_state := str(micro.get("hard_push_state", "-"))
+	var hard_score: Variant = micro.get("hard_push_score", null)
+	var reason := str(strategy.get("primary_failure_reason", "-"))
+	var action := _primary_strategy_action_from(strategy)
+	if action == "":
+		action = "-"
+	var strategy_state := str(strategy.get("strategy_switch_state", "-"))
+	var score_value: Variant = training.get("overall", null)
+	var components: Dictionary = training.get("components", {}) as Dictionary
+	var component_summary := "形%s 取%s 支%s 推%s 壁%s 策%s" % [
+		_format_component_score(components, "tip_shape"),
+		_format_component_score(components, "orientation"),
+		_format_component_score(components, "support"),
+		_format_component_score(components, "micro_advance"),
+		_format_component_score(components, "wall_slide"),
+		_format_component_score(components, "strategy_switch"),
+	]
+
+	_debug_status.text = "流程 %s | 壁滑 %s S%s P%s 接触#%s 弧长%s 来源%s | 支撑 free %s slack %s | 硬推 %s H%s | 策略 %s:%s->%s | 评分 %s [%s]" % [
+		phase,
+		wall_state,
+		_format_unit_score(slide_value),
+		_format_unit_score(poke_value),
+		contact_index,
+		_format_meters_as_mm(contact_arclen),
+		wall_source,
+		_format_meters_as_mm(free_value),
+		_format_meters_as_mm(slack_value),
+		hard_state,
+		_format_unit_score(hard_score),
+		strategy_state,
+		reason,
+		action,
+		_format_debug_value(score_value),
+		component_summary,
+	]
+
+
+func _format_unit_score(value: Variant) -> String:
+	if value == null:
+		return "-"
+	var score := clampf(float(value), 0.0, 1.0) * 100.0
+	if is_nan(score) or is_inf(score):
+		return "-"
+	return "%.0f" % score
+
+
+func _format_component_score(components: Dictionary, key: String) -> String:
+	if not components.has(key):
+		return "-"
+	return _format_debug_value(components.get(key))
+
+
+func _format_debug_value(value: Variant) -> String:
+	if value == null:
+		return "-"
+	if value is float:
+		var number := float(value)
+		if is_nan(number) or is_inf(number):
+			return "-"
+		return "%.2f" % number
+	return str(value)
 
 
 func update_metrics(metrics: Dictionary) -> void:
@@ -531,17 +650,40 @@ func _format_strategy(strategy: Dictionary) -> String:
 	if strategy.is_empty():
 		return "-"
 	var state := str(strategy.get("strategy_switch_state", "-"))
-	var action := str(strategy.get("primary_action", ""))
-	if action == "":
-		var actions: Array = strategy.get("recommended_actions", [])
-		if not actions.is_empty():
-			action = str(actions[0])
+	var action := _primary_strategy_action_from(strategy)
 	var reason := str(strategy.get("primary_failure_reason", ""))
 	if action == "":
 		return state
 	if reason == "" or reason == "none":
 		return "%s: %s" % [state, action]
 	return "%s: %s -> %s" % [state, reason, action]
+
+
+func _primary_strategy_action_from(strategy: Dictionary) -> String:
+	if strategy.is_empty():
+		return ""
+	var action := str(strategy.get("primary_action", ""))
+	if action != "":
+		return action
+	var actions: Array = strategy.get("recommended_actions", [])
+	if actions.is_empty():
+		return ""
+	return str(actions[0])
+
+
+func _set_primary_strategy_action(action: String) -> void:
+	_strategy_primary_action = action
+	if _strategy_primary_btn == null:
+		return
+	var enabled := action != "" and action != "none"
+	_strategy_primary_btn.disabled = not enabled
+	_strategy_primary_btn.tooltip_text = "策略建议：%s" % action if enabled else "暂无策略建议"
+
+
+func _emit_primary_strategy_action() -> void:
+	if _strategy_primary_action == "" or _strategy_primary_action == "none":
+		return
+	strategy_action.emit(_strategy_primary_action)
 
 
 func _format_orientation(orientation: Dictionary) -> String:
