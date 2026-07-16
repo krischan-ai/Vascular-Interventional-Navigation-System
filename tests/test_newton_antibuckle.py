@@ -181,3 +181,40 @@ class TestDeviceDiagnostics:
     def test_profile_supplies_newton_jtip_default(self, engine):
         assert engine._jtip_deg == pytest.approx(engine.guidewire_profile.tip_shape.precurve_angle_deg)
         assert engine._jtip_bodies >= 1
+
+class TestGuidewireRiskMetrics:
+    """Geometry-derived guidewire risk metrics without importing Newton."""
+
+    def test_tip_wall_metrics_detects_tangential_wall_slide(self, engine):
+        xyz = np.asarray([
+            [0.0022, 0.0, 0.045],
+            [0.0022, 0.0, 0.050],
+        ])
+
+        metrics = engine._tip_wall_metrics(xyz, 0.05)
+
+        assert metrics["normal_poking_score"] < 0.2
+        assert metrics["tangential_slide_score"] > 0.35
+        assert metrics["wall_slide_state"] == "WALL_SLIDE_OK"
+
+    def test_tip_wall_metrics_detects_normal_poking(self, engine):
+        xyz = np.asarray([
+            [0.0015, 0.0, 0.050],
+            [0.0026, 0.0, 0.050],
+        ])
+
+        metrics = engine._tip_wall_metrics(xyz, 0.05)
+
+        assert metrics["normal_poking_score"] >= 0.7
+        assert metrics["wall_slide_state"] == "TIP_POKING_WARNING"
+
+    def test_torsion_lag_tracks_jtip_plane_response(self, engine):
+        engine._twist = np.deg2rad(90.0)
+        engine._jtip_bodies = 2
+        xyz = np.asarray([
+            [0.0, 0.0, 0.042],
+            [0.0, 0.0, 0.045],
+            [-0.002, 0.0, 0.048],
+        ])
+
+        assert engine._torsion_lag_deg(xyz, 0.048) == pytest.approx(0.0, abs=1e-6)

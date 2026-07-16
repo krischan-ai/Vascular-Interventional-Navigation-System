@@ -185,12 +185,13 @@ func _build_bottom(root: Control) -> void:
 	var connp := DashPanel.new("机器人连接", 17.0)
 	_conn["status"] = connp.add_kv("连接状态", "未连接", UiStyle.RED)
 	_conn["latency"] = connp.add_kv("延迟", "— ms")
-	_conn["engine"] = connp.add_kv("Engine", "-")
-	_conn["mode"] = connp.add_kv("Mode", "-")
-	_conn["slack"] = connp.add_kv("Slack", "-")
-	_conn["guidewire"] = connp.add_kv("Guidewire", "-")
-	_conn["support"] = connp.add_kv("Support", "-")
-	_conn["buckling"] = connp.add_kv("Buckling", "-")
+	_conn["engine"] = connp.add_kv("引擎", "-")
+	_conn["mode"] = connp.add_kv("模式", "-")
+	_conn["slack"] = connp.add_kv("堆积", "-")
+	_conn["guidewire"] = connp.add_kv("导丝", "-")
+	_conn["support"] = connp.add_kv("支撑", "-")
+	_conn["buckling"] = connp.add_kv("屈曲", "-")
+	_conn["wall_slide"] = connp.add_kv("贴壁", "-")
 	# 信号强度: 5 格信号条 (§16).
 	var sigrow := HBoxContainer.new()
 	var sigt := UiStyle.label("信号强度", UiStyle.TEXT_MID, 12)
@@ -356,23 +357,84 @@ func set_backend(engine: String, mode: String, diagnostics: Dictionary) -> void:
 
 func set_device_state(guidewire: Dictionary, support: Dictionary, risk: Dictionary) -> void:
 	if _conn.has("guidewire"):
-		var tip_shape := str(guidewire.get("tip_shape", "-"))
-		var segment := str(guidewire.get("current_tip_segment", "-"))
-		_conn["guidewire"].text = "%s / %s" % [tip_shape, segment]
+		var tip_shape := str(guidewire.get("tip_shape_label", _cn_tip_shape(str(guidewire.get("tip_shape", "-")))))
+		var segment := str(guidewire.get("current_tip_segment_label", _cn_segment(str(guidewire.get("current_tip_segment", "-")))))
+		var torsion: Variant = guidewire.get("torsion_lag_deg", null)
+		if typeof(torsion) == TYPE_FLOAT or typeof(torsion) == TYPE_INT:
+			_conn["guidewire"].text = "%s / %s 扭滞%.0f°" % [tip_shape, segment, float(torsion)]
+		else:
+			_conn["guidewire"].text = "%s / %s" % [tip_shape, segment]
 	if _conn.has("support"):
-		var support_type := str(support.get("effective_support_type", "-"))
-		var free_len := support.get("free_wire_length_mm", null)
+		var support_type := str(support.get("effective_support_type_label", _cn_support_type(str(support.get("effective_support_type", "-")))))
+		var free_len: Variant = support.get("free_wire_length_mm", null)
 		if typeof(free_len) == TYPE_FLOAT or typeof(free_len) == TYPE_INT:
 			_conn["support"].text = "%s %.1f mm" % [support_type, float(free_len)]
 		else:
 			_conn["support"].text = support_type
 	if _conn.has("buckling"):
-		var buckling := str(risk.get("buckling_risk", "UNKNOWN"))
-		var pile := risk.get("pile_ratio", null)
+		var buckling := str(risk.get("buckling_risk_text", _cn_buckling(str(risk.get("buckling_risk", "UNKNOWN")))))
+		var pile: Variant = risk.get("pile_ratio", null)
 		if typeof(pile) == TYPE_FLOAT or typeof(pile) == TYPE_INT:
 			_conn["buckling"].text = "%s %.0f%%" % [buckling, float(pile) * 100.0]
 		else:
 			_conn["buckling"].text = buckling
+	if _conn.has("wall_slide"):
+		var wall_state := str(risk.get("wall_slide_state_text", _cn_wall_slide(str(risk.get("wall_slide_state", "UNKNOWN")))))
+		var normal_score: Variant = risk.get("normal_poking_score", null)
+		var slide_score: Variant = risk.get("tangential_slide_score", null)
+		if (typeof(normal_score) == TYPE_FLOAT or typeof(normal_score) == TYPE_INT) and (typeof(slide_score) == TYPE_FLOAT or typeof(slide_score) == TYPE_INT):
+			_conn["wall_slide"].text = "%s 顶%.0f%% 滑%.0f%%" % [wall_state, float(normal_score) * 100.0, float(slide_score) * 100.0]
+		else:
+			_conn["wall_slide"].text = wall_state
+
+
+func _cn_tip_shape(value: String) -> String:
+	match value:
+		"j_tip": return "J尖"
+		"straight": return "直头"
+		_: return value
+
+
+func _cn_segment(value: String) -> String:
+	match value:
+		"atraumatic_tip": return "无创头端"
+		"pre_shaped_soft_tip": return "预塑形软头"
+		"distal_soft": return "远端软段"
+		"transition": return "过渡段"
+		"proximal_shaft": return "近端杆身"
+		_: return value
+
+
+func _cn_support_type(value: String) -> String:
+	match value:
+		"introducer_sheath": return "导入鞘"
+		"guiding_catheter": return "导引导管"
+		"intermediate_catheter": return "中间导管"
+		"microcatheter": return "微导管"
+		"none": return "无支撑"
+		_: return value
+
+
+func _cn_buckling(value: String) -> String:
+	match value:
+		"LOW": return "低"
+		"MEDIUM": return "中"
+		"HIGH": return "高"
+		"UNKNOWN": return "未知"
+		_: return value
+
+
+func _cn_wall_slide(value: String) -> String:
+	match value:
+		"WALL_SLIDE_OK": return "贴壁滑入"
+		"TIP_POKING_WARNING": return "顶壁风险"
+		"FREE_CENTERED": return "居中未贴壁"
+		"SAFE_NAV": return "安全导航"
+		"DANGER_WARNING": return "风险预警"
+		"COLLISION_STOP": return "碰撞制动"
+		"STANDBY": return "待机"
+		"UNKNOWN": return "未知"
+		_: return value
 
 func update_metrics(metrics: Dictionary) -> void:
 	var raw_wall_mm := float(metrics.get("wall_distance", 0.0)) * 1000.0

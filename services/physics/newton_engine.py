@@ -158,6 +158,11 @@ def _quat_axis_angle(axis: np.ndarray, angle: float) -> np.ndarray:
     return np.array([u[0] * s, u[1] * s, u[2] * s, math.cos(angle / 2.0)])
 
 
+def _wrap_degrees(angle: float) -> float:
+    """Wrap an angle to [-180, 180] degrees."""
+    return (float(angle) + 180.0) % 360.0 - 180.0
+
+
 class NewtonEngine:
     """Opt-in Newton physics demo backend.
 
@@ -226,7 +231,7 @@ class NewtonEngine:
         # is free physics. sheath_bodies=-1 (default) resolves automatically so
         # only the distal ``free_len`` of wire is free -- a long unsupported
         # column buckles into loops under blocked push (doc/08 §9.1 sheath
-        # constraint / §28.9 抗屈�?. Explicit >0 forces that exact glue count
+        # constraint / §28.9 抗屈�?. Explicit >0 forces that exact glue count
         # (sheath_bodies=1 reproduces the original root-only D4 behavior).
         self._sheath_bodies = int(os.environ.get("CATHSIM_NEWTON_SHEATH_BODIES", "-1"))
         # Distal wire length (m) left free beyond the sheath in auto mode.
@@ -265,6 +270,7 @@ class NewtonEngine:
 
         self._centerline = _resample(self._path.points, 0.002)
         self._radii = self._centerline_radii()
+        self._cl_cum = self._centerline_cumlen()
         self._insert_s = 0.0
         self._initialized = False
         self._model = None
@@ -301,7 +307,12 @@ class NewtonEngine:
         self._path = path
         self._centerline = _resample(self._path.points, 0.002)
         self._radii = self._centerline_radii()
+        self._cl_cum = self._centerline_cumlen()
         self._insert_s = 0.0
+
+    def _centerline_cumlen(self) -> np.ndarray:
+        seg = np.linalg.norm(np.diff(self._centerline, axis=0), axis=1)
+        return np.concatenate([[0.0], np.cumsum(seg)])
 
     def _centerline_radii(self) -> np.ndarray:
         """Per-node lumen radius along the resampled centerline.
@@ -709,6 +720,8 @@ class NewtonEngine:
         fed_arclen = self._insert_s + float(self._base_arc[-1])
         slack = fed_arclen - tip_arclen
         worst, wall_distance, contact_force = self._breach_stats(xyz)
+        wall_metrics = self._tip_wall_metrics(xyz, tip_arclen)
+        torsion_lag_deg = self._torsion_lag_deg(xyz, tip_arclen)
         out.update({
             "tip_arclen_m": tip_arclen,
             "fed_arclen_m": fed_arclen,
@@ -721,12 +734,19 @@ class NewtonEngine:
             "max_breach_m": worst,
             "wall_distance_m": min(wall_distance, MAX_WALL_DISTANCE),
             "contact_force": contact_force,
-            "guidewire": self._guidewire_diagnostics(tip_arclen * 1000.0),
+            "normal_poking_score": wall_metrics["normal_poking_score"],
+            "tangential_slide_score": wall_metrics["tangential_slide_score"],
+            "wall_slide_state": wall_metrics["wall_slide_state"],
+            "guidewire": self._guidewire_diagnostics(tip_arclen * 1000.0, torsion_lag_deg),
             "support": self._support_diagnostics(tip_arclen * 1000.0),
         })
         return out
 
-    def _guidewire_diagnostics(self, arclen_mm: float | None = None) -> dict:
+    def _guidewire_diagnostics(
+        self,
+        arclen_mm: float | None = None,
+        torsion_lag_deg: float | None = None,
+    ) -> dict:
         segment = (
             self.guidewire_profile.segment_at(arclen_mm)
             if arclen_mm is not None
@@ -736,7 +756,7 @@ class NewtonEngine:
             "profile_name": self.guidewire_profile.name,
             "tip_shape": self.guidewire_profile.tip_shape.shape_type,
             "current_tip_segment": segment.name,
-            "torsion_lag_deg": None,
+            "torsion_lag_deg": torsion_lag_deg,
             "total_length_mm": self.guidewire_profile.total_length_mm,
             "segment_count": len(self.guidewire_profile.segments),
             "jtip_deg": self._jtip_deg,
@@ -750,6 +770,88 @@ class NewtonEngine:
             "support_ratio": self.support_system.support_ratio(guidewire_tip_arclen_mm),
             "free_wire_length_mm": self.support_system.free_wire_length_mm(guidewire_tip_arclen_mm),
         }
+
+    def _tip_wall_metrics(self, xyz: np.ndarray, tip_arclen: float) -> dict:
+        """Tip wall-interaction quality from current rod geometry."""
+        if len(xyz) < 2:
+            return {
+                "normal_poking_score": None,
+                "tangential_slide_score": None,
+                "wall_slide_state": "UNKNOWN",
+            }
+
+        tip = np.asarray(xyz[-1], dtype=np.float64)
+        prev = np.asarray(xyz[-2], dtype=np.float64)
+        tip_dir = tip - prev
+        tip_norm = float(np.linalg.norm(tip_dir))
+        if tip_norm <= 1e-9:
+            return {
+                "normal_poking_score": None,
+                "tangential_slide_score": None,
+                "wall_slide_state": "UNKNOWN",
+            }
+        tip_dir /= tip_norm
+
+        idx = int(np.searchsorted(self._cl_cum, float(tip_arclen)))
+        idx = int(np.clip(idx, 0, len(self._centerline) - 1))
+        center = self._centerline[idx]
+        tangent = self._tangent_at_s(tip_arclen)
+        radial = tip - center
+        radial = radial - tangent * float(np.dot(radial, tangent))
+        radial_norm = float(np.linalg.norm(radial))
+        if radial_norm <= 1e-9:
+            normal_score = 0.0
+            tangential_score = 0.0
+        else:
+            radial_unit = radial / radial_norm
+            radius = max(float(self._radii[idx]), self._rod_radius, 1e-9)
+            proximity = float(np.clip((radial_norm + self._rod_radius) / radius, 0.0, 1.0))
+            outward = max(0.0, float(np.dot(tip_dir, radial_unit)))
+            tangent_align = abs(float(np.dot(tip_dir, tangent)))
+            normal_score = float(np.clip(outward * proximity, 0.0, 1.0))
+            tangential_score = float(np.clip(tangent_align * proximity * (1.0 - normal_score), 0.0, 1.0))
+
+        if normal_score >= 0.7:
+            state = "TIP_POKING_WARNING"
+        elif tangential_score >= 0.35:
+            state = "WALL_SLIDE_OK"
+        else:
+            state = "FREE_CENTERED"
+        return {
+            "normal_poking_score": normal_score,
+            "tangential_slide_score": tangential_score,
+            "wall_slide_state": state,
+        }
+
+    def _torsion_lag_deg(self, xyz: np.ndarray, tip_arclen: float) -> float | None:
+        """Approximate twist lag between commanded root twist and J-tip plane."""
+        if len(xyz) < 3 or self._jtip_deg <= 0.0:
+            return 0.0
+
+        tip = np.asarray(xyz[-1], dtype=np.float64)
+        base_idx = max(0, len(xyz) - 1 - max(1, int(self._jtip_bodies)))
+        base = np.asarray(xyz[base_idx], dtype=np.float64)
+        tangent = self._tangent_at_s(tip_arclen)
+        lateral = tip - base
+        lateral = lateral - tangent * float(np.dot(lateral, tangent))
+        lateral_norm = float(np.linalg.norm(lateral))
+        if lateral_norm <= 1e-9:
+            return abs(_wrap_degrees(math.degrees(self._twist)))
+        lateral /= lateral_norm
+
+        ref = np.array([0.0, 1.0, 0.0]) if abs(tangent[1]) < 0.9 else np.array([1.0, 0.0, 0.0])
+        ref = ref - tangent * float(np.dot(ref, tangent))
+        ref_norm = float(np.linalg.norm(ref))
+        if ref_norm <= 1e-9:
+            return abs(_wrap_degrees(math.degrees(self._twist)))
+        ref /= ref_norm
+
+        observed = math.degrees(math.atan2(
+            float(np.dot(np.cross(ref, lateral), tangent)),
+            float(np.dot(ref, lateral)),
+        ))
+        commanded = math.degrees(self._twist)
+        return abs(_wrap_degrees(commanded - observed))
 
     def step(self, push: float, rotate: float) -> RawPose:
         self._ensure_initialized()

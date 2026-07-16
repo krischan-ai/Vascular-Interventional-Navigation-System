@@ -1224,14 +1224,21 @@ func _on_batch(batch: Dictionary) -> void:
 	_feed_rig(_guidewire_front_pose_from_batch(batch))
 	var safety: Dictionary = batch.get("safety", {})
 	var episode: Dictionary = batch.get("episode", {})
+	var diagnostics: Dictionary = batch.get("diagnostics", {}) as Dictionary
 	_hud.set_backend(
 		str(batch.get("engine", "")),
 		str(batch.get("fidelity_mode", "")),
-		batch.get("diagnostics", {}) as Dictionary
+		diagnostics
 	)
+	var guidewire_state: Dictionary = batch.get("guidewire", {}) as Dictionary
+	if guidewire_state.is_empty() and diagnostics.has("guidewire"):
+		guidewire_state = diagnostics.get("guidewire", {}) as Dictionary
+	var support_state: Dictionary = batch.get("support", {}) as Dictionary
+	if support_state.is_empty() and diagnostics.has("support"):
+		support_state = diagnostics.get("support", {}) as Dictionary
 	_hud.set_device_state(
-		batch.get("guidewire", {}) as Dictionary,
-		batch.get("support", {}) as Dictionary,
+		guidewire_state,
+		support_state,
 		batch.get("risk", {}) as Dictionary
 	)
 	var status := str(safety.get("status", "STANDBY"))

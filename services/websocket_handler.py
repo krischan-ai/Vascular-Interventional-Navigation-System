@@ -18,6 +18,7 @@ from typing import Any, Callable, Literal
 from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field, ValidationError
 
+from services.devices import default_guidewire_profile, default_support_system
 from services.navigation_engine import NavigationEngine, NavigationState
 from services.path_planner import PathPlanner
 from services.session_manager import SessionManager
@@ -31,6 +32,58 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _PHYSICS_CAPABLE_BUILTIN: frozenset[str] = frozenset({"aorta_trunk", "aorta_tree"})
 PhysicsEngineMode = Literal["auto", "guided", "mujoco", "physics", "newton", "newton_demo"]
 
+_TIP_SHAPE_LABELS = {
+    "j_tip": "J尖",
+    "straight": "直头",
+}
+_GUIDEWIRE_SEGMENT_LABELS = {
+    "atraumatic_tip": "无创头端",
+    "pre_shaped_soft_tip": "预塑形软头",
+    "distal_soft": "远端软段",
+    "transition": "过渡段",
+    "proximal_shaft": "近端杆身",
+}
+_SUPPORT_TYPE_LABELS = {
+    "introducer_sheath": "导入鞘",
+    "guiding_catheter": "导引导管",
+    "intermediate_catheter": "中间导管",
+    "microcatheter": "微导管",
+    "none": "无支撑",
+}
+_BUCKLING_RISK_LABELS = {
+    "LOW": "低",
+    "MEDIUM": "中",
+    "HIGH": "高",
+    "UNKNOWN": "未知",
+}
+_WALL_SLIDE_STATE_LABELS = {
+    "WALL_SLIDE_OK": "贴壁滑入",
+    "TIP_POKING_WARNING": "顶壁风险",
+    "FREE_CENTERED": "居中未贴壁",
+    "SAFE_NAV": "安全导航",
+    "DANGER_WARNING": "风险预警",
+    "COLLISION_STOP": "碰撞制动",
+    "STANDBY": "待机",
+    "UNKNOWN": "未知",
+}
+
+
+def _cn_label(labels: dict[str, str], value: Any, default: str = "未知") -> str:
+    if value is None:
+        return default
+    text = str(value)
+    return labels.get(text, text if text else default)
+
+
+def _score_text(score: Any) -> str:
+    if not isinstance(score, (int, float)):
+        return "未知"
+    score_float = float(score)
+    if score_float >= 0.7:
+        return "高"
+    if score_float >= 0.35:
+        return "中"
+    return "低"
 
 def _builtin_phantom_centerline(phantom: str) -> Path | None:
     """Path to a built-in phantom's shipped centerline.json, if it exists.
@@ -872,19 +925,70 @@ class WebSocketHandler:
         """
         return state.as_dict()
 
+    def _guidewire_state_from_diagnostics(self, diagnostics: dict[str, Any]) -> dict[str, Any]:
+        diag = diagnostics if isinstance(diagnostics, dict) else {}
+        guidewire = diag.get("guidewire")
+        if isinstance(guidewire, dict) and guidewire:
+            result = dict(guidewire)
+        else:
+            profile = default_guidewire_profile(total_length_mm=float(diag.get("rod_length_m", 0.06)) * 1000.0)
+            result = {
+                "profile_name": profile.name,
+                "tip_shape": profile.tip_shape.shape_type,
+                "current_tip_segment": "pre_shaped_soft_tip",
+                "torsion_lag_deg": None,
+                "total_length_mm": profile.total_length_mm,
+                "segment_count": len(profile.segments),
+                "jtip_deg": profile.tip_shape.precurve_angle_deg,
+                "jtip_bodies": None,
+            }
+        result["tip_shape_label"] = _cn_label(_TIP_SHAPE_LABELS, result.get("tip_shape"))
+        result["current_tip_segment_label"] = _cn_label(
+            _GUIDEWIRE_SEGMENT_LABELS,
+            result.get("current_tip_segment"),
+        )
+        result["torsion_lag_deg_label"] = "扭转滞后"
+        return result
+
+    def _support_state_from_diagnostics(self, diagnostics: dict[str, Any]) -> dict[str, Any]:
+        diag = diagnostics if isinstance(diagnostics, dict) else {}
+        support = diag.get("support")
+        if isinstance(support, dict) and support:
+            result = dict(support)
+        else:
+            rod_length_m = float(diag.get("rod_length_m", 0.06))
+            free_len_m = float(diag.get("free_len_m", min(0.03, rod_length_m)))
+            system = default_support_system(
+                guidewire_tip_arclen_mm=rod_length_m * 1000.0,
+                free_wire_length_mm=free_len_m * 1000.0,
+            )
+            result = {
+                "effective_support_type": system.effective_support_type(),
+                "effective_support_tip_mm": system.effective_support_tip(),
+                "support_ratio": system.support_ratio(rod_length_m * 1000.0),
+                "free_wire_length_mm": system.free_wire_length_mm(rod_length_m * 1000.0),
+            }
+        result["effective_support_type_label"] = _cn_label(
+            _SUPPORT_TYPE_LABELS,
+            result.get("effective_support_type"),
+        )
+        return result
+
     def _segmented_risk_state(self, state: NavigationState, diagnostics: dict[str, Any]) -> dict[str, Any]:
         """Expose guidewire-specific risk fields backed by live diagnostics."""
         diag = diagnostics if isinstance(diagnostics, dict) else {}
         slack_m = diag.get("slack_m")
         max_slack_m = diag.get("max_slack_m")
         max_breach_m = diag.get("max_breach_m")
+        normal_poking_score = diag.get("normal_poking_score")
+        tangential_slide_score = diag.get("tangential_slide_score")
 
         pile_ratio = None
         if isinstance(slack_m, (int, float)) and isinstance(max_slack_m, (int, float)) and max_slack_m > 0:
             pile_ratio = max(0.0, float(slack_m) / float(max_slack_m))
 
         if pile_ratio is None:
-            buckling_risk = "UNKNOWN"
+            buckling_risk = "LOW" if state.safety_status == "SAFE_NAV" else "UNKNOWN"
         elif pile_ratio >= 0.85:
             buckling_risk = "HIGH"
         elif pile_ratio >= 0.5:
@@ -892,10 +996,17 @@ class WebSocketHandler:
         else:
             buckling_risk = "LOW"
 
-        wall_slide_state = "WALL_SLIDE_OK" if state.safety_status == "SAFE_NAV" else state.safety_status
+        wall_slide_state = str(diag.get("wall_slide_state", "WALL_SLIDE_OK" if state.safety_status == "SAFE_NAV" else state.safety_status))
         breach_mm = None
         if isinstance(max_breach_m, (int, float)):
             breach_mm = max(0.0, float(max_breach_m) * 1000.0)
+
+        normal_poking_value = normal_poking_score if isinstance(normal_poking_score, (int, float)) else None
+        tangential_slide_value = tangential_slide_score if isinstance(tangential_slide_score, (int, float)) else None
+        buckling_text = _cn_label(_BUCKLING_RISK_LABELS, buckling_risk)
+        wall_slide_text = _cn_label(_WALL_SLIDE_STATE_LABELS, wall_slide_state)
+        normal_poking_text = _score_text(normal_poking_value)
+        tangential_slide_text = _score_text(tangential_slide_value)
 
         return {
             "slack_mm": float(slack_m) * 1000.0 if isinstance(slack_m, (int, float)) else None,
@@ -903,10 +1014,25 @@ class WebSocketHandler:
             "contact_force": state.contact_force,
             "breach_mm": breach_mm,
             "wall_slide_state": wall_slide_state,
+            "wall_slide_state_label": "贴壁状态",
+            "wall_slide_state_text": wall_slide_text,
             "buckling_risk": buckling_risk,
-            "normal_poking_score": None,
-            "tangential_slide_score": None,
+            "buckling_risk_label": "屈曲风险",
+            "buckling_risk_text": buckling_text,
+            "normal_poking_score": normal_poking_value,
+            "normal_poking_score_label": "顶壁风险",
+            "normal_poking_score_text": normal_poking_text,
+            "tangential_slide_score": tangential_slide_value,
+            "tangential_slide_score_label": "贴壁滑入",
+            "tangential_slide_score_text": tangential_slide_text,
+            "display": {
+                "wall_slide_state": {"name": "贴壁状态", "value": wall_slide_text},
+                "buckling_risk": {"name": "屈曲风险", "value": buckling_text},
+                "normal_poking_score": {"name": "顶壁风险", "value": normal_poking_text},
+                "tangential_slide_score": {"name": "贴壁滑入", "value": tangential_slide_text},
+            },
         }
+
     def _state_to_batch(
         self,
         state: NavigationState,
@@ -930,8 +1056,8 @@ class WebSocketHandler:
         diagnostics = {}
         if backend is not None and hasattr(backend, "diagnostics"):
             diagnostics = backend.diagnostics()
-        guidewire = diagnostics.get("guidewire", {}) if isinstance(diagnostics, dict) else {}
-        support = diagnostics.get("support", {}) if isinstance(diagnostics, dict) else {}
+        guidewire = self._guidewire_state_from_diagnostics(diagnostics)
+        support = self._support_state_from_diagnostics(diagnostics)
         risk = self._segmented_risk_state(state, diagnostics)
         return {
             "schema_version": "navigation_visual_v2",

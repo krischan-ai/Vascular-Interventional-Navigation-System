@@ -104,6 +104,9 @@ class TestWebSocketHandlerUnit:
                     "max_breach_m": -0.001,
                     "guidewire": {"profile_name": "soft_j_tip_training_wire", "tip_shape": "j_tip"},
                     "support": {"effective_support_type": "microcatheter", "free_wire_length_mm": 30.0},
+                    "normal_poking_score": 0.2,
+                    "tangential_slide_score": 0.6,
+                    "wall_slide_state": "WALL_SLIDE_OK",
                 }
 
         class DummyEngine:
@@ -155,11 +158,55 @@ class TestWebSocketHandlerUnit:
         assert batch["diagnostics"]["drive"] == "force"
         assert batch["diagnostics"]["slack_m"] == 0.002
         assert batch["guidewire"]["tip_shape"] == "j_tip"
+        assert batch["guidewire"]["tip_shape_label"] == "J\u5c16"
+        assert batch["guidewire"]["torsion_lag_deg_label"] == "\u626d\u8f6c\u6ede\u540e"
         assert batch["support"]["effective_support_type"] == "microcatheter"
+        assert batch["support"]["effective_support_type_label"] == "\u5fae\u5bfc\u7ba1"
         assert batch["risk"]["slack_mm"] == pytest.approx(2.0)
         assert batch["risk"]["pile_ratio"] == pytest.approx(0.002 / 0.012)
         assert batch["risk"]["breach_mm"] == pytest.approx(0.0)
         assert batch["risk"]["buckling_risk"] == "LOW"
+        assert batch["risk"]["buckling_risk_text"] == "\u4f4e"
+        assert batch["risk"]["normal_poking_score"] == pytest.approx(0.2)
+        assert batch["risk"]["normal_poking_score_label"] == "\u9876\u58c1\u98ce\u9669"
+        assert batch["risk"]["normal_poking_score_text"] == "\u4f4e"
+        assert batch["risk"]["tangential_slide_score"] == pytest.approx(0.6)
+        assert batch["risk"]["tangential_slide_score_label"] == "\u8d34\u58c1\u6ed1\u5165"
+        assert batch["risk"]["tangential_slide_score_text"] == "\u4e2d"
+        assert batch["risk"]["wall_slide_state"] == "WALL_SLIDE_OK"
+        assert batch["risk"]["wall_slide_state_label"] == "\u8d34\u58c1\u72b6\u6001"
+        assert batch["risk"]["wall_slide_state_text"] == "\u8d34\u58c1\u6ed1\u5165"
+        assert batch["risk"]["display"]["normal_poking_score"] == {"name": "\u9876\u58c1\u98ce\u9669", "value": "\u4f4e"}
+
+    def test_state_batch_fills_device_defaults_without_backend_diagnostics(self):
+        from services.navigation_engine import NavigationState
+        from services.session_manager import SessionManager
+        from services.websocket_handler import WebSocketHandler
+
+        class DummyEngine:
+            _engine = None
+            planned_path = []
+            entry_pose = {}
+
+            def get_render_bodies(self):
+                return []
+
+        state = NavigationState(safety_status="SAFE_NAV")
+        batch = WebSocketHandler(SessionManager())._state_to_batch(state, DummyEngine())
+
+        assert batch["guidewire"]["tip_shape"] == "j_tip"
+        assert batch["guidewire"]["tip_shape_label"] == "J\u5c16"
+        assert batch["guidewire"]["current_tip_segment"] == "pre_shaped_soft_tip"
+        assert batch["guidewire"]["current_tip_segment_label"] == "\u9884\u5851\u5f62\u8f6f\u5934"
+        assert batch["support"]["effective_support_type"] == "microcatheter"
+        assert batch["support"]["effective_support_type_label"] == "\u5fae\u5bfc\u7ba1"
+        assert batch["support"]["free_wire_length_mm"] == pytest.approx(30.0)
+        assert batch["risk"]["buckling_risk"] == "LOW"
+        assert batch["risk"]["buckling_risk_text"] == "\u4f4e"
+        assert batch["risk"]["normal_poking_score"] is None
+        assert batch["risk"]["normal_poking_score_text"] == "\u672a\u77e5"
+        assert batch["risk"]["tangential_slide_score"] is None
+        assert batch["risk"]["tangential_slide_score_text"] == "\u672a\u77e5"
 
     def test_state_batch_visual_level_uses_real_risk_level_before_stop(self):
         from services.navigation_engine import NavigationState

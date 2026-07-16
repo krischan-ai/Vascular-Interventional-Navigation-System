@@ -43,6 +43,13 @@ def test_hud_uses_backend_dashboard_fields():
     assert '_conn["guidewire"]' in hud
     assert '_conn["support"]' in hud
     assert '_conn["buckling"]' in hud
+    assert '_conn["wall_slide"]' in hud
+    assert 'connp.add_kv("\u5bfc\u4e1d"' in hud
+    assert 'connp.add_kv("\u652f\u6491"' in hud
+    assert 'connp.add_kv("\u5c48\u66f2"' in hud
+    assert 'connp.add_kv("\u8d34\u58c1"' in hud
+    assert 'func _cn_tip_shape' in hud
+    assert 'func _cn_wall_slide' in hud
     assert "TODO backend" not in hud
     assert '"23.6"' not in hud
     assert '"02:35"' not in hud
