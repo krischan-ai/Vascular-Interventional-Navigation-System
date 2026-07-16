@@ -164,3 +164,20 @@ class TestSegmentedStiffness:
 
         assert "bend_profile" in params
         assert params["bend_profile"][-1] == pytest.approx(engine._tip_bend)
+
+class TestDeviceDiagnostics:
+    """Segmented guidewire and support metadata exposed by Newton diagnostics."""
+
+    def test_diagnostics_exposes_guidewire_profile_and_support(self, engine):
+        diag = engine.diagnostics()
+
+        assert diag["guidewire"]["profile_name"] == "soft_j_tip_training_wire"
+        assert diag["guidewire"]["tip_shape"] == "j_tip"
+        assert diag["guidewire"]["current_tip_segment"] == "pre_shaped_soft_tip"
+        assert diag["guidewire"]["segment_count"] == 6
+        assert diag["support"]["effective_support_type"] == "microcatheter"
+        assert diag["support"]["free_wire_length_mm"] == pytest.approx(30.0)
+
+    def test_profile_supplies_newton_jtip_default(self, engine):
+        assert engine._jtip_deg == pytest.approx(engine.guidewire_profile.tip_shape.precurve_angle_deg)
+        assert engine._jtip_bodies >= 1

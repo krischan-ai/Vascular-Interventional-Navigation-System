@@ -872,6 +872,41 @@ class WebSocketHandler:
         """
         return state.as_dict()
 
+    def _segmented_risk_state(self, state: NavigationState, diagnostics: dict[str, Any]) -> dict[str, Any]:
+        """Expose guidewire-specific risk fields backed by live diagnostics."""
+        diag = diagnostics if isinstance(diagnostics, dict) else {}
+        slack_m = diag.get("slack_m")
+        max_slack_m = diag.get("max_slack_m")
+        max_breach_m = diag.get("max_breach_m")
+
+        pile_ratio = None
+        if isinstance(slack_m, (int, float)) and isinstance(max_slack_m, (int, float)) and max_slack_m > 0:
+            pile_ratio = max(0.0, float(slack_m) / float(max_slack_m))
+
+        if pile_ratio is None:
+            buckling_risk = "UNKNOWN"
+        elif pile_ratio >= 0.85:
+            buckling_risk = "HIGH"
+        elif pile_ratio >= 0.5:
+            buckling_risk = "MEDIUM"
+        else:
+            buckling_risk = "LOW"
+
+        wall_slide_state = "WALL_SLIDE_OK" if state.safety_status == "SAFE_NAV" else state.safety_status
+        breach_mm = None
+        if isinstance(max_breach_m, (int, float)):
+            breach_mm = max(0.0, float(max_breach_m) * 1000.0)
+
+        return {
+            "slack_mm": float(slack_m) * 1000.0 if isinstance(slack_m, (int, float)) else None,
+            "pile_ratio": pile_ratio,
+            "contact_force": state.contact_force,
+            "breach_mm": breach_mm,
+            "wall_slide_state": wall_slide_state,
+            "buckling_risk": buckling_risk,
+            "normal_poking_score": None,
+            "tangential_slide_score": None,
+        }
     def _state_to_batch(
         self,
         state: NavigationState,
@@ -895,12 +930,18 @@ class WebSocketHandler:
         diagnostics = {}
         if backend is not None and hasattr(backend, "diagnostics"):
             diagnostics = backend.diagnostics()
+        guidewire = diagnostics.get("guidewire", {}) if isinstance(diagnostics, dict) else {}
+        support = diagnostics.get("support", {}) if isinstance(diagnostics, dict) else {}
+        risk = self._segmented_risk_state(state, diagnostics)
         return {
             "schema_version": "navigation_visual_v2",
             "timestamp_ms": timestamp_ms,
             "engine": type(backend).__name__ if backend is not None else "",
             "fidelity_mode": state.fidelity_mode,
             "diagnostics": diagnostics,
+            "guidewire": guidewire,
+            "support": support,
+            "risk": risk,
             "tip": {
                 "position": state.tip_position,
                 "direction": state.tip_direction,

@@ -1229,6 +1229,11 @@ func _on_batch(batch: Dictionary) -> void:
 		str(batch.get("fidelity_mode", "")),
 		batch.get("diagnostics", {}) as Dictionary
 	)
+	_hud.set_device_state(
+		batch.get("guidewire", {}) as Dictionary,
+		batch.get("support", {}) as Dictionary,
+		batch.get("risk", {}) as Dictionary
+	)
 	var status := str(safety.get("status", "STANDBY"))
 	_hud.update_safety(status)
 	# Fixed control-mode display (VPP §2.1/§2.4): SAFE HOLD on a collision stop,

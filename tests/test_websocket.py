@@ -96,7 +96,15 @@ class TestWebSocketHandlerUnit:
 
         class DummyBackend:
             def diagnostics(self):
-                return {"drive": "force", "slack_m": 0.002, "feed_budget_m": 0.010}
+                return {
+                    "drive": "force",
+                    "slack_m": 0.002,
+                    "max_slack_m": 0.012,
+                    "feed_budget_m": 0.010,
+                    "max_breach_m": -0.001,
+                    "guidewire": {"profile_name": "soft_j_tip_training_wire", "tip_shape": "j_tip"},
+                    "support": {"effective_support_type": "microcatheter", "free_wire_length_mm": 30.0},
+                }
 
         class DummyEngine:
             _engine = DummyBackend()
@@ -146,6 +154,12 @@ class TestWebSocketHandlerUnit:
         assert batch["engine"] == "DummyBackend"
         assert batch["diagnostics"]["drive"] == "force"
         assert batch["diagnostics"]["slack_m"] == 0.002
+        assert batch["guidewire"]["tip_shape"] == "j_tip"
+        assert batch["support"]["effective_support_type"] == "microcatheter"
+        assert batch["risk"]["slack_mm"] == pytest.approx(2.0)
+        assert batch["risk"]["pile_ratio"] == pytest.approx(0.002 / 0.012)
+        assert batch["risk"]["breach_mm"] == pytest.approx(0.0)
+        assert batch["risk"]["buckling_risk"] == "LOW"
 
     def test_state_batch_visual_level_uses_real_risk_level_before_stop(self):
         from services.navigation_engine import NavigationState

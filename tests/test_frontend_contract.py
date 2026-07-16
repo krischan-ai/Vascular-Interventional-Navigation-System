@@ -39,6 +39,10 @@ def test_hud_uses_backend_dashboard_fields():
     assert "var b0: Dictionary = bodies[0]" not in main
     assert "func _free_look" not in main
     assert "_smooth_wall_mm" in hud
+    assert "func set_device_state" in hud
+    assert '_conn["guidewire"]' in hud
+    assert '_conn["support"]' in hud
+    assert '_conn["buckling"]' in hud
     assert "TODO backend" not in hud
     assert '"23.6"' not in hud
     assert '"02:35"' not in hud
@@ -75,6 +79,10 @@ def test_hud_uses_backend_dashboard_fields():
     assert "route_points[96]" in main
     assert "route_visibility(world_pos)" in main
     assert "path_info.get(\"vessel_radius\", null)" in main
+    assert "_hud.set_device_state" in main
+    assert 'batch.get("guidewire", {})' in main
+    assert 'batch.get("support", {})' in main
+    assert 'batch.get("risk", {})' in main
     assert "_update_vessel_route_visibility(path_wps, true, route_radius)" in main
     assert "_update_vessel_route_visibility([], false)" in main
     assert "max(tip_prox * (1.0 - route_focus_enabled), route_prox * route_focus_enabled)" in main

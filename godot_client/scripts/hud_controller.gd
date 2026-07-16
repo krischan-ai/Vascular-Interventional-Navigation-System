@@ -188,6 +188,9 @@ func _build_bottom(root: Control) -> void:
 	_conn["engine"] = connp.add_kv("Engine", "-")
 	_conn["mode"] = connp.add_kv("Mode", "-")
 	_conn["slack"] = connp.add_kv("Slack", "-")
+	_conn["guidewire"] = connp.add_kv("Guidewire", "-")
+	_conn["support"] = connp.add_kv("Support", "-")
+	_conn["buckling"] = connp.add_kv("Buckling", "-")
 	# 信号强度: 5 格信号条 (§16).
 	var sigrow := HBoxContainer.new()
 	var sigt := UiStyle.label("信号强度", UiStyle.TEXT_MID, 12)
@@ -297,6 +300,12 @@ func set_connection(connected: bool) -> void:
 	_conn["engine"].text = "-"
 	_conn["mode"].text = "-"
 	_conn["slack"].text = "-"
+	if _conn.has("guidewire"):
+		_conn["guidewire"].text = "-"
+	if _conn.has("support"):
+		_conn["support"].text = "-"
+	if _conn.has("buckling"):
+		_conn["buckling"].text = "-"
 	for i in _signal_bars.size():
 		_signal_bars[i].color = (UiStyle.GREEN if connected and i < 4 else UiStyle.TRACK)
 	add_log_line("后端已连接" if connected else "后端连接断开")
@@ -344,6 +353,26 @@ func set_backend(engine: String, mode: String, diagnostics: Dictionary) -> void:
 		else:
 			_conn["slack"].text = "-"
 
+
+func set_device_state(guidewire: Dictionary, support: Dictionary, risk: Dictionary) -> void:
+	if _conn.has("guidewire"):
+		var tip_shape := str(guidewire.get("tip_shape", "-"))
+		var segment := str(guidewire.get("current_tip_segment", "-"))
+		_conn["guidewire"].text = "%s / %s" % [tip_shape, segment]
+	if _conn.has("support"):
+		var support_type := str(support.get("effective_support_type", "-"))
+		var free_len := support.get("free_wire_length_mm", null)
+		if typeof(free_len) == TYPE_FLOAT or typeof(free_len) == TYPE_INT:
+			_conn["support"].text = "%s %.1f mm" % [support_type, float(free_len)]
+		else:
+			_conn["support"].text = support_type
+	if _conn.has("buckling"):
+		var buckling := str(risk.get("buckling_risk", "UNKNOWN"))
+		var pile := risk.get("pile_ratio", null)
+		if typeof(pile) == TYPE_FLOAT or typeof(pile) == TYPE_INT:
+			_conn["buckling"].text = "%s %.0f%%" % [buckling, float(pile) * 100.0]
+		else:
+			_conn["buckling"].text = buckling
 
 func update_metrics(metrics: Dictionary) -> void:
 	var raw_wall_mm := float(metrics.get("wall_distance", 0.0)) * 1000.0

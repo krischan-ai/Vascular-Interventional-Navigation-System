@@ -15,6 +15,12 @@ from typing import Sequence
 
 import numpy as np
 
+from services.devices import (
+    CoaxialSupportSystem,
+    GuidewireProfile,
+    default_guidewire_profile,
+    default_support_system,
+)
 from services.physics.base import MAX_WALL_DISTANCE, PlannedPath, RawPose, quat_from_direction
 
 
@@ -167,6 +173,8 @@ class NewtonEngine:
         n_substeps: int | None = None,
         entry_point: Sequence[float] | None = None,
         entry_direction: Sequence[float] | None = None,
+        guidewire_profile: GuidewireProfile | None = None,
+        support_system: CoaxialSupportSystem | None = None,
         **_unused,
     ) -> None:
         if path is None or path.total_len <= 0.0:
@@ -182,8 +190,14 @@ class NewtonEngine:
         self._iterations = int(os.environ.get("CATHSIM_NEWTON_ITERS", "2"))
         self._sim_dt = self._control_dt / self._substeps
         self._rod_length = float(os.environ.get("CATHSIM_NEWTON_ROD_LENGTH", "0.06"))
-        self._rod_radius = float(os.environ.get("CATHSIM_NEWTON_ROD_RADIUS", "0.0004"))
         self._rod_seg_len = float(os.environ.get("CATHSIM_NEWTON_SEG_LEN", "0.003"))
+        self.guidewire_profile = guidewire_profile or default_guidewire_profile(
+            total_length_mm=self._rod_length * 1000.0
+        )
+        self._rod_radius = float(os.environ.get(
+            "CATHSIM_NEWTON_ROD_RADIUS",
+            str(self._default_radius_m()),
+        ))
         # Fallback lumen radius when a route ships no per-point radii.
         self._lumen_radius = float(os.environ.get("CATHSIM_NEWTON_LUMEN_RADIUS", "0.0025"))
         self._min_radius = float(os.environ.get("CATHSIM_NEWTON_MIN_RADIUS", "0.0015"))
@@ -212,11 +226,15 @@ class NewtonEngine:
         # is free physics. sheath_bodies=-1 (default) resolves automatically so
         # only the distal ``free_len`` of wire is free -- a long unsupported
         # column buckles into loops under blocked push (doc/08 §9.1 sheath
-        # constraint / §28.9 抗屈曲). Explicit >0 forces that exact glue count
+        # constraint / §28.9 抗屈�?. Explicit >0 forces that exact glue count
         # (sheath_bodies=1 reproduces the original root-only D4 behavior).
         self._sheath_bodies = int(os.environ.get("CATHSIM_NEWTON_SHEATH_BODIES", "-1"))
         # Distal wire length (m) left free beyond the sheath in auto mode.
         self._free_len = float(os.environ.get("CATHSIM_NEWTON_FREE_LEN", "0.03"))
+        self.support_system = support_system or default_support_system(
+            guidewire_tip_arclen_mm=self._rod_length * 1000.0,
+            free_wire_length_mm=self._free_len * 1000.0,
+        )
         # Prolapse guard (force mode): stop feeding wire when the tip stops
         # advancing. slack = fed arclen - actual tip arclen along the route; once
         # it exceeds max_slack the forward feed budget is exhausted and holding
@@ -230,8 +248,14 @@ class NewtonEngine:
         # the tangent by `jtip_deg` total, giving `rotate` real branch-selecting
         # authority at sharp bends (incidental curvature alone is too weak). 0 deg
         # = straight tip (behaves like the pre-J-tip build).
-        self._jtip_deg = float(os.environ.get("CATHSIM_NEWTON_JTIP_DEG", "35.0" if _force else "0.0"))
-        self._jtip_bodies = int(os.environ.get("CATHSIM_NEWTON_JTIP_BODIES", "3"))
+        self._jtip_deg = float(os.environ.get(
+            "CATHSIM_NEWTON_JTIP_DEG",
+            str(self.guidewire_profile.tip_shape.precurve_angle_deg if _force else 0.0),
+        ))
+        self._jtip_bodies = int(os.environ.get(
+            "CATHSIM_NEWTON_JTIP_BODIES",
+            str(self._default_jtip_bodies()),
+        ))
         self._settle_steps = int(os.environ.get("CATHSIM_NEWTON_SETTLE_STEPS", "20"))
         self._twist = 0.0
         # Graded soft-anchor (anchor mode): proximal glued, distal ramp of
@@ -253,6 +277,16 @@ class NewtonEngine:
         self._alpha = None
         self._base_arc = None
         self._max_s_ins = 0.0
+
+    def _default_radius_m(self) -> float:
+        try:
+            return self.guidewire_profile.segment_by_name("main_support_shaft").radius_mm / 1000.0
+        except KeyError:
+            return 0.0004
+
+    def _default_jtip_bodies(self) -> int:
+        tip_len_m = self.guidewire_profile.tip_shape.tip_length_mm / 1000.0
+        return max(1, int(round(tip_len_m / max(self._rod_seg_len, 1.0e-6))))
 
     def set_path(self, path: PlannedPath | None) -> None:
         """Replace the planned path and force the Newton scene to be rebuilt.
@@ -662,6 +696,8 @@ class NewtonEngine:
             "max_slack_m": self._max_slack,
             "sheath_bodies": self._sheath_bodies,
             "contact_ke": self._contact_ke,
+            "guidewire": self._guidewire_diagnostics(),
+            "support": self._support_diagnostics(self._rod_length * 1000.0),
         }
         if body_count > 0:
             out["sheath_bodies_resolved"] = self._sheath_count(body_count)
@@ -685,8 +721,35 @@ class NewtonEngine:
             "max_breach_m": worst,
             "wall_distance_m": min(wall_distance, MAX_WALL_DISTANCE),
             "contact_force": contact_force,
+            "guidewire": self._guidewire_diagnostics(tip_arclen * 1000.0),
+            "support": self._support_diagnostics(tip_arclen * 1000.0),
         })
         return out
+
+    def _guidewire_diagnostics(self, arclen_mm: float | None = None) -> dict:
+        segment = (
+            self.guidewire_profile.segment_at(arclen_mm)
+            if arclen_mm is not None
+            else self.guidewire_profile.distal_segments[1]
+        )
+        return {
+            "profile_name": self.guidewire_profile.name,
+            "tip_shape": self.guidewire_profile.tip_shape.shape_type,
+            "current_tip_segment": segment.name,
+            "torsion_lag_deg": None,
+            "total_length_mm": self.guidewire_profile.total_length_mm,
+            "segment_count": len(self.guidewire_profile.segments),
+            "jtip_deg": self._jtip_deg,
+            "jtip_bodies": self._jtip_bodies,
+        }
+
+    def _support_diagnostics(self, guidewire_tip_arclen_mm: float) -> dict:
+        return {
+            "effective_support_type": self.support_system.effective_support_type(),
+            "effective_support_tip_mm": self.support_system.effective_support_tip(),
+            "support_ratio": self.support_system.support_ratio(guidewire_tip_arclen_mm),
+            "free_wire_length_mm": self.support_system.free_wire_length_mm(guidewire_tip_arclen_mm),
+        }
 
     def step(self, push: float, rotate: float) -> RawPose:
         self._ensure_initialized()
