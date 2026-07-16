@@ -15,6 +15,7 @@ from typing import Sequence
 
 import numpy as np
 
+from services.devices import CoaxialSupportSystem, GuidewireProfile
 from services.physics.base import MAX_WALL_DISTANCE, PlannedPath, RawPose, quat_from_direction
 
 
@@ -233,6 +234,10 @@ class NewtonEngine:
         # = straight tip (behaves like the pre-J-tip build).
         self._jtip_deg = float(os.environ.get("CATHSIM_NEWTON_JTIP_DEG", "35.0" if _force else "0.0"))
         self._jtip_bodies = int(os.environ.get("CATHSIM_NEWTON_JTIP_BODIES", "3"))
+        self._tip_shape = os.environ.get(
+            "CATHSIM_NEWTON_TIP_SHAPE",
+            "j_tip" if self._jtip_deg > 0.0 and self._jtip_bodies > 0 else "straight",
+        ).strip().lower()
         self._settle_steps = int(os.environ.get("CATHSIM_NEWTON_SETTLE_STEPS", "20"))
         self._twist = 0.0
         # Graded soft-anchor (anchor mode): proximal glued, distal ramp of
@@ -254,6 +259,8 @@ class NewtonEngine:
         self._alpha = None
         self._base_arc = None
         self._max_s_ins = 0.0
+        self._guidewire_profile = self._make_guidewire_profile()
+        self._support_system = self._make_support_system()
 
     def set_path(self, path: PlannedPath | None) -> None:
         """Replace the planned path and force the Newton scene to be rebuilt.
@@ -285,6 +292,24 @@ class NewtonEngine:
         cl_cum = np.concatenate([[0.0], np.cumsum(seg)])
         radii = np.interp(cl_cum, self._path.cumlen, np.asarray(path_radii, dtype=np.float64))
         return np.maximum(radii, self._min_radius)
+
+    def _make_guidewire_profile(self) -> GuidewireProfile:
+        return GuidewireProfile.default(
+            total_length_mm=self._rod_length * 1000.0,
+            tip_shape=self._tip_shape,
+            radius_mm=self._rod_radius * 1000.0,
+            contact_ke=self._contact_ke,
+        )
+
+    def _make_support_system(self) -> CoaxialSupportSystem:
+        return CoaxialSupportSystem.default(
+            total_length_mm=self._rod_length * 1000.0,
+            free_wire_length_mm=self._free_len * 1000.0,
+        )
+
+    def _refresh_device_models(self) -> None:
+        self._guidewire_profile = self._make_guidewire_profile()
+        self._support_system = self._make_support_system()
 
     @property
     def is_initialized(self) -> bool:
@@ -414,14 +439,20 @@ class NewtonEngine:
         and the last joint reaches ``tip_bend``.
         """
         count = max(0, int(joint_count))
-        profile = np.full(count, float(self._bend), dtype=np.float64)
+        profile = np.asarray(
+            self._guidewire_profile.joint_bend_profile(count, self._bend),
+            dtype=np.float64,
+        )
         tip_count = min(max(0, int(self._soft_tip)), count)
         if tip_count <= 0:
             return profile
         start = count - tip_count
         for offset in range(tip_count):
             frac = (offset + 1) / tip_count
-            profile[start + offset] = self._bend * (1.0 - frac) + self._tip_bend * frac
+            profile[start + offset] = min(
+                profile[start + offset],
+                self._bend * (1.0 - frac) + self._tip_bend * frac,
+            )
         return profile
 
     # Deformation params that live-update (no scene rebuild) vs. those baked into
@@ -430,7 +461,7 @@ class NewtonEngine:
         "bend", "tip_bend", "soft_tip", "stretch", "push_speed", "rotate_speed",
         "sheath_bodies", "free_len", "max_slack", "support_speed",
     )
-    _REBUILD_PARAMS = ("jtip_deg", "jtip_bodies", "contact_ke", "wall_thickness", "rod_length")
+    _REBUILD_PARAMS = ("jtip_deg", "jtip_bodies", "contact_ke", "wall_thickness", "rod_length", "tip_shape")
     # Live params that change the glue mask (recomputed in place, no rebuild).
     _GLUE_PARAMS = ("sheath_bodies", "free_len")
 
@@ -446,6 +477,10 @@ class NewtonEngine:
         rebuild = False
         reglue = False
         for key, val in params.items():
+            if key == "tip_shape":
+                self._tip_shape = str(val).strip().lower()
+                rebuild = True
+                continue
             attr = f"_{key}"
             if not hasattr(self, attr):
                 continue
@@ -454,6 +489,9 @@ class NewtonEngine:
                 rebuild = True
             if key in self._GLUE_PARAMS:
                 reglue = True
+        if "tip_shape" not in params and ("jtip_deg" in params or "jtip_bodies" in params):
+            self._tip_shape = "j_tip" if self._jtip_deg > 0.0 and self._jtip_bodies > 0 else "straight"
+        self._refresh_device_models()
         if rebuild:
             # Geometry changed: drop the cached model so the next step rebuilds
             # it (and re-settles) with the new shape, preserving insertion depth.
@@ -467,9 +505,10 @@ class NewtonEngine:
 
     @property
     def deform_params(self) -> dict:
-        tip_shape = "j_tip" if self._jtip_deg > 0.0 and self._jtip_bodies > 0 else "straight"
+        tip_shape = self._tip_shape if self._jtip_deg > 0.0 and self._jtip_bodies > 0 else "straight"
         return {
             "tip_shape": tip_shape,
+            "profile_name": self._guidewire_profile.name,
             "bend": self._bend,
             "tip_bend": self._tip_bend,
             "soft_tip": self._soft_tip,
@@ -483,6 +522,17 @@ class NewtonEngine:
             "free_len": self._free_len,
             "max_slack": self._max_slack,
             "support_speed": self._support_speed,
+            "segments": [
+                {
+                    "name": segment.name,
+                    "start_ratio": segment.start_ratio,
+                    "end_ratio": segment.end_ratio,
+                    "bend_stiffness": segment.bend_stiffness,
+                    "torsion_stiffness": segment.torsion_stiffness,
+                    "preferred_spacing_mm": segment.preferred_spacing_mm,
+                }
+                for segment in self._guidewire_profile.segments
+            ],
             "bend_profile": self._bend_profile(max(0, int(round(self._rod_length / self._rod_seg_len)))).tolist(),
         }
 
@@ -828,6 +878,7 @@ class NewtonEngine:
         # Support advance moves the support tip distally, so the unsupported
         # free span shrinks; retracting support grows it again.
         self._free_len = float(np.clip(self._free_len - delta, min_free, max_free))
+        self._support_system = self._make_support_system()
         if self._initialized and self._rod_bodies:
             self._alpha = self._glue_alpha(len(self._rod_bodies))
         return self.mechanics_state()
@@ -850,15 +901,21 @@ class NewtonEngine:
         )
         free_wire_length_m = float(np.clip(self._free_len, 0.0, total_wire_length_m))
         supported_length_m = max(0.0, total_wire_length_m - free_wire_length_m)
-        support_ratio = supported_length_m / total_wire_length_m if total_wire_length_m > 0.0 else 0.0
+        self._support_system = self._make_support_system()
+        effective_tube = self._support_system.effective_support_tube()
+        support_ratio = self._support_system.support_ratio(total_wire_length_m * 1000.0)
 
-        tip_shape = "j_tip" if self._jtip_deg > 0.0 and self._jtip_bodies > 0 else "straight"
+        tip_shape = self._tip_shape if self._jtip_deg > 0.0 and self._jtip_bodies > 0 else "straight"
+        segment_names = self._guidewire_profile.body_segment_names(body_count or estimated_body_count)
         guidewire = {
-            "profile_name": "newton_force_j_tip" if tip_shape == "j_tip" else "newton_force_straight",
+            "profile_name": self._guidewire_profile.name,
             "tip_shape": tip_shape,
             "shape_type": tip_shape,
-            "curve_angle_deg": float(self._jtip_deg if tip_shape == "j_tip" else 0.0),
+            "curve_angle_deg": float(self._jtip_deg if tip_shape != "straight" else 0.0),
             "tip_length_m": float(max(0, self._jtip_bodies) * self._rod_seg_len),
+            "current_tip_segment": segment_names[-1] if segment_names else "unknown",
+            "body_segments": segment_names,
+            "segment_count": len(self._guidewire_profile.segments),
             "soft_tip_joint_count": int(self._soft_tip),
             "tip_bend_stiffness": float(self._tip_bend),
             "shaft_bend_stiffness": float(self._bend),
@@ -870,13 +927,25 @@ class NewtonEngine:
         }
         support = {
             "support_state": "modeled",
-            "effective_support_type": "proximal_sheath" if self._drive == "force" else "graded_anchor",
+            "effective_support_type": (
+                effective_tube.tube_type if effective_tube is not None else
+                ("graded_anchor" if self._drive != "force" else "none")
+            ),
             "sheath_bodies": int(self._sheath_bodies),
             "sheath_bodies_resolved": int(support_count),
             "effective_support_tip_m": float(self._insert_s + supported_length_m),
             "free_wire_length_m": float(free_wire_length_m),
             "support_ratio": float(np.clip(support_ratio, 0.0, 1.0)),
             "max_slack_m": float(self._max_slack),
+            "coaxial_support": [
+                {
+                    "name": tube.name,
+                    "tube_type": tube.tube_type,
+                    "tip_arclen_m": tube.tip_arclen_mm / 1000.0,
+                    "is_active": tube.is_active,
+                }
+                for tube in self._support_system.active_tubes()
+            ],
         }
         risk = {
             "slack_m": None,
@@ -950,6 +1019,8 @@ class NewtonEngine:
                 "soft_tip",
                 "tip_bend",
                 "bend",
+                "guidewire_profile",
+                "coaxial_support_system",
                 "sheath_bodies",
                 "free_len",
                 "max_slack",

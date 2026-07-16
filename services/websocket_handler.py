@@ -736,7 +736,7 @@ class WebSocketHandler:
             return
 
         mapped = self._device_config_to_engine_params(config)
-        engine_params = {key: value for key, value in mapped.items() if key != "tip_shape"}
+        engine_params = dict(mapped)
         try:
             effective = await self._run_blocking(engine.set_engine_params, engine_params)
         except Exception as e:  # noqa: BLE001

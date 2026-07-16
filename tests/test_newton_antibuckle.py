@@ -17,6 +17,7 @@ numpy logic only.
 import numpy as np
 import pytest
 
+from services.devices import CoaxialSupportSystem, GuidewireProfile, TipShapeProfile, discretize_guidewire
 from services.physics.base import PlannedPath
 from services.physics.newton_engine import NewtonEngine, _feed_budget
 
@@ -36,6 +37,44 @@ def engine(monkeypatch) -> NewtonEngine:
     monkeypatch.delenv("CATHSIM_NEWTON_SHEATH_BODIES", raising=False)
     monkeypatch.delenv("CATHSIM_NEWTON_MAX_SLACK", raising=False)
     return NewtonEngine(path=_straight_path())
+
+
+class TestGuidewireDeviceModels:
+    """Pure segmented guidewire/support parameter models."""
+
+    def test_tip_shape_presets_change_curve_and_risk(self):
+        straight = TipShapeProfile.preset("straight")
+        hook = TipShapeProfile.preset("hook")
+
+        assert straight.precurve_angle_deg == 0.0
+        assert hook.precurve_angle_deg > straight.precurve_angle_deg
+        assert hook.wall_poking_risk_scale > straight.wall_poking_risk_scale
+
+    def test_profile_segments_from_distal_tip_to_proximal_root(self):
+        profile = GuidewireProfile.default(total_length_mm=200.0, tip_shape="j_tip")
+
+        assert profile.segments[0].name == "atraumatic_cap"
+        assert profile.segments[-1].name == "proximal_control"
+        assert profile.segment_at_ratio(0.03).name == "pre_shaped_soft_tip"
+        assert profile.segment_at_ratio(0.90).name == "proximal_control"
+
+    def test_discretize_guidewire_uses_segment_spacing(self):
+        profile = GuidewireProfile.default(total_length_mm=60.0, tip_shape="j_tip")
+        nodes = discretize_guidewire(profile)
+
+        assert nodes[0].material_segment == "atraumatic_cap"
+        assert nodes[-1].material_segment == "proximal_control"
+        assert len({node.material_segment for node in nodes}) == 6
+
+    def test_coaxial_support_effective_tip_is_most_distal_tube(self):
+        support = CoaxialSupportSystem.default(total_length_mm=200.0, free_wire_length_mm=30.0)
+
+        tube = support.effective_support_tube()
+        assert tube is not None
+        assert tube.tube_type == "microcatheter"
+        assert support.effective_support_tip() == pytest.approx(170.0)
+        assert support.free_wire_length_mm(200.0) == pytest.approx(30.0)
+        assert support.support_ratio(200.0) == pytest.approx(0.85)
 
 
 class TestFeedBudget:
@@ -113,6 +152,9 @@ class TestLiveTuning:
     def test_deform_params_exposes_antibuckle_params(self, engine):
         params = engine.deform_params
         assert params["tip_shape"] == "j_tip"
+        assert params["profile_name"] == "segmented_j_tip"
+        assert len(params["segments"]) == 6
+        assert params["segments"][0]["name"] == "atraumatic_cap"
         assert params["sheath_bodies"] == -1
         assert params["free_len"] == pytest.approx(0.03)
         assert params["max_slack"] == pytest.approx(0.012)
@@ -131,12 +173,16 @@ class TestLiveTuning:
         state = engine.mechanics_state()
 
         assert state["source"] == "newton_engine.mechanics_state"
+        assert state["guidewire"]["profile_name"] == "segmented_j_tip"
         assert state["guidewire"]["shape_type"] == "j_tip"
         assert state["guidewire"]["curve_angle_deg"] == pytest.approx(35.0)
+        assert state["guidewire"]["segment_count"] == 6
+        assert state["guidewire"]["body_segments"][-1] == "atraumatic_cap"
         assert state["support"]["support_state"] == "modeled"
-        assert state["support"]["effective_support_type"] == "proximal_sheath"
+        assert state["support"]["effective_support_type"] == "microcatheter"
         assert state["support"]["free_wire_length_m"] == pytest.approx(0.03, abs=0.003)
         assert state["support"]["support_ratio"] > 0.0
+        assert state["support"]["coaxial_support"][-1]["tube_type"] == "microcatheter"
         assert state["risk"]["buckling_risk"] == "unknown"
         assert state["risk"]["normal_poking_score"] is None
         assert state["risk"]["tangential_slide_score"] is None
@@ -199,21 +245,31 @@ class TestLiveTuning:
         assert effective["free_len"] == pytest.approx(0.05)
         assert effective["max_slack"] == pytest.approx(0.02)
         assert effective["tip_shape"] == "straight"
+        assert effective["profile_name"] == "segmented_straight"
         assert engine._sheath_count(20) == 5
+
+    def test_set_deform_params_accepts_semantic_tip_shape(self, engine):
+        effective = engine.set_deform_params(tip_shape="hook", jtip_deg=90.0, jtip_bodies=4)
+
+        assert effective["tip_shape"] == "hook"
+        assert effective["profile_name"] == "segmented_hook"
+        assert engine._guidewire_profile.tip_shape.shape_type == "hook"
 
 
 class TestSegmentedStiffness:
     """D4-R soft-tip / hard-shaft bend stiffness profile."""
 
-    def test_bend_profile_keeps_proximal_hard_and_distal_soft(self, engine):
+    def test_bend_profile_uses_segment_gradient_and_distal_soft_tip(self, engine):
         engine._bend = 20.0
         engine._tip_bend = 2.0
         engine._soft_tip = 4
 
         profile = engine._bend_profile(10)
 
-        assert profile[:6].tolist() == pytest.approx([20.0] * 6)
-        assert profile[6:].tolist() == pytest.approx([15.5, 11.0, 6.5, 2.0])
+        assert profile[0] > 20.0  # proximal_control is stiffer than main shaft
+        assert profile[3] == pytest.approx(20.0)  # main_support_shaft baseline
+        assert profile[5] < profile[3]  # torque/transition becomes more flexible
+        assert profile[-1] == pytest.approx(2.0)
 
     def test_bend_profile_short_rod_still_reaches_tip_bend(self, engine):
         engine._bend = 20.0

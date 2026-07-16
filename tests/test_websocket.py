@@ -166,6 +166,7 @@ class TestWebSocketHandlerUnit:
         engine.set_engine_params.assert_called_once_with({
             "jtip_deg": 45.0,
             "jtip_bodies": 4,
+            "tip_shape": "j_tip",
         })
         _, args, kwargs = send_mock.mock_calls[0]
         assert args[1] == MessageType.DEVICE_CONFIG
