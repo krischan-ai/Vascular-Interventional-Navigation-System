@@ -188,6 +188,8 @@ func _build_bottom(root: Control) -> void:
 	_conn["engine"] = connp.add_kv("引擎", "-")
 	_conn["mode"] = connp.add_kv("模式", "-")
 	_conn["slack"] = connp.add_kv("堆积", "-")
+	_conn["procedure"] = connp.add_kv("术式", "-")
+	_conn["access"] = connp.add_kv("入路", "-")
 	_conn["guidewire"] = connp.add_kv("导丝", "-")
 	_conn["support"] = connp.add_kv("支撑", "-")
 	_conn["buckling"] = connp.add_kv("屈曲", "-")
@@ -301,6 +303,10 @@ func set_connection(connected: bool) -> void:
 	_conn["engine"].text = "-"
 	_conn["mode"].text = "-"
 	_conn["slack"].text = "-"
+	if _conn.has("procedure"):
+		_conn["procedure"].text = "-"
+	if _conn.has("access"):
+		_conn["access"].text = "-"
 	if _conn.has("guidewire"):
 		_conn["guidewire"].text = "-"
 	if _conn.has("support"):
@@ -355,15 +361,27 @@ func set_backend(engine: String, mode: String, diagnostics: Dictionary) -> void:
 			_conn["slack"].text = "-"
 
 
-func set_device_state(guidewire: Dictionary, support: Dictionary, risk: Dictionary) -> void:
+func set_device_state(guidewire: Dictionary, support: Dictionary, risk: Dictionary, procedure: Dictionary = {}) -> void:
+	if _conn.has("procedure"):
+		_conn["procedure"].text = str(procedure.get("display_name_zh", "-"))
+	if _conn.has("access"):
+		var access_route := str(procedure.get("access_route_label", "-"))
+		var access_site := str(procedure.get("access_site_label", "-"))
+		var needle := str(procedure.get("needle_entry_label", ""))
+		_conn["access"].text = "%s / %s" % [access_route, access_site]
+		if needle != "":
+			_conn["access"].tooltip_text = needle
 	if _conn.has("guidewire"):
-		var tip_shape := str(guidewire.get("tip_shape_label", _cn_tip_shape(str(guidewire.get("tip_shape", "-")))))
-		var segment := str(guidewire.get("current_tip_segment_label", _cn_segment(str(guidewire.get("current_tip_segment", "-")))))
+		var summary := str(procedure.get("guidewire_summary", guidewire.get("summary_zh", "")))
 		var torsion: Variant = guidewire.get("torsion_lag_deg", null)
-		if typeof(torsion) == TYPE_FLOAT or typeof(torsion) == TYPE_INT:
-			_conn["guidewire"].text = "%s / %s 扭滞%.0f°" % [tip_shape, segment, float(torsion)]
+		if summary != "":
+			_conn["guidewire"].text = summary
 		else:
+			var tip_shape := str(guidewire.get("tip_shape_label", _cn_tip_shape(str(guidewire.get("tip_shape", "-")))))
+			var segment := str(guidewire.get("current_tip_segment_label", _cn_segment(str(guidewire.get("current_tip_segment", "-")))))
 			_conn["guidewire"].text = "%s / %s" % [tip_shape, segment]
+		if typeof(torsion) == TYPE_FLOAT or typeof(torsion) == TYPE_INT:
+			_conn["guidewire"].text += " 扭滞%.0f°" % float(torsion)
 	if _conn.has("support"):
 		var support_type := str(support.get("effective_support_type_label", _cn_support_type(str(support.get("effective_support_type", "-")))))
 		var free_len: Variant = support.get("free_wire_length_mm", null)

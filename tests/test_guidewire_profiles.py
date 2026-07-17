@@ -107,3 +107,67 @@ def test_microcatheter_advance_shortens_free_wire_length():
     assert before.effective_support_type() == "microcatheter"
     assert after.effective_support_tip() > before.effective_support_tip()
     assert after.free_wire_length_mm(150.0) < before.free_wire_length_mm(150.0)
+
+
+def test_default_guidewire_design_presets_keep_clinical_and_sim_lengths_separate():
+    from services.devices import (
+        default_guidewire_design,
+        exchange_014_jtip,
+        standard_035_straight_support,
+    )
+
+    standard = default_guidewire_design(active_sim_length_mm=60.0)
+    exchange = exchange_014_jtip(active_sim_length_mm=60.0)
+    support = standard_035_straight_support(active_sim_length_mm=60.0)
+
+    assert standard.name == "standard_014_jtip"
+    assert standard.clinical_total_length_mm == pytest.approx(1800.0)
+    assert standard.active_sim_length_mm == pytest.approx(60.0)
+    assert standard.profile.total_length_mm == pytest.approx(60.0)
+    assert standard.diameter_inch == pytest.approx(0.014)
+    assert standard.radius_mm == pytest.approx(0.1778)
+    assert standard.exchange_length is False
+    assert standard.profile.tip_shape.shape_type == "j_tip"
+    assert standard.summary_zh() == "0.014 J-tip 标准训练导丝 / 180 cm"
+
+    assert exchange.clinical_total_length_mm == pytest.approx(3000.0)
+    assert exchange.exchange_length is True
+    assert exchange.profile.tip_shape.shape_type == "j_tip"
+
+    assert support.diameter_inch == pytest.approx(0.035)
+    assert support.radius_mm == pytest.approx(0.4445)
+    assert support.profile.tip_shape.shape_type == "straight"
+
+
+def test_default_access_and_procedure_presets_expose_clinical_context():
+    from services.devices import (
+        default_procedure_design,
+        femoral_access,
+        radial_access,
+        radial_coronary_like_navigation,
+    )
+
+    femoral = femoral_access()
+    radial = radial_access()
+    procedure = default_procedure_design()
+    radial_procedure = radial_coronary_like_navigation()
+
+    assert femoral.vessel == "common_femoral_artery"
+    assert femoral.vessel_label_zh == "股总动脉"
+    assert femoral.entry_zone == "femoral_head_projection"
+    assert femoral.needle_entry_label_zh() == "股骨头投影区，腹股沟韧带以下、股动脉分叉以上"
+
+    assert radial.vessel == "radial_artery"
+    assert radial.needle_entry_offset_mm == pytest.approx(20.0)
+    assert radial.needle_entry_range_mm == pytest.approx((10.0, 30.0))
+
+    assert procedure.name == "femoral_aorta_branch_navigation"
+    assert procedure.guidewire_design_name == "standard_014_jtip"
+    assert procedure.support_stack == ("guiding_catheter", "microcatheter")
+    diag = procedure.diagnostics("0.014 J-tip 标准训练导丝 / 180 cm")
+    assert diag["access_site"] == "common_femoral_artery"
+    assert diag["access_route_label"] == "股动脉入路"
+    assert diag["support_stack_label"] == "导引导管 / 微导管"
+    assert diag["guidewire_summary"] == "0.014 J-tip 标准训练导丝 / 180 cm"
+
+    assert radial_procedure.access.name == "radial_access"

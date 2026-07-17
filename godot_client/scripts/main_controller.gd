@@ -1239,7 +1239,8 @@ func _on_batch(batch: Dictionary) -> void:
 	_hud.set_device_state(
 		guidewire_state,
 		support_state,
-		batch.get("risk", {}) as Dictionary
+		batch.get("risk", {}) as Dictionary,
+		batch.get("procedure", {}) as Dictionary
 	)
 	var status := str(safety.get("status", "STANDBY"))
 	_hud.update_safety(status)

@@ -18,7 +18,7 @@ from typing import Any, Callable, Literal
 from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field, ValidationError
 
-from services.devices import default_guidewire_profile, default_support_system
+from services.devices import default_guidewire_design, default_procedure_design, default_support_system
 from services.navigation_engine import NavigationEngine, NavigationState
 from services.path_planner import PathPlanner
 from services.session_manager import SessionManager
@@ -38,9 +38,14 @@ _TIP_SHAPE_LABELS = {
 }
 _GUIDEWIRE_SEGMENT_LABELS = {
     "atraumatic_tip": "无创头端",
+    "atraumatic_cap": "无创头端",
     "pre_shaped_soft_tip": "预塑形软头",
     "distal_soft": "远端软段",
     "transition": "过渡段",
+    "flexible_transition": "柔顺过渡段",
+    "torque_response": "扭矩响应段",
+    "main_support_shaft": "主支撑杆身",
+    "proximal_control": "近端控制段",
     "proximal_shaft": "近端杆身",
 }
 _SUPPORT_TYPE_LABELS = {
@@ -928,26 +933,47 @@ class WebSocketHandler:
     def _guidewire_state_from_diagnostics(self, diagnostics: dict[str, Any]) -> dict[str, Any]:
         diag = diagnostics if isinstance(diagnostics, dict) else {}
         guidewire = diag.get("guidewire")
+        design = default_guidewire_design(
+            active_sim_length_mm=float(diag.get("rod_length_m", 0.06)) * 1000.0
+        )
+        profile = design.profile
+        result = {
+            **design.diagnostics(),
+            "profile_name": profile.name,
+            "tip_shape": profile.tip_shape.shape_type,
+            "current_tip_segment": "pre_shaped_soft_tip",
+            "torsion_lag_deg": None,
+            "total_length_mm": profile.total_length_mm,
+            "segment_count": len(profile.segments),
+            "jtip_deg": profile.tip_shape.precurve_angle_deg,
+            "jtip_bodies": None,
+        }
         if isinstance(guidewire, dict) and guidewire:
-            result = dict(guidewire)
-        else:
-            profile = default_guidewire_profile(total_length_mm=float(diag.get("rod_length_m", 0.06)) * 1000.0)
-            result = {
-                "profile_name": profile.name,
-                "tip_shape": profile.tip_shape.shape_type,
-                "current_tip_segment": "pre_shaped_soft_tip",
-                "torsion_lag_deg": None,
-                "total_length_mm": profile.total_length_mm,
-                "segment_count": len(profile.segments),
-                "jtip_deg": profile.tip_shape.precurve_angle_deg,
-                "jtip_bodies": None,
-            }
+            result.update(guidewire)
         result["tip_shape_label"] = _cn_label(_TIP_SHAPE_LABELS, result.get("tip_shape"))
         result["current_tip_segment_label"] = _cn_label(
             _GUIDEWIRE_SEGMENT_LABELS,
             result.get("current_tip_segment"),
         )
         result["torsion_lag_deg_label"] = "扭转滞后"
+        return result
+
+
+    def _procedure_state_from_diagnostics(
+        self,
+        diagnostics: dict[str, Any],
+        guidewire: dict[str, Any],
+    ) -> dict[str, Any]:
+        diag = diagnostics if isinstance(diagnostics, dict) else {}
+        procedure = diag.get("procedure")
+        if isinstance(procedure, dict) and procedure:
+            result = dict(procedure)
+        else:
+            design = default_procedure_design()
+            summary = guidewire.get("summary_zh") if isinstance(guidewire, dict) else None
+            result = design.diagnostics(summary if isinstance(summary, str) else None)
+        if not result.get("guidewire_summary") and isinstance(guidewire, dict):
+            result["guidewire_summary"] = guidewire.get("summary_zh", "unknown")
         return result
 
     def _support_state_from_diagnostics(self, diagnostics: dict[str, Any]) -> dict[str, Any]:
@@ -1058,6 +1084,7 @@ class WebSocketHandler:
             diagnostics = backend.diagnostics()
         guidewire = self._guidewire_state_from_diagnostics(diagnostics)
         support = self._support_state_from_diagnostics(diagnostics)
+        procedure = self._procedure_state_from_diagnostics(diagnostics, guidewire)
         risk = self._segmented_risk_state(state, diagnostics)
         return {
             "schema_version": "navigation_visual_v2",
@@ -1067,6 +1094,7 @@ class WebSocketHandler:
             "diagnostics": diagnostics,
             "guidewire": guidewire,
             "support": support,
+            "procedure": procedure,
             "risk": risk,
             "tip": {
                 "position": state.tip_position,

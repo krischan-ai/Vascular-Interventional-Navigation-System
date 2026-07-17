@@ -17,9 +17,13 @@ import numpy as np
 
 from services.devices import (
     CoaxialSupportSystem,
+    GuidewireDesign,
     GuidewireProfile,
-    default_guidewire_profile,
+    ProcedureDesign,
+    default_guidewire_design,
+    default_procedure_design,
     default_support_system,
+    design_from_profile,
 )
 from services.physics.base import MAX_WALL_DISTANCE, PlannedPath, RawPose, quat_from_direction
 
@@ -179,6 +183,8 @@ class NewtonEngine:
         entry_point: Sequence[float] | None = None,
         entry_direction: Sequence[float] | None = None,
         guidewire_profile: GuidewireProfile | None = None,
+        guidewire_design: GuidewireDesign | None = None,
+        procedure_design: ProcedureDesign | None = None,
         support_system: CoaxialSupportSystem | None = None,
         **_unused,
     ) -> None:
@@ -196,9 +202,19 @@ class NewtonEngine:
         self._sim_dt = self._control_dt / self._substeps
         self._rod_length = float(os.environ.get("CATHSIM_NEWTON_ROD_LENGTH", "0.06"))
         self._rod_seg_len = float(os.environ.get("CATHSIM_NEWTON_SEG_LEN", "0.003"))
-        self.guidewire_profile = guidewire_profile or default_guidewire_profile(
-            total_length_mm=self._rod_length * 1000.0
-        )
+        active_sim_length_mm = self._rod_length * 1000.0
+        if guidewire_design is not None:
+            self.guidewire_design = guidewire_design
+            self.guidewire_profile = guidewire_design.profile
+        elif guidewire_profile is not None:
+            self.guidewire_profile = guidewire_profile
+            self.guidewire_design = design_from_profile(guidewire_profile)
+        else:
+            self.guidewire_design = default_guidewire_design(
+                active_sim_length_mm=active_sim_length_mm
+            )
+            self.guidewire_profile = self.guidewire_design.profile
+        self.procedure_design = procedure_design or default_procedure_design()
         self._rod_radius = float(os.environ.get(
             "CATHSIM_NEWTON_ROD_RADIUS",
             str(self._default_radius_m()),
@@ -709,6 +725,7 @@ class NewtonEngine:
             "contact_ke": self._contact_ke,
             "guidewire": self._guidewire_diagnostics(),
             "support": self._support_diagnostics(self._rod_length * 1000.0),
+            "procedure": self._procedure_diagnostics(),
         }
         if body_count > 0:
             out["sheath_bodies_resolved"] = self._sheath_count(body_count)
@@ -739,6 +756,7 @@ class NewtonEngine:
             "wall_slide_state": wall_metrics["wall_slide_state"],
             "guidewire": self._guidewire_diagnostics(tip_arclen * 1000.0, torsion_lag_deg),
             "support": self._support_diagnostics(tip_arclen * 1000.0),
+            "procedure": self._procedure_diagnostics(),
         })
         return out
 
@@ -753,6 +771,7 @@ class NewtonEngine:
             else self.guidewire_profile.distal_segments[1]
         )
         return {
+            **self.guidewire_design.diagnostics(),
             "profile_name": self.guidewire_profile.name,
             "tip_shape": self.guidewire_profile.tip_shape.shape_type,
             "current_tip_segment": segment.name,
@@ -770,6 +789,9 @@ class NewtonEngine:
             "support_ratio": self.support_system.support_ratio(guidewire_tip_arclen_mm),
             "free_wire_length_mm": self.support_system.free_wire_length_mm(guidewire_tip_arclen_mm),
         }
+
+    def _procedure_diagnostics(self) -> dict:
+        return self.procedure_design.diagnostics(self.guidewire_design.summary_zh())
 
     def _tip_wall_metrics(self, xyz: np.ndarray, tip_arclen: float) -> dict:
         """Tip wall-interaction quality from current rod geometry."""
@@ -934,6 +956,7 @@ class NewtonEngine:
             "arclen_mm": distal_arclen_mm,
             "material_segment": segment.name,
             "support_state": "inside_support_tube" if supported else "distal_free_span",
+            "guidewire_design_name": self.guidewire_design.name,
         }
 
     def render_bodies(self) -> list[dict[str, object]]:

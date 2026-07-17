@@ -104,6 +104,16 @@ class TestWebSocketHandlerUnit:
                     "max_breach_m": -0.001,
                     "guidewire": {"profile_name": "soft_j_tip_training_wire", "tip_shape": "j_tip"},
                     "support": {"effective_support_type": "microcatheter", "free_wire_length_mm": 30.0},
+                    "procedure": {
+                        "name": "femoral_aorta_branch_navigation",
+                        "display_name_zh": "股动脉入路主动脉分支导航",
+                        "procedure_type": "aorta_branch_navigation",
+                        "access_site": "common_femoral_artery",
+                        "access_site_label": "股总动脉",
+                        "access_route_label": "股动脉入路",
+                        "needle_entry_label": "股骨头投影区，腹股沟韧带以下、股动脉分叉以上",
+                        "guidewire_summary": "0.014 J-tip 标准训练导丝 / 180 cm",
+                    },
                     "normal_poking_score": 0.2,
                     "tangential_slide_score": 0.6,
                     "wall_slide_state": "WALL_SLIDE_OK",
@@ -162,6 +172,11 @@ class TestWebSocketHandlerUnit:
         assert batch["guidewire"]["torsion_lag_deg_label"] == "\u626d\u8f6c\u6ede\u540e"
         assert batch["support"]["effective_support_type"] == "microcatheter"
         assert batch["support"]["effective_support_type_label"] == "\u5fae\u5bfc\u7ba1"
+        assert batch["guidewire"]["design_name"] == "standard_014_jtip"
+        assert batch["guidewire"]["clinical_total_length_mm"] == pytest.approx(1800.0)
+        assert batch["procedure"]["name"] == "femoral_aorta_branch_navigation"
+        assert batch["procedure"]["access_site_label"] == "股总动脉"
+        assert batch["procedure"]["guidewire_summary"] == "0.014 J-tip 标准训练导丝 / 180 cm"
         assert batch["risk"]["slack_mm"] == pytest.approx(2.0)
         assert batch["risk"]["pile_ratio"] == pytest.approx(0.002 / 0.012)
         assert batch["risk"]["breach_mm"] == pytest.approx(0.0)
@@ -929,3 +944,32 @@ class TestWebSocketVPPNavigation:
                 })
                 last_progress = _recv_pong(websocket)["data"]["path"]["progress"]
             assert last_progress > start_progress
+
+
+
+
+
+
+def test_state_batch_default_procedure_context_is_stable():
+    from services.navigation_engine import NavigationState
+    from services.session_manager import SessionManager
+    from services.websocket_handler import WebSocketHandler
+
+    class DummyEngine:
+        _engine = None
+        planned_path = []
+        entry_pose = {}
+
+        def get_render_bodies(self):
+            return []
+
+    batch = WebSocketHandler(SessionManager())._state_to_batch(
+        NavigationState(safety_status="SAFE_NAV"),
+        DummyEngine(),
+    )
+
+    assert batch["procedure"]["name"] == "femoral_aorta_branch_navigation"
+    assert batch["procedure"]["access_route_label"] == "股动脉入路"
+    assert batch["procedure"]["access_site_label"] == "股总动脉"
+    assert batch["procedure"]["needle_entry_label"] == "股骨头投影区，腹股沟韧带以下、股动脉分叉以上"
+    assert batch["procedure"]["guidewire_summary"] == "0.014 J-tip 标准训练导丝 / 180 cm"
