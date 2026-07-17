@@ -110,5 +110,13 @@ def test_hud_uses_backend_dashboard_fields():
     assert "set_visual_state(\"stale\", 0.0, true)" in path
     assert "safety_color_stale" in path
     assert "tip_radius_overview: float = 0.0011" in guidewire
+    assert "vertex_color_use_as_albedo" in guidewire
+    assert "SHADING_MODE_UNSHADED" in guidewire
+    assert "func _body_color" in guidewire
+    assert "func _segment_color" in guidewire
+    assert 'body.get("material_segment"' in guidewire
+    assert 'body.get("support_state"' in guidewire
+    assert '"inside_support_tube"' in guidewire
+    assert '.lerp(Color(0.05, 0.95, 1.0), 0.38)' in guidewire
     assert "func set_landmarks_visible" in entry
     assert "_landmarks_visible: bool = false" in entry

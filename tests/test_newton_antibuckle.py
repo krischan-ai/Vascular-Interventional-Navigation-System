@@ -182,6 +182,18 @@ class TestDeviceDiagnostics:
         assert engine._jtip_deg == pytest.approx(engine.guidewire_profile.tip_shape.precurve_angle_deg)
         assert engine._jtip_bodies >= 1
 
+    def test_body_metadata_marks_segments_and_support_state(self, engine):
+        engine._alpha = np.asarray([1.0, 1.0, 0.0, 0.0])
+
+        root = engine._body_segment_metadata(0, 4)
+        tip = engine._body_segment_metadata(3, 4)
+
+        assert root["material_segment"] == "proximal_control"
+        assert root["support_state"] == "inside_support_tube"
+        assert tip["material_segment"] == "atraumatic_cap"
+        assert tip["support_state"] == "distal_free_span"
+
+
 class TestGuidewireRiskMetrics:
     """Geometry-derived guidewire risk metrics without importing Newton."""
 

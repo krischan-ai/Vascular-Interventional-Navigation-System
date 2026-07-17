@@ -917,15 +917,39 @@ class NewtonEngine:
             arclen=tip_arclen,
         )
 
-    def render_bodies(self) -> list[dict[str, list[float]]]:
+    def _body_segment_metadata(self, index: int, count: int) -> dict[str, str | float]:
+        """Material/support labels for a rendered body, root -> tip order."""
+        if count <= 1:
+            distal_arclen_mm = 0.0
+        else:
+            frac_from_root = float(index) / float(count - 1)
+            distal_arclen_mm = (1.0 - frac_from_root) * self.guidewire_profile.total_length_mm
+        segment = self.guidewire_profile.segment_at(distal_arclen_mm)
+        supported = (
+            self._alpha is not None
+            and index < len(self._alpha)
+            and float(self._alpha[index]) >= 0.5
+        )
+        return {
+            "arclen_mm": distal_arclen_mm,
+            "material_segment": segment.name,
+            "support_state": "inside_support_tube" if supported else "distal_free_span",
+        }
+
+    def render_bodies(self) -> list[dict[str, object]]:
         if not self._initialized:
             return []
         q = self._s0.body_q.numpy()
-        bodies = []
-        for body in self._rod_bodies:
+        bodies: list[dict[str, object]] = []
+        count = len(self._rod_bodies)
+        for index, body in enumerate(self._rod_bodies):
             pos = [float(v) for v in q[body, :3]]
             quat = [float(v) for v in q[body, 3:7]]
-            bodies.append({"pos": pos, "quat": quat})
+            bodies.append({
+                "pos": pos,
+                "quat": quat,
+                **self._body_segment_metadata(index, count),
+            })
         return bodies
 
     def close(self) -> None:

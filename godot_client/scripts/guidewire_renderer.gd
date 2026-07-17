@@ -88,16 +88,16 @@ func _ready() -> void:
 	# A lit, slightly metallic material so the tube's curvature is visible
 	# through shading (a smooth bending wire, not a flat scribble).
 	_wire_material = StandardMaterial3D.new()
-	_wire_material.albedo_color = wire_color
-	_wire_material.metallic = 0.6
-	_wire_material.roughness = 0.35
+	_wire_material.albedo_color = Color.WHITE
+	_wire_material.metallic = 0.0
+	_wire_material.roughness = 0.18
 	_wire_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_wire_material.vertex_color_use_as_albedo = true
+	_wire_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	# Faint self-emission so the wire stays a crisp bright line against the cyan
 	# fresnel-glow vessel and dark background (设计图: 亮白导丝), instead of dimming
 	# into the wall when scene lighting is low.
-	_wire_material.emission_enabled = true
-	_wire_material.emission = wire_color
-	_wire_material.emission_energy_multiplier = 0.22
+	_wire_material.emission_enabled = false
 	_wire.material_override = _wire_material
 	_wire.layers = GUIDEWIRE_RENDER_LAYER
 	add_child(_wire)
@@ -114,13 +114,16 @@ func update_from_batch(batch: Dictionary) -> void:
 
 	var bodies: Array = batch.get("bodies", [])
 	var points := PackedVector3Array()
+	var colors: Array = []
 	for body in bodies:
-		if typeof(body) == TYPE_DICTIONARY and body.has("pos"):
-			points.append(_to_vec3(body["pos"]))
+		if typeof(body) == TYPE_DICTIONARY:
+			var body_dict: Dictionary = body as Dictionary
+			if body_dict.has("pos"):
+				points.append(_to_vec3(body_dict["pos"]))
+				colors.append(_body_color(body_dict))
 	if points.size() > 0:
 		_root.position = points[0]
-	_build_tube(points, wire_radius)
-
+	_build_tube(points, wire_radius, colors)
 
 func update_from_state(state: Dictionary) -> void:
 	if state.has("tip_position"):
@@ -151,7 +154,7 @@ func set_close_up(close: bool) -> void:
 		root_sphere.height = tip_radius * 1.6
 
 
-func _build_tube(points: PackedVector3Array, radius: float) -> void:
+func _build_tube(points: PackedVector3Array, radius: float, colors: Array = []) -> void:
 	_wire_mesh.clear_surfaces()
 	var count := points.size()
 	if count < 2:
@@ -190,18 +193,47 @@ func _build_tube(points: PackedVector3Array, radius: float) -> void:
 		var r1: PackedVector3Array = rings[i + 1]
 		var n0: PackedVector3Array = ring_normals[i]
 		var n1: PackedVector3Array = ring_normals[i + 1]
+		var c0 := _color_at(colors, i)
+		var c1 := _color_at(colors, i + 1)
 		for k in sides:
 			var k2 := (k + 1) % sides
 			# Two triangles per quad (a=r0[k], b=r0[k2], c=r1[k], d=r1[k2]).
-			_emit(r0[k], n0[k]);  _emit(r1[k], n1[k]);  _emit(r0[k2], n0[k2])
-			_emit(r0[k2], n0[k2]); _emit(r1[k], n1[k]); _emit(r1[k2], n1[k2])
+			_emit(r0[k], n0[k], c0);  _emit(r1[k], n1[k], c1);  _emit(r0[k2], n0[k2], c0)
+			_emit(r0[k2], n0[k2], c0); _emit(r1[k], n1[k], c1); _emit(r1[k2], n1[k2], c1)
 	_wire_mesh.surface_end()
 
-
-func _emit(v: Vector3, n: Vector3) -> void:
+func _emit(v: Vector3, n: Vector3, color: Color) -> void:
 	_wire_mesh.surface_set_normal(n)
+	_wire_mesh.surface_set_color(color)
 	_wire_mesh.surface_add_vertex(v)
 
+
+func _body_color(body: Dictionary) -> Color:
+	var material_segment := str(body.get("material_segment", ""))
+	var color := _segment_color(material_segment)
+	var support_state := str(body.get("support_state", ""))
+	if support_state == "inside_support_tube":
+		return color.lerp(Color(0.05, 0.95, 1.0), 0.38)
+	return color
+
+
+func _segment_color(material_segment: String) -> Color:
+	match material_segment:
+		"atraumatic_cap": return Color(1.0, 0.18, 0.10)
+		"pre_shaped_soft_tip": return Color(1.0, 0.85, 0.05)
+		"flexible_transition": return Color(0.15, 1.0, 0.45)
+		"torque_response": return Color(0.15, 0.55, 1.0)
+		"main_support_shaft": return Color(0.92, 0.96, 1.0)
+		"proximal_control": return Color(0.70, 0.35, 1.0)
+		_: return wire_color
+
+
+func _color_at(colors: Array, index: int) -> Color:
+	if index >= 0 and index < colors.size():
+		var color_value: Variant = colors[index]
+		if typeof(color_value) == TYPE_COLOR:
+			return color_value
+	return wire_color
 
 func _tangent_at(points: PackedVector3Array, i: int) -> Vector3:
 	var a: Vector3
