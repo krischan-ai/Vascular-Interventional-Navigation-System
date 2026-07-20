@@ -40,11 +40,11 @@ def test_hud_uses_backend_dashboard_fields():
     assert "func _free_look" not in main
     assert "_smooth_wall_mm" in hud
     assert "func set_device_state" in hud
-    assert '_conn["procedure"]' in hud
-    assert '_conn["access"]' in hud
     assert '_conn["guidewire"]' in hud
     assert '_conn["support"]' in hud
     assert '_conn["buckling"]' in hud
+    assert '_conn["procedure"]' not in hud
+    assert '_conn["access"]' not in hud
     assert '_conn["wall_slide"]' in hud
     assert 'connp.add_kv("\u5bfc\u4e1d"' in hud
     assert 'connp.add_kv("\u652f\u6491"' in hud
@@ -52,8 +52,23 @@ def test_hud_uses_backend_dashboard_fields():
     assert 'connp.add_kv("\u8d34\u58c1"' in hud
     assert 'func _cn_tip_shape' in hud
     assert 'func _cn_wall_slide' in hud
-    assert 'procedure.get("guidewire_summary"' in hud
-    assert 'procedure.get("needle_entry_label"' in hud
+    assert '_tool("调试", func(): _show_device_debug())' in hud
+    assert 'func _show_device_debug' in hud
+    assert 'AcceptDialog.new()' in hud
+    assert '器械与术式调试数据' in hud
+    assert '_debug_line(lines, "guidewire_summary"' in hud
+    assert '_debug_line(lines, "needle_entry_label"' in hud
+    assert '_debug_line(lines, "intravascular_length_mm"' in hud
+    assert '_debug_line(lines, "external_tail_length_mm"' in hud
+    assert '_debug_line(lines, "render_scope"' in hud
+    assert 'func _debug_line(lines: Array[String], key: String, value: Variant, label: String = "")' in hud
+    assert '"%s (%s)" % [label, key]' in hud
+    assert '"临床总长"' in hud
+    assert '"血管内渲染长度"' in hud
+    assert '"体外剩余长度"' in hud
+    assert '"3D渲染范围"' in hud
+    assert '"进针位置"' in hud
+    assert '"当前支撑器械"' in hud
     assert "TODO backend" not in hud
     assert '"23.6"' not in hud
     assert '"02:35"' not in hud
@@ -115,6 +130,10 @@ def test_hud_uses_backend_dashboard_fields():
     assert "set_visual_state(\"stale\", 0.0, true)" in path
     assert "safety_color_stale" in path
     assert "tip_radius_overview: float = 0.0011" in guidewire
+    assert "proximal_tail_spacing" not in guidewire
+    assert "func _extend_points_to_clinical_length" not in guidewire
+    assert "clinical_total_length_mm" not in guidewire
+    assert "func _trim_points_to_clinical_length" not in guidewire
     assert "vertex_color_use_as_albedo" in guidewire
     assert "SHADING_MODE_UNSHADED" in guidewire
     assert "func _body_color" in guidewire

@@ -2,6 +2,7 @@
 logs/
 scratch/
 data/
+.tmp/
 .claude/settings.local.json
 .sync*
 .deploy_backend.local.json

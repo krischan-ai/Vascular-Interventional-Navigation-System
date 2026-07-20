@@ -125,7 +125,10 @@ class TestWebSocketHandlerUnit:
             entry_pose = {"position": [0.0, 0.0, 0.0], "direction": [0.0, 0.0, 1.0]}
 
             def get_render_bodies(self):
-                return []
+                return [
+                    {"pos": [0.0, 0.0, 0.0], "quat": [0.0, 0.0, 0.0, 1.0]},
+                    {"pos": [0.0, 0.0, 0.1], "quat": [0.0, 0.0, 0.0, 1.0]},
+                ]
 
         state = NavigationState(
             path_progress=0.25,
@@ -174,6 +177,9 @@ class TestWebSocketHandlerUnit:
         assert batch["support"]["effective_support_type_label"] == "\u5fae\u5bfc\u7ba1"
         assert batch["guidewire"]["design_name"] == "standard_014_jtip"
         assert batch["guidewire"]["clinical_total_length_mm"] == pytest.approx(1800.0)
+        assert batch["guidewire"]["intravascular_length_mm"] == pytest.approx(100.0)
+        assert batch["guidewire"]["external_tail_length_mm"] == pytest.approx(1700.0)
+        assert batch["guidewire"]["render_scope"] == "intravascular_only"
         assert batch["procedure"]["name"] == "femoral_aorta_branch_navigation"
         assert batch["procedure"]["access_site_label"] == "股总动脉"
         assert batch["procedure"]["guidewire_summary"] == "0.014 J-tip 标准训练导丝 / 180 cm"
@@ -973,3 +979,6 @@ def test_state_batch_default_procedure_context_is_stable():
     assert batch["procedure"]["access_site_label"] == "股总动脉"
     assert batch["procedure"]["needle_entry_label"] == "股骨头投影区，腹股沟韧带以下、股动脉分叉以上"
     assert batch["procedure"]["guidewire_summary"] == "0.014 J-tip 标准训练导丝 / 180 cm"
+    assert batch["guidewire"]["intravascular_length_mm"] == pytest.approx(0.0)
+    assert batch["guidewire"]["external_tail_length_mm"] == pytest.approx(1800.0)
+    assert batch["guidewire"]["render_scope"] == "intravascular_only"

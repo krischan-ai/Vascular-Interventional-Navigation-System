@@ -976,6 +976,44 @@ class WebSocketHandler:
             result["guidewire_summary"] = guidewire.get("summary_zh", "unknown")
         return result
 
+    def _guidewire_state_with_render_lengths(
+        self,
+        guidewire: dict[str, Any],
+        bodies: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        result = dict(guidewire)
+        intravascular_length_mm = self._body_polyline_length_mm(bodies)
+        clinical_total = result.get("clinical_total_length_mm")
+        external_tail_length_mm = None
+        if isinstance(clinical_total, (int, float)):
+            external_tail_length_mm = max(0.0, float(clinical_total) - intravascular_length_mm)
+        result.update({
+            "intravascular_length_mm": intravascular_length_mm,
+            "external_tail_length_mm": external_tail_length_mm,
+            "render_scope": "intravascular_only",
+        })
+        return result
+
+    @staticmethod
+    def _body_polyline_length_mm(bodies: list[dict[str, Any]]) -> float:
+        points: list[list[float]] = []
+        for body in bodies:
+            if not isinstance(body, dict):
+                continue
+            pos = body.get("pos")
+            if isinstance(pos, list) and len(pos) >= 3:
+                try:
+                    points.append([float(pos[0]), float(pos[1]), float(pos[2])])
+                except (TypeError, ValueError):
+                    continue
+        total_m = 0.0
+        for prev, cur in zip(points, points[1:]):
+            dx = cur[0] - prev[0]
+            dy = cur[1] - prev[1]
+            dz = cur[2] - prev[2]
+            total_m += (dx * dx + dy * dy + dz * dz) ** 0.5
+        return total_m * 1000.0
+
     def _support_state_from_diagnostics(self, diagnostics: dict[str, Any]) -> dict[str, Any]:
         diag = diagnostics if isinstance(diagnostics, dict) else {}
         support = diag.get("support")
@@ -1083,6 +1121,8 @@ class WebSocketHandler:
         if backend is not None and hasattr(backend, "diagnostics"):
             diagnostics = backend.diagnostics()
         guidewire = self._guidewire_state_from_diagnostics(diagnostics)
+        bodies = engine.get_render_bodies()
+        guidewire = self._guidewire_state_with_render_lengths(guidewire, bodies)
         support = self._support_state_from_diagnostics(diagnostics)
         procedure = self._procedure_state_from_diagnostics(diagnostics, guidewire)
         risk = self._segmented_risk_state(state, diagnostics)
@@ -1101,7 +1141,7 @@ class WebSocketHandler:
                 "direction": state.tip_direction,
                 "quaternion": state.tip_quaternion,
             },
-            "bodies": engine.get_render_bodies(),
+            "bodies": bodies,
             "path": {
                 "waypoints": engine.planned_path if include_path else [],
                 "progress": state.path_progress,

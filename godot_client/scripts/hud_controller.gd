@@ -40,6 +40,9 @@ var _nav_state: Label
 var _push_btn: Button
 var _rotate_btn: Button
 var _stop_btn: Button
+var _device_debug_dialog: AcceptDialog
+var _device_debug_text: RichTextLabel
+var _device_debug_data := {}
 var _uptime_ms := 0
 var _last_alarm := ""
 var _estopped := false
@@ -188,8 +191,6 @@ func _build_bottom(root: Control) -> void:
 	_conn["engine"] = connp.add_kv("引擎", "-")
 	_conn["mode"] = connp.add_kv("模式", "-")
 	_conn["slack"] = connp.add_kv("堆积", "-")
-	_conn["procedure"] = connp.add_kv("术式", "-")
-	_conn["access"] = connp.add_kv("入路", "-")
 	_conn["guidewire"] = connp.add_kv("导丝", "-")
 	_conn["support"] = connp.add_kv("支撑", "-")
 	_conn["buckling"] = connp.add_kv("屈曲", "-")
@@ -240,6 +241,7 @@ func _build_bottom(root: Control) -> void:
 	srow.add_child(_tool("分支", func(): branch_cycle_requested.emit()))
 	srow.add_child(_tool("重置", func(): reset_requested.emit()))
 	srow.add_child(_tool("形变", func(): deform_toggle.emit()))
+	srow.add_child(_tool("调试", func(): _show_device_debug()))
 	motionp.content.add_child(srow)
 	_nav_state = UiStyle.label("导航 手动 · Input p+0.0 r+0.0", UiStyle.TEXT2, 12)
 	motionp.content.add_child(_nav_state)
@@ -303,10 +305,6 @@ func set_connection(connected: bool) -> void:
 	_conn["engine"].text = "-"
 	_conn["mode"].text = "-"
 	_conn["slack"].text = "-"
-	if _conn.has("procedure"):
-		_conn["procedure"].text = "-"
-	if _conn.has("access"):
-		_conn["access"].text = "-"
 	if _conn.has("guidewire"):
 		_conn["guidewire"].text = "-"
 	if _conn.has("support"):
@@ -362,26 +360,21 @@ func set_backend(engine: String, mode: String, diagnostics: Dictionary) -> void:
 
 
 func set_device_state(guidewire: Dictionary, support: Dictionary, risk: Dictionary, procedure: Dictionary = {}) -> void:
-	if _conn.has("procedure"):
-		_conn["procedure"].text = str(procedure.get("display_name_zh", "-"))
-	if _conn.has("access"):
-		var access_route := str(procedure.get("access_route_label", "-"))
-		var access_site := str(procedure.get("access_site_label", "-"))
-		var needle := str(procedure.get("needle_entry_label", ""))
-		_conn["access"].text = "%s / %s" % [access_route, access_site]
-		if needle != "":
-			_conn["access"].tooltip_text = needle
+	_device_debug_data = {
+		"guidewire": guidewire.duplicate(true),
+		"procedure": procedure.duplicate(true),
+		"support": support.duplicate(true),
+		"risk": risk.duplicate(true),
+	}
+	_refresh_device_debug()
 	if _conn.has("guidewire"):
-		var summary := str(procedure.get("guidewire_summary", guidewire.get("summary_zh", "")))
+		var tip_shape := str(guidewire.get("tip_shape_label", _cn_tip_shape(str(guidewire.get("tip_shape", "-")))))
+		var segment := str(guidewire.get("current_tip_segment_label", _cn_segment(str(guidewire.get("current_tip_segment", "-")))))
 		var torsion: Variant = guidewire.get("torsion_lag_deg", null)
-		if summary != "":
-			_conn["guidewire"].text = summary
-		else:
-			var tip_shape := str(guidewire.get("tip_shape_label", _cn_tip_shape(str(guidewire.get("tip_shape", "-")))))
-			var segment := str(guidewire.get("current_tip_segment_label", _cn_segment(str(guidewire.get("current_tip_segment", "-")))))
-			_conn["guidewire"].text = "%s / %s" % [tip_shape, segment]
 		if typeof(torsion) == TYPE_FLOAT or typeof(torsion) == TYPE_INT:
-			_conn["guidewire"].text += " 扭滞%.0f°" % float(torsion)
+			_conn["guidewire"].text = "%s / %s 扭滞%.0f°" % [tip_shape, segment, float(torsion)]
+		else:
+			_conn["guidewire"].text = "%s / %s" % [tip_shape, segment]
 	if _conn.has("support"):
 		var support_type := str(support.get("effective_support_type_label", _cn_support_type(str(support.get("effective_support_type", "-")))))
 		var free_len: Variant = support.get("free_wire_length_mm", null)
@@ -404,6 +397,92 @@ func set_device_state(guidewire: Dictionary, support: Dictionary, risk: Dictiona
 			_conn["wall_slide"].text = "%s 顶%.0f%% 滑%.0f%%" % [wall_state, float(normal_score) * 100.0, float(slide_score) * 100.0]
 		else:
 			_conn["wall_slide"].text = wall_state
+
+func _show_device_debug() -> void:
+	_ensure_device_debug_dialog()
+	_refresh_device_debug()
+	_device_debug_dialog.popup_centered(Vector2i(620, 520))
+
+
+func _ensure_device_debug_dialog() -> void:
+	if _device_debug_dialog != null:
+		return
+	_device_debug_dialog = AcceptDialog.new()
+	_device_debug_dialog.title = "器械与术式调试数据"
+	_device_debug_dialog.exclusive = false
+	add_child(_device_debug_dialog)
+
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(580, 420)
+	_device_debug_dialog.add_child(scroll)
+
+	_device_debug_text = RichTextLabel.new()
+	_device_debug_text.fit_content = true
+	_device_debug_text.scroll_active = false
+	_device_debug_text.selection_enabled = true
+	_device_debug_text.custom_minimum_size = Vector2(560, 400)
+	scroll.add_child(_device_debug_text)
+
+
+func _refresh_device_debug() -> void:
+	if _device_debug_text == null:
+		return
+	var guidewire: Dictionary = _device_debug_data.get("guidewire", {}) as Dictionary
+	var procedure: Dictionary = _device_debug_data.get("procedure", {}) as Dictionary
+	var support: Dictionary = _device_debug_data.get("support", {}) as Dictionary
+	var risk: Dictionary = _device_debug_data.get("risk", {}) as Dictionary
+	var lines: Array[String] = []
+	lines.append("[Procedure]")
+	_debug_line(lines, "name", procedure.get("name", "unknown"), "术式 preset")
+	_debug_line(lines, "display_name_zh", procedure.get("display_name_zh", "未知"), "术式名称")
+	_debug_line(lines, "procedure_type", procedure.get("procedure_type", "unknown"), "术式类型")
+	_debug_line(lines, "access_site", procedure.get("access_site", "unknown"), "入路血管")
+	_debug_line(lines, "access_site_label", procedure.get("access_site_label", "未知"), "入路血管中文")
+	_debug_line(lines, "access_route_label", procedure.get("access_route_label", "未知"), "入路方式")
+	_debug_line(lines, "needle_entry_label", procedure.get("needle_entry_label", "未知"), "进针位置")
+	_debug_line(lines, "guidewire_summary", procedure.get("guidewire_summary", "未知"), "导丝摘要")
+	_debug_line(lines, "support_stack", procedure.get("support_stack", []), "支撑器械组合")
+	_debug_line(lines, "support_stack_label", procedure.get("support_stack_label", "未知"), "支撑器械中文")
+	lines.append("")
+	lines.append("[GuidewireDesign]")
+	_debug_line(lines, "design_name", guidewire.get("design_name", "unknown"), "导丝 preset")
+	_debug_line(lines, "display_name_zh", guidewire.get("display_name_zh", "未知"), "导丝中文名")
+	_debug_line(lines, "summary_zh", guidewire.get("summary_zh", "未知"), "器械摘要")
+	_debug_line(lines, "diameter_inch", guidewire.get("diameter_inch", null), "导丝直径")
+	_debug_line(lines, "clinical_total_length_mm", guidewire.get("clinical_total_length_mm", null), "临床总长")
+	_debug_line(lines, "intravascular_length_mm", guidewire.get("intravascular_length_mm", null), "血管内渲染长度")
+	_debug_line(lines, "external_tail_length_mm", guidewire.get("external_tail_length_mm", null), "体外剩余长度")
+	_debug_line(lines, "active_sim_length_mm", guidewire.get("active_sim_length_mm", null), "物理求解长度")
+	_debug_line(lines, "render_scope", guidewire.get("render_scope", "unknown"), "3D渲染范围")
+	_debug_line(lines, "exchange_length", guidewire.get("exchange_length", null), "是否交换导丝")
+	_debug_line(lines, "intended_use", guidewire.get("intended_use", []), "适用场景")
+	_debug_line(lines, "compatible_support", guidewire.get("compatible_support", []), "兼容支撑")
+	lines.append("")
+	lines.append("[Runtime Device]")
+	_debug_line(lines, "tip_shape", guidewire.get("tip_shape", "unknown"), "头端形状")
+	_debug_line(lines, "current_tip_segment", guidewire.get("current_tip_segment", "unknown"), "当前导丝分段")
+	_debug_line(lines, "torsion_lag_deg", guidewire.get("torsion_lag_deg", null), "扭转滞后")
+	_debug_line(lines, "effective_support_type", support.get("effective_support_type", "unknown"), "当前支撑器械")
+	_debug_line(lines, "free_wire_length_mm", support.get("free_wire_length_mm", null), "游离导丝长度")
+	_debug_line(lines, "buckling_risk", risk.get("buckling_risk", "unknown"), "屈曲风险")
+	_debug_line(lines, "wall_slide_state", risk.get("wall_slide_state", "unknown"), "贴壁状态")
+	_device_debug_text.text = "\n".join(lines)
+
+
+func _debug_line(lines: Array[String], key: String, value: Variant, label: String = "") -> void:
+	var name := key if label == "" else "%s (%s)" % [label, key]
+	lines.append("%s: %s" % [name, _format_debug_value(value)])
+
+
+func _format_debug_value(value: Variant) -> String:
+	if value == null:
+		return "null"
+	if value is Array:
+		var parts: Array[String] = []
+		for item in value:
+			parts.append(str(item))
+		return ", ".join(parts)
+	return str(value)
 
 
 func _cn_tip_shape(value: String) -> String:
