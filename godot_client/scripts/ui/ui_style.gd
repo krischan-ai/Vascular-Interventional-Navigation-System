@@ -34,13 +34,15 @@ const MARGIN := 12
 const GAP := 12
 
 # ── Layout regions (1920x1080 logical canvas, doc/11 §2) ─────────────────────
-# Top 100px, middle 742px, bottom 190px; DSA 59% | right 41%.
-# Right column: 3D 420px (56.6%, spec 53-58%) over 导航与安全数据 310px.
-static func top_rect() -> Rect2: return Rect2(12, 12, 1896, 100)
-static func dsa_rect() -> Rect2: return Rect2(12, 124, 1112, 742)
-static func pane3d_rect() -> Rect2: return Rect2(1136, 124, 772, 420)
-static func data_rect() -> Rect2: return Rect2(1136, 556, 772, 310)
-static func bottom_rect() -> Rect2: return Rect2(12, 878, 1896, 190)
+# Reference-workstation layout: top status strip, middle four panes, bottom five panels.
+static func top_rect() -> Rect2: return Rect2(8, 8, 1904, 96)
+static func dsa_rect() -> Rect2: return Rect2(8, 112, 742, 688)
+static func scope_rect() -> Rect2: return Rect2(758, 112, 502, 360)
+static func pane3d_rect() -> Rect2: return Rect2(758, 484, 502, 316)
+static func data_rect() -> Rect2: return Rect2(1268, 112, 644, 344)
+static func rl_rect() -> Rect2: return Rect2(1268, 468, 260, 332)
+static func replay_rect() -> Rect2: return Rect2(1536, 468, 376, 332)
+static func bottom_rect() -> Rect2: return Rect2(8, 812, 1904, 256)
 
 
 ## Pin a Control to an absolute logical-pixel rect (anchors at 0).

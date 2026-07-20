@@ -11,6 +11,10 @@ extends CanvasLayer
 ## Backend-fed metrics include progress, remaining distance, lumen radius,
 ## deviation, ETA, safety/risk, and client-estimated WebSocket latency.
 
+const MiniTrendChartScript := preload("res://scripts/ui/mini_trend_chart.gd")
+const SemiCircularGaugeScript := preload("res://scripts/ui/semi_circular_gauge.gd")
+const IntentDialScript := preload("res://scripts/ui/intent_dial.gd")
+
 signal emergency_stop
 signal manual_takeover
 signal resume_nav
@@ -37,6 +41,13 @@ var _log: DashPanel
 var _alarm: DashPanel
 var _clock: Label
 var _nav_state: Label
+var _nav_progress_bar: ProgressBar
+var _nav_progress_pct: Label
+var _distance_gauge: Control
+var _contact_chart: Control
+var _risk_hint: Label
+var _risk_detail: Label
+var _action_hint: Label
 var _push_btn: Button
 var _rotate_btn: Button
 var _stop_btn: Button
@@ -61,6 +72,8 @@ func _ready() -> void:
 
 	_build_top(root)
 	_build_data(root)
+	_build_rl_training(root)
+	_build_replay(root)
 	_build_bottom(root)
 
 
@@ -80,7 +93,7 @@ func _build_top(root: Control) -> void:
 	root.add_child(bar)
 
 	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 6)
+	row.add_theme_constant_override("separation", 4)
 	bar.add_child(row)
 
 	_top["robot"] = _card(row, "机器人状态", "未连接", "", UiStyle.RED, "robot")
@@ -91,9 +104,12 @@ func _build_top(root: Control) -> void:
 	var ring := CircularProgress.new()
 	ring.ring_color = UiStyle.GREEN
 	_top["progress"] = StatusCard.new("路径进度", "0", "%", UiStyle.GREEN, ring)
+	_top["progress"].custom_minimum_size = Vector2(112, 0)
 	row.add_child(_top["progress"])
 	row.add_child(_sep())
 	_top["remain"] = _card(row, "剩余距离", "—", "cm", UiStyle.BLUE, "path")
+	row.add_child(_sep())
+	row.add_child(_mode_segment())
 	row.add_child(_sep())
 	_top["radius"] = _card(row, "血管半径", "—", "mm", UiStyle.BLUE, "radius")
 	row.add_child(_sep())
@@ -106,7 +122,7 @@ func _build_top(root: Control) -> void:
 
 	# 紧急停止 (§4: 暗红底 #4A1C1D + #FF4D4F 边框/文字, 宽 170-190).
 	var estop := UiStyle.button("紧急停止", UiStyle.ESTOP_BG, UiStyle.RED, UiStyle.RED, 18)
-	estop.custom_minimum_size = Vector2(150, 74)
+	estop.custom_minimum_size = Vector2(124, 74)
 	estop.size_flags_horizontal = Control.SIZE_SHRINK_END
 	estop.pressed.connect(_on_estop_pressed)
 	row.add_child(estop)
@@ -128,7 +144,25 @@ func _sep() -> VSeparator:
 	return s
 
 
-# ── 导航与安全数据 (§12/§13): 2x4 DataCards ──────────────────────────────────
+func _mode_segment() -> PanelContainer:
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", UiStyle.card_box(0.75, 8))
+	panel.custom_minimum_size = Vector2(318, 74)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 0)
+	panel.add_child(row)
+	for item in [["HCI模式", true], ["RL训练", false], ["策略推理", false]]:
+		var bg := UiStyle.BLUE_BG if item[1] else Color(0.016, 0.055, 0.086, 0.38)
+		var border := UiStyle.BLUE if item[1] else Color(UiStyle.BORDER.r, UiStyle.BORDER.g, UiStyle.BORDER.b, 0.35)
+		var fg := UiStyle.TEXT if item[1] else UiStyle.TEXT_MID
+		var b := UiStyle.button(item[0], bg, border, fg, 18, 4)
+		b.disabled = true
+		b.custom_minimum_size = Vector2(102, 54)
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		row.add_child(b)
+	return panel
+
+# ── 导航与安全数据：进度 + 半圆仪表 + 接触力趋势 + 小指标 ─────────────────────
 func _build_data(root: Control) -> void:
 	var panel := PanelContainer.new()
 	panel.add_theme_stylebox_override("panel", UiStyle.panel_box(0.92, 10))
@@ -136,29 +170,78 @@ func _build_data(root: Control) -> void:
 	root.add_child(panel)
 
 	var vb := VBoxContainer.new()
-	vb.add_theme_constant_override("separation", 8)
+	vb.add_theme_constant_override("separation", 6)
 	panel.add_child(vb)
-	vb.add_child(UiStyle.label("导航与安全数据", UiStyle.TEXT, 16))
+	vb.add_child(UiStyle.label("④  导航与安全数据", UiStyle.TEXT, 16))
+
+	var top := HBoxContainer.new()
+	top.add_theme_constant_override("separation", 8)
+	top.custom_minimum_size = Vector2(0, 80)
+	vb.add_child(top)
+
+	var progress_card := PanelContainer.new()
+	progress_card.add_theme_stylebox_override("panel", UiStyle.card_box(0.78, 7))
+	progress_card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	top.add_child(progress_card)
+	var pv := VBoxContainer.new()
+	pv.add_theme_constant_override("separation", 5)
+	progress_card.add_child(pv)
+	pv.add_child(UiStyle.label("导航进度", UiStyle.TEXT_MID, 13))
+	var prow := HBoxContainer.new()
+	prow.add_theme_constant_override("separation", 4)
+	prow.add_child(UiStyle.label("78", UiStyle.TEXT, 25))
+	prow.add_child(UiStyle.label("/ 234 mm", UiStyle.TEXT_MID, 14))
+	pv.add_child(prow)
+	_nav_progress_bar = ProgressBar.new()
+	_nav_progress_bar.show_percentage = false
+	_nav_progress_bar.min_value = 0
+	_nav_progress_bar.max_value = 100
+	_nav_progress_bar.value = 33
+	_nav_progress_bar.custom_minimum_size = Vector2(0, 8)
+	var bar_styles := UiStyle.bar_style(UiStyle.BLUE)
+	_nav_progress_bar.add_theme_stylebox_override("background", bar_styles[0])
+	_nav_progress_bar.add_theme_stylebox_override("fill", bar_styles[1])
+	pv.add_child(_nav_progress_bar)
+	_nav_progress_pct = UiStyle.label("33%", UiStyle.TEXT2, 12)
+	pv.add_child(_nav_progress_pct)
+
+	var gauge_card := PanelContainer.new()
+	gauge_card.add_theme_stylebox_override("panel", UiStyle.card_box(0.78, 7))
+	gauge_card.custom_minimum_size = Vector2(118, 0)
+	top.add_child(gauge_card)
+	_distance_gauge = SemiCircularGaugeScript.new()
+	_distance_gauge.label = "156 mm"
+	gauge_card.add_child(_distance_gauge)
+
+	var chart_card := PanelContainer.new()
+	chart_card.add_theme_stylebox_override("panel", UiStyle.card_box(0.78, 7))
+	chart_card.custom_minimum_size = Vector2(176, 0)
+	top.add_child(chart_card)
+	var cv := VBoxContainer.new()
+	cv.add_theme_constant_override("separation", 2)
+	chart_card.add_child(cv)
+	cv.add_child(UiStyle.label("接触力趋势 (N)", UiStyle.TEXT_MID, 13))
+	_contact_chart = MiniTrendChartScript.new()
+	_contact_chart.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	cv.add_child(_contact_chart)
 
 	var grid := GridContainer.new()
 	grid.columns = 4
-	grid.add_theme_constant_override("h_separation", 10)
-	grid.add_theme_constant_override("v_separation", 10)
+	grid.add_theme_constant_override("h_separation", 8)
+	grid.add_theme_constant_override("v_separation", 6)
 	grid.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	vb.add_child(grid)
 
-	_data["dwall"] = _dcard(grid, "距血管壁距离", "1.6", "mm", UiStyle.GREEN)
-	_data["dpath"] = _dcard(grid, "路径偏差", "—", "mm", UiStyle.GREEN)
-	_data["radius"] = _dcard(grid, "血管半径", "—", "mm", UiStyle.BLUE)
-	_data["curv"] = _dcard(grid, "曲率", "0.42", "1/mm", UiStyle.BLUE)
-	_data["speed"] = _dcard(grid, "导管速度", "3.2", "mm/s", UiStyle.BLUE)
-	_data["progress"] = _dcard(grid, "路径进度", "72", "%", UiStyle.BLUE)
-	_data["eta"] = _dcard(grid, "预计到达目标", "—", "", UiStyle.BLUE)
-	# 卡8 风险状态 with 提示行 (§13).
-	var risk := DataCard.new("风险状态", "正常", "", UiStyle.GREEN, 30.0, "请保持谨慎操作")
-	grid.add_child(risk)
-	_data["risk"] = risk
-
+	_data["dpath"] = _dcard(grid, "偏离中心线", "2.3", "mm", UiStyle.BLUE)
+	_data["curv"] = _dcard(grid, "局部曲率", "0.015", "1/mm", UiStyle.BLUE)
+	_data["speed"] = _dcard(grid, "推进速度", "0.8", "mm/s", UiStyle.BLUE)
+	_data["force"] = _dcard(grid, "接触力", "0.12", "N", UiStyle.BLUE)
+	_data["dwall"] = _dcard(grid, "壁距", "1.8", "mm", UiStyle.GREEN)
+	_data["risk"] = DataCard.new("风险等级", "中风险", "", UiStyle.YELLOW, 70.0, "请谨慎操作")
+	grid.add_child(_data["risk"])
+	_data["safety"] = DataCard.new("安全状态", "安全", "", UiStyle.GREEN, 86.0, "保护已启用")
+	grid.add_child(_data["safety"])
+	_data["eta"] = _dcard(grid, "预计到达", "—", "", UiStyle.BLUE)
 
 func _dcard(grid: GridContainer, title: String, value: String, unit: String,
 		color: Color) -> DataCard:
@@ -166,6 +249,104 @@ func _dcard(grid: GridContainer, title: String, value: String, unit: String,
 	grid.add_child(card)
 	return card
 
+
+
+func _build_rl_training(root: Control) -> void:
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", UiStyle.panel_box(0.92, 10))
+	UiStyle.place(panel, UiStyle.rl_rect())
+	root.add_child(panel)
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 6)
+	panel.add_child(vb)
+	vb.add_child(UiStyle.label("⑤  RL训练状态", UiStyle.TEXT, 16))
+	var top := HBoxContainer.new()
+	top.add_theme_constant_override("separation", 8)
+	vb.add_child(top)
+	top.add_child(_mini_info("当前模式", "HCI模式", UiStyle.BLUE))
+	top.add_child(_mini_info("当前策略", "VesselRL-v2.1", UiStyle.BLUE))
+	var stats := GridContainer.new()
+	stats.columns = 3
+	stats.add_theme_constant_override("h_separation", 8)
+	stats.add_theme_constant_override("v_separation", 8)
+	vb.add_child(stats)
+	stats.add_child(_mini_info("Episode", "128", UiStyle.TEXT))
+	stats.add_child(_mini_info("Step", "32,455", UiStyle.TEXT))
+	stats.add_child(_mini_info("Reward", "+12.36", UiStyle.GREEN))
+	var lower := GridContainer.new()
+	lower.columns = 4
+	lower.add_theme_constant_override("h_separation", 8)
+	lower.add_theme_constant_override("v_separation", 8)
+	lower.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	vb.add_child(lower)
+	lower.add_child(_mini_info("回放缓存", "48.5k", UiStyle.GREEN))
+	lower.add_child(_mini_info("累积损失", "0.18", UiStyle.TEXT_MID))
+	lower.add_child(_mini_info("熵", "1.24", UiStyle.TEXT_MID))
+	lower.add_child(_mini_info("训练状态", "● 训练中", UiStyle.GREEN))
+
+
+func _build_replay(root: Control) -> void:
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", UiStyle.panel_box(0.92, 10))
+	UiStyle.place(panel, UiStyle.replay_rect())
+	root.add_child(panel)
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 6)
+	panel.add_child(vb)
+	var head := HBoxContainer.new()
+	head.add_child(UiStyle.label("⑥  数据采集与回放", UiStyle.TEXT, 16))
+	var live := UiStyle.label("● 数据记录中", UiStyle.GREEN, 12)
+	live.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	live.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	head.add_child(live)
+	vb.add_child(head)
+	vb.add_child(_kv_row("数据记录状态", "进行中", UiStyle.GREEN))
+	vb.add_child(_kv_row("数据集名称", "EndoRL-2024-05"))
+	var nums := GridContainer.new()
+	nums.columns = 2
+	nums.add_theme_constant_override("h_separation", 8)
+	nums.add_theme_constant_override("v_separation", 8)
+	vb.add_child(nums)
+	nums.add_child(_mini_info("样本数", "125,648", UiStyle.TEXT_MID))
+	nums.add_child(_mini_info("轨迹数", "1,248", UiStyle.TEXT_MID))
+	var controls := HBoxContainer.new()
+	controls.add_theme_constant_override("separation", 6)
+	vb.add_child(controls)
+	for t in ["<<", "<", "||", ">", ">>", "1.0x"]:
+		var b := _tool(t, func(): pass)
+		b.custom_minimum_size = Vector2(42 if t == "1.0x" else 34, 24)
+		controls.add_child(b)
+	vb.add_child(_kv_row("标注状态", "已标注 73%", UiStyle.BLUE))
+	var p := ProgressBar.new()
+	p.show_percentage = false
+	p.value = 73
+	p.custom_minimum_size = Vector2(0, 7)
+	var styles := UiStyle.bar_style(UiStyle.BLUE)
+	p.add_theme_stylebox_override("background", styles[0])
+	p.add_theme_stylebox_override("fill", styles[1])
+	vb.add_child(p)
+	vb.add_child(UiStyle.label("会话 ID  77f2ca21-5d6e-4b9a-a2d3", UiStyle.TEXT2, 11))
+
+
+func _mini_info(title: String, value: String, color: Color) -> PanelContainer:
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", UiStyle.card_box(0.76, 7))
+	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 2)
+	panel.add_child(vb)
+	vb.add_child(UiStyle.label(title, UiStyle.TEXT2, 12))
+	vb.add_child(UiStyle.label(value, color, 14))
+	return panel
+
+
+func _kv_row(key: String, value: String, color := Color(0.847, 0.902, 0.953)) -> HBoxContainer:
+	var row := HBoxContainer.new()
+	var k := UiStyle.label(key, UiStyle.TEXT2, 12)
+	k.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(k)
+	row.add_child(UiStyle.label(value, color, 12))
+	return row
 
 # ── 底部控制区 (§14-§19): 五面板 17/17/27/21/18 ──────────────────────────────
 func _build_bottom(root: Control) -> void:
@@ -214,26 +395,68 @@ func _build_bottom(root: Control) -> void:
 	connp.content.add_child(sigrow)
 	row.add_child(connp)
 
-	# 3. 运动控制 (27%): 大按钮 暗底+彩色描边 (§17), 急停后禁用推进/旋转 (§22).
+	# 3. 运动控制 (27%): 参考图的手动控制台，保留原 motion_command 信号入口。
 	var motionp := DashPanel.new("运动控制", 27.0)
-	var mrow := HBoxContainer.new()
-	mrow.add_theme_constant_override("separation", 10)
-	_push_btn = UiStyle.button("推进", UiStyle.BLUE_BG, UiStyle.BLUE, UiStyle.TEXT, 16)
-	_push_btn.custom_minimum_size = Vector2(130, 62)
-	_push_btn.pressed.connect(func(): motion_command.emit(1.0, 0.0))
-	mrow.add_child(_push_btn)
-	_rotate_btn = UiStyle.button("旋转", UiStyle.GRAY_BTN, UiStyle.GRAY_BORDER, UiStyle.TEXT, 16)
-	_rotate_btn.custom_minimum_size = Vector2(130, 62)
-	_rotate_btn.pressed.connect(func(): motion_command.emit(0.0, 1.0))
-	mrow.add_child(_rotate_btn)
-	_stop_btn = UiStyle.button("停止", UiStyle.RED_BG, UiStyle.RED, UiStyle.RED, 16)
-	_stop_btn.custom_minimum_size = Vector2(130, 62)
-	_stop_btn.pressed.connect(_on_estop_pressed)
-	mrow.add_child(_stop_btn)
-	motionp.content.add_child(mrow)
-	# Secondary tools + live nav/input readout.
+	var tabs := HBoxContainer.new()
+	tabs.add_theme_constant_override("separation", 4)
+	for item in [["手动控制", true], ["点击导航", false], ["策略推理", false]]:
+		var b := UiStyle.button(item[0], UiStyle.BLUE_BG if item[1] else UiStyle.GRAY_BTN,
+			UiStyle.BLUE if item[1] else UiStyle.BORDER, UiStyle.TEXT if item[1] else UiStyle.TEXT_MID, 12, 5)
+		b.disabled = true
+		b.custom_minimum_size = Vector2(100, 26)
+		tabs.add_child(b)
+	motionp.content.add_child(tabs)
+
+	var control_grid := GridContainer.new()
+	control_grid.columns = 4
+	control_grid.add_theme_constant_override("h_separation", 8)
+	control_grid.add_theme_constant_override("v_separation", 6)
+	motionp.content.add_child(control_grid)
+
+	_push_btn = _motion_value_card(control_grid, "推进 (Push)", "0.35", UiStyle.BLUE, func(): motion_command.emit(1.0, 0.0))
+	var dial_card := PanelContainer.new()
+	dial_card.add_theme_stylebox_override("panel", UiStyle.card_box(0.74, 7))
+	dial_card.custom_minimum_size = Vector2(168, 132)
+	var dial_v := VBoxContainer.new()
+	dial_v.add_theme_constant_override("separation", 2)
+	dial_card.add_child(dial_v)
+	dial_v.add_child(UiStyle.label("实时意图方向", UiStyle.TEXT_MID, 12))
+	dial_v.add_child(IntentDialScript.new())
+	control_grid.add_child(dial_card)
+	_rotate_btn = _motion_value_card(control_grid, "旋转 (Rotate)", "-0.25", UiStyle.BLUE, func(): motion_command.emit(0.0, 1.0))
+
+	var preset_card := PanelContainer.new()
+	preset_card.add_theme_stylebox_override("panel", UiStyle.card_box(0.74, 7))
+	preset_card.custom_minimum_size = Vector2(172, 132)
+	var preset_v := VBoxContainer.new()
+	preset_v.add_theme_constant_override("separation", 6)
+	preset_card.add_child(preset_v)
+	preset_v.add_child(UiStyle.label("速度预设", UiStyle.TEXT_MID, 12))
+	var speed_row := HBoxContainer.new()
+	speed_row.add_theme_constant_override("separation", 4)
+	for t in ["很慢", "慢", "中速", "快", "很快"]:
+		speed_row.add_child(_tool(t, func(): pass))
+	preset_v.add_child(speed_row)
+	preset_v.add_child(UiStyle.label("角度步进设置", UiStyle.TEXT_MID, 12))
+	var angle_row := HBoxContainer.new()
+	angle_row.add_theme_constant_override("separation", 4)
+	for t in ["-45°", "-15°", "0°", "+15°", "+45°"]:
+		angle_row.add_child(_tool(t, func(): pass))
+	preset_v.add_child(angle_row)
+	control_grid.add_child(preset_card)
+
 	var srow := HBoxContainer.new()
-	srow.add_theme_constant_override("separation", 6)
+	srow.add_theme_constant_override("separation", 4)
+	for t in ["J-tip辅助", "扭矩限制", "回撤保护", "自动停推"]:
+		var sw := CheckBox.new()
+		sw.text = t
+		sw.button_pressed = true
+		sw.add_theme_color_override("font_color", UiStyle.TEXT_MID)
+		srow.add_child(sw)
+	_stop_btn = UiStyle.button("停止", UiStyle.RED_BG, UiStyle.RED, UiStyle.RED, 12, 6)
+	_stop_btn.custom_minimum_size = Vector2(68, 26)
+	_stop_btn.pressed.connect(_on_estop_pressed)
+	srow.add_child(_stop_btn)
 	srow.add_child(_tool("恢复", func(): _on_resume_pressed()))
 	srow.add_child(_tool("接管", func(): manual_takeover.emit()))
 	srow.add_child(_tool("视角", func(): view_cycle_requested.emit()))
@@ -246,7 +469,6 @@ func _build_bottom(root: Control) -> void:
 	_nav_state = UiStyle.label("导航 手动 · Input p+0.0 r+0.0", UiStyle.TEXT2, 12)
 	motionp.content.add_child(_nav_state)
 	row.add_child(motionp)
-
 	# 4. 系统日志 (21%)
 	_log = DashPanel.new("系统日志", 21.0)
 	var now := Time.get_time_string_from_system()
@@ -259,6 +481,21 @@ func _build_bottom(root: Control) -> void:
 	row.add_child(_alarm)
 
 
+func _motion_value_card(grid: GridContainer, title: String, value: String, color: Color, cb: Callable) -> Button:
+	var card := PanelContainer.new()
+	card.add_theme_stylebox_override("panel", UiStyle.card_box(0.74, 7))
+	card.custom_minimum_size = Vector2(128, 132)
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 6)
+	card.add_child(vb)
+	vb.add_child(UiStyle.label(title, UiStyle.TEXT_MID, 12))
+	vb.add_child(UiStyle.label(value, color, 25))
+	var up := _tool("▲", cb)
+	var down := _tool("▼", cb)
+	vb.add_child(up)
+	vb.add_child(down)
+	grid.add_child(card)
+	return up
 func _tool(text: String, cb: Callable) -> Button:
 	var b := UiStyle.button(text, UiStyle.GRAY_BTN, UiStyle.BORDER, UiStyle.TEXT_MID, 12, 6)
 	b.custom_minimum_size = Vector2(52, 24)
@@ -548,6 +785,7 @@ func update_metrics(metrics: Dictionary) -> void:
 	var speed := float(metrics.get("velocity", 0.0)) * 1000.0  # m/s -> mm/s
 	var progress := float(metrics.get("path_progress", 0.0)) * 100.0
 	var risk_score := float(metrics.get("risk_score", 0.0))
+	var force_n := float(metrics.get("contact_force", risk_score * 0.8))
 	var latency := float(metrics.get("latency_ms", -1.0))
 
 	_top["progress"].set_value("%.0f" % progress)
@@ -557,21 +795,43 @@ func update_metrics(metrics: Dictionary) -> void:
 	_top["curv"].set_value("%.4f" % curv_per_mm)
 	_top["dwall"].set_value("%.1f" % wall_mm)
 
-	_data["dwall"].set_value("%.1f" % wall_mm)
-	_data["dwall"].set_bar(clampf(wall_mm / 3.0 * 100.0, 0.0, 100.0))
-	_data["dpath"].set_value("%.1f" % deviation_mm)
-	_data["dpath"].set_bar(clampf((1.5 - deviation_mm) / 1.5 * 100.0, 0.0, 100.0))
-	_data["radius"].set_value(_format_optional(radius_mm, 1))
-	_data["curv"].set_value("%.4f" % curv_per_mm)
-	_data["speed"].set_value("%.1f" % speed)
-	_data["progress"].set_value("%.0f" % progress)
-	_data["progress"].set_bar(progress)
-	_data["eta"].set_value(_format_eta(metrics.get("eta_seconds", null)))
+	_set_data_value("dwall", "%.1f" % wall_mm)
+	_set_data_bar("dwall", clampf(wall_mm / 3.0 * 100.0, 0.0, 100.0))
+	_set_data_value("dpath", "%.1f" % deviation_mm)
+	_set_data_bar("dpath", clampf((1.5 - deviation_mm) / 1.5 * 100.0, 0.0, 100.0))
+	_set_data_value("radius", _format_optional(radius_mm, 1))
+	_set_data_value("curv", "%.4f" % curv_per_mm)
+	_set_data_value("speed", "%.1f" % speed)
+	_set_data_value("force", "%.2f" % force_n)
+	_set_data_value("progress", "%.0f" % progress)
+	_set_data_bar("progress", progress)
+	_set_data_value("eta", _format_eta(metrics.get("eta_seconds", null)))
+	if _nav_progress_bar:
+		_nav_progress_bar.value = clampf(progress, 0.0, 100.0)
+	if _nav_progress_pct:
+		_nav_progress_pct.text = "%.0f%%" % clampf(progress, 0.0, 100.0)
+	if _distance_gauge:
+		_distance_gauge.value = 1.0 - clampf(progress / 100.0, 0.0, 1.0)
+		_distance_gauge.label = "%.0f mm" % maxf(0.0, remaining_cm * 10.0)
 	if latency >= 0.0 and _conn.has("latency"):
 		_conn["latency"].text = "%.0f ms" % latency
 
 	_update_risk(wall_mm, risk_score)
 
+
+func _set_data_value(key: String, value: String) -> void:
+	if _data.has(key):
+		_data[key].set_value(value)
+
+
+func _set_data_bar(key: String, value: float) -> void:
+	if _data.has(key):
+		_data[key].set_bar(value)
+
+
+func _set_data_color(key: String, color: Color) -> void:
+	if _data.has(key):
+		_data[key].set_color(color)
 
 func _smooth_value(slot: String, raw: float, alpha: float) -> float:
 	if slot == "_smooth_wall_mm":
@@ -609,10 +869,19 @@ func _update_risk(wall_mm: float, risk_score: float = 0.0) -> void:
 	_top["risk"].set_value(text)
 	_top["risk"].set_color(color)
 	_top["dwall"].set_color(color)
-	_data["risk"].set_value(text if text == "正常" else text + "风险")
-	_data["risk"].set_color(color)
-	_data["dwall"].set_color(color)
-
+	_set_data_value("risk", text if text == "正常" else text + "风险")
+	_set_data_color("risk", color)
+	_set_data_color("dwall", color)
+	if _data.has("safety"):
+		_data["safety"].set_value("安全" if color == UiStyle.GREEN else "关注" if color == UiStyle.YELLOW else "危险")
+		_data["safety"].set_color(UiStyle.GREEN if color == UiStyle.GREEN else color)
+	if _risk_hint:
+		_risk_hint.text = "距离血管壁距离过小" if color == UiStyle.RED else ("路径偏差需要关注" if color == UiStyle.YELLOW else "当前导航稳定")
+		_risk_hint.add_theme_color_override("font_color", color)
+	if _risk_detail:
+		_risk_detail.text = "请减速并调整位置" if color == UiStyle.RED else ("建议缓慢推进并观察壁距" if color == UiStyle.YELLOW else "维持当前操作节奏")
+	if _action_hint:
+		_action_hint.text = "立即停止推进\n微调导管方向\n等待风险解除" if color == UiStyle.RED else ("降低推进速度\n微调导管方向\n保持路径居中" if color == UiStyle.YELLOW else "保持路径居中\n按计划推进\n继续监测壁距")
 
 func _format_eta(value) -> String:
 	if value == null:

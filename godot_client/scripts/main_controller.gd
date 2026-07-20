@@ -138,6 +138,9 @@ var _pane_3d_container: SubViewportContainer  # the 3D pane rect (for click coor
 # region and the DSA pane the small right-top one. Toggled by the 互换 buttons on
 # both panes or the X key; overlays inside each pane are anchored so they adapt.
 var _dsa_pane: PanelContainer
+var _scope_pane: PanelContainer
+var _scope_viewport: SubViewport
+var _scope_camera: Camera3D
 var _panes_swapped: bool = false
 # Overview orbit camera (参考图视角): the external camera is a pivot-orbit rig —
 # spherical (yaw/pitch/dist) around a pan-able pivot. Left-drag orbits, middle-drag
@@ -343,6 +346,7 @@ func _setup_panes() -> void:
 
 	_build_dsa_pane(rootc)
 	_build_3d_pane(rootc)
+	_build_scope_pane(rootc)
 
 
 # DSA main view (doc/11 §5-§8, left 59%). Real X-ray fluoroscopy is a separate track,
@@ -383,7 +387,7 @@ func _build_dsa_pane(rootc: Control) -> void:
 	ov.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	dsa.add_child(ov)
 
-	_corner_label(ov, "● DSA 实时影像", UiStyle.GREEN, Vector2(14, 10), 16)
+	_corner_label(ov, "①  DSA 实时影像", UiStyle.GREEN, Vector2(14, 10), 16)
 
 	# 影像参数浮窗 (§5: 底 #101A26 75%, 圆角 6, 文字 #B8C7D6 14px).
 	var info := PanelContainer.new()
@@ -401,8 +405,6 @@ func _build_dsa_pane(rootc: Control) -> void:
 		tools.add_child(_pane_tool(t, Vector2(48, 48)))
 	ov.add_child(tools)
 
-	# 互换 button (top-right): swap this pane with the 3D 血管导航 pane.
-	_add_swap_button(ov, 12)
 
 	# 图例盒 (§8: 面板底 + 边框, 右下角, 文字 #D8E6F3 14px + 彩色标记).
 	var legend_panel := PanelContainer.new()
@@ -412,9 +414,9 @@ func _build_dsa_pane(rootc: Control) -> void:
 	legend_panel.anchor_right = 1.0
 	legend_panel.anchor_bottom = 1.0
 	legend_panel.offset_left = -220
-	legend_panel.offset_top = -168
+	legend_panel.offset_top = -242
 	legend_panel.offset_right = -14
-	legend_panel.offset_bottom = -14
+	legend_panel.offset_bottom = -88
 	legend_panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
 	legend_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	var legend := VBoxContainer.new()
@@ -433,7 +435,88 @@ func _build_dsa_pane(rootc: Control) -> void:
 		legend.add_child(lr)
 	legend_panel.add_child(legend)
 	ov.add_child(legend_panel)
+	var strip := PanelContainer.new()
+	strip.add_theme_stylebox_override("panel", UiStyle.card_box(0.82, 8))
+	strip.anchor_left = 0.0
+	strip.anchor_top = 1.0
+	strip.anchor_right = 1.0
+	strip.anchor_bottom = 1.0
+	strip.offset_left = 10
+	strip.offset_top = -82
+	strip.offset_right = -10
+	strip.offset_bottom = -10
+	strip.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	var strip_row := HBoxContainer.new()
+	strip_row.add_theme_constant_override("separation", 10)
+	strip.add_child(strip_row)
+	for item in [["配备导丝", "直径: 0.25mm\n长度: 215cm", UiStyle.GREEN], ["远端材质", "亲水涂层", UiStyle.BLUE], ["软头形状", "J-tip\n45°", UiStyle.YELLOW], ["分段长度", "支撑段: 185cm\n自由段: 30cm", UiStyle.TEXT_MID]]:
+		strip_row.add_child(_dsa_device_block(item[0], item[1], item[2]))
+	ov.add_child(strip)
 
+
+# Endoscope/reference pane (middle top in the provided UI). Phase 1 keeps this as
+# a procedural live-looking image layer so the workstation layout can be judged
+# independently from the true second 3D camera pipeline.
+func _build_scope_pane(rootc: Control) -> void:
+	var scope := PanelContainer.new()
+	scope.add_theme_stylebox_override("panel", UiStyle.panel_box(0.95, 8))
+	UiStyle.place(scope, UiStyle.scope_rect())
+	rootc.add_child(scope)
+	_scope_pane = scope
+
+	var vpc := SubViewportContainer.new()
+	vpc.stretch = true
+	vpc.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vpc.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	vpc.offset_left = 10
+	vpc.offset_top = 42
+	vpc.offset_right = -10
+	vpc.offset_bottom = -44
+	scope.add_child(vpc)
+
+	_scope_viewport = SubViewport.new()
+	_scope_viewport.transparent_bg = false
+	_scope_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	if _world != null:
+		_scope_viewport.world_3d = _world.world_3d
+	vpc.add_child(_scope_viewport)
+
+	_scope_camera = Camera3D.new()
+	_scope_camera.near = 0.0005
+	_scope_camera.far = 50.0
+	_scope_camera.fov = 85.0
+	_scope_camera.cull_mask = 0xFFFFF & ~(1 << 1)
+	_scope_viewport.add_child(_scope_camera)
+	_scope_camera.make_current()
+
+	var ov := Control.new()
+	ov.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	ov.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	scope.add_child(ov)
+	_corner_label(ov, "②  腔镜实时视图", UiStyle.TEXT, Vector2(14, 10), 16)
+	_corner_label(ov, "● LIVE", UiStyle.GREEN, Vector2(390, 12), 12)
+
+	var controls := HBoxContainer.new()
+	controls.add_theme_constant_override("separation", 8)
+	controls.anchor_top = 1.0
+	controls.anchor_bottom = 1.0
+	controls.offset_left = 14
+	controls.offset_top = -36
+	controls.offset_right = -14
+	controls.offset_bottom = -8
+	controls.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	ov.add_child(controls)
+	controls.add_child(_pane_tool("相机", Vector2(44, 28)))
+	controls.add_child(_pane_tool("REC", Vector2(42, 28)))
+	controls.add_child(UiStyle.label("00:12:36", UiStyle.TEXT_MID, 13))
+	var slider := HSlider.new()
+	slider.min_value = 0.0
+	slider.max_value = 1.0
+	slider.value = 0.55
+	slider.custom_minimum_size = Vector2(150, 24)
+	slider.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	controls.add_child(slider)
+	controls.add_child(_pane_tool("全屏", Vector2(48, 28)))
 
 # 3D navigation assistant pane (VPP §2.3, right-top). A framed SubViewport with its own
 # World3D, plus reference overlays: title, a left tool strip and a direction-cube stub.
@@ -459,7 +542,7 @@ func _build_3d_pane(rootc: Control) -> void:
 	frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_pane_3d_container.add_child(frame)
 
-	_corner_label(frame, "3D 血管导航", UiStyle.TEXT, Vector2(12, 8), 16)
+	_corner_label(frame, "③  3D 解剖导航", UiStyle.TEXT, Vector2(12, 8), 16)
 
 	# 右侧竖向图标工具栏 (参考图): 选择/旋转 are a toggle pair gating what a left
 	# drag does; 放大/缩小 step the orbit zoom; 复位 reframes the vessel.
@@ -538,8 +621,6 @@ func _build_3d_pane(rootc: Control) -> void:
 	cube_cam.position = Vector3(0, 0, 3)
 	cube_vp.add_child(cube_cam)
 
-	# 互换 button (below the direction cube): swap this pane with the DSA pane.
-	_add_swap_button(frame, 90)
 
 
 # A 36x36 icon tool button for the 3D pane's right strip (§10 sizes, hover
@@ -671,20 +752,43 @@ func _add_swap_button(parent: Control, top: float) -> void:
 # 3D render target automatically. Click-to-navigate keeps working because it
 # translates clicks via the container's live global rect.
 func _swap_panes() -> void:
-	_panes_swapped = not _panes_swapped
+	_panes_swapped = false
 	_apply_pane_layout()
-	print("[Main] panes %s" % ("swapped: 3D main / DSA aside" if _panes_swapped
-			else "restored: DSA main / 3D aside"))
+	print("[Main] fixed reference panes: DSA / scope / 3D / safety")
 
 
 func _apply_pane_layout() -> void:
-	if _dsa_pane == null or _pane_3d_container == null:
-		return
-	UiStyle.place(_dsa_pane, UiStyle.pane3d_rect() if _panes_swapped else UiStyle.dsa_rect())
-	UiStyle.place(_pane_3d_container,
-			UiStyle.dsa_rect() if _panes_swapped else UiStyle.pane3d_rect())
+	if _dsa_pane != null:
+		UiStyle.place(_dsa_pane, UiStyle.dsa_rect())
+	if _scope_pane != null:
+		UiStyle.place(_scope_pane, UiStyle.scope_rect())
+	if _pane_3d_container != null:
+		UiStyle.place(_pane_3d_container, UiStyle.pane3d_rect())
 
 
+
+func _dsa_device_block(title: String, detail: String, color: Color) -> PanelContainer:
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", UiStyle.flat(Color(0, 0, 0, 0), 6))
+	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	panel.add_child(row)
+	var dial := Control.new()
+	dial.custom_minimum_size = Vector2(48, 48)
+	dial.draw.connect(func() -> void:
+		var c := dial.size * 0.5
+		dial.draw_circle(c, 22.0, Color(0.047, 0.118, 0.176, 0.85))
+		dial.draw_arc(c, 20.0, -PI * 0.8, PI * 0.55, 32, color, 2.0, true)
+		dial.draw_circle(c + Vector2(8, -6), 3.0, color)
+	)
+	row.add_child(dial)
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 1)
+	vb.add_child(UiStyle.label(title, UiStyle.TEXT, 12))
+	vb.add_child(UiStyle.label(detail, UiStyle.TEXT_MID, 11))
+	row.add_child(vb)
+	return panel
 func _corner_label(parent: Control, text: String, color: Color, pos: Vector2,
 		size := 12) -> void:
 	var l := UiStyle.label(text, color, size)
@@ -832,6 +936,10 @@ func _apply_vessel_material(node: Node) -> void:
 	# blooming rim — the tube boundary defines the structure instead of alpha
 	# stacking. Unshaded so it cannot clip to white from any camera angle.
 	_vessel_mat_overlay = _make_fresnel_material(false)
+	_vessel_mat_overlay.set_shader_parameter("rim_color", Color(0.96, 0.36, 0.16))
+	_vessel_mat_overlay.set_shader_parameter("core_color", Color(0.20, 0.055, 0.025))
+	_vessel_mat_overlay.set_shader_parameter("back_wall_color", Color(0.64, 0.20, 0.10))
+	_vessel_mat_overlay.set_shader_parameter("glow", 2.2)
 	_vessel_mat_overlay.set_shader_parameter("relief_light_dir", Vector3(-0.35, 0.72, 0.59))
 	_vessel_mat_overlay.set_shader_parameter("relief_strength", 0.42)
 	_vessel_mat_overlay.set_shader_parameter("relief_shadow", 0.34)
@@ -857,6 +965,10 @@ func _apply_vessel_material(node: Node) -> void:
 	# glowing lumen segment and the distant tree no longer piles up. `tip_world_pos`
 	# is refreshed each frame in _feed_rig.
 	_vessel_mat_surgical = _make_fresnel_material(true)
+	_vessel_mat_surgical.set_shader_parameter("rim_color", Color(0.98, 0.39, 0.17))
+	_vessel_mat_surgical.set_shader_parameter("core_color", Color(0.22, 0.060, 0.030))
+	_vessel_mat_surgical.set_shader_parameter("back_wall_color", Color(0.68, 0.22, 0.11))
+	_vessel_mat_surgical.set_shader_parameter("glow", 2.1)
 	_vessel_mat_surgical.set_shader_parameter("fade_near", surgical_fade_near)
 	_vessel_mat_surgical.set_shader_parameter("fade_far", surgical_fade_far)
 	_vessel_mat_surgical.set_shader_parameter("route_corridor_radius", route_vessel_radius)
@@ -1057,8 +1169,27 @@ func _setup_rig(parent: Node) -> void:
 	parent.add_child(_rig)
 	if not _path_waypoints.is_empty():
 		_rig.set_navigation_route(_path_waypoints)
+	_seed_rig_pose_from_config()
 
 
+
+func _seed_rig_pose_from_config() -> void:
+	if _rig == null or not is_instance_valid(_rig):
+		return
+	var start := _config_point_to_scene(start_position)
+	var finish := _config_point_to_scene(end_position)
+	var dir := finish - start
+	if dir.length() < 1e-6:
+		dir = Vector3(0.0, 1.0, 0.0)
+	_rig.update_tip(start, dir.normalized(), Quaternion.IDENTITY)
+
+
+func _config_point_to_scene(point: Array) -> Vector3:
+	if point.size() < 3:
+		return Vector3.ZERO
+	var p := Vector3(float(point[0]), float(point[1]), float(point[2]))
+	var largest := maxf(absf(p.x), maxf(absf(p.y), absf(p.z)))
+	return p * 0.001 if largest > 10.0 else p
 func _setup_hud() -> void:
 	_hud = preload("res://scripts/hud_controller.gd").new()
 	add_child(_hud)
@@ -1331,6 +1462,7 @@ func _vec3_from_backend_point(p) -> Vector3:
 # tip keeps advancing toward the clicked waypoint without keyboard input).
 func _process(delta: float) -> void:
 	_sync_direction_cube()
+	_sync_scope_endoscope_camera()
 	if not _autopilot_active:
 		return
 	_autopilot_accum += delta
@@ -1340,6 +1472,19 @@ func _process(delta: float) -> void:
 	_ws.send_control(0.0, 0.0)
 
 
+
+func _sync_scope_endoscope_camera() -> void:
+	if _scope_viewport == null or _scope_camera == null or _world == null:
+		return
+	if _scope_viewport.world_3d == null:
+		_scope_viewport.world_3d = _world.world_3d
+	if _rig == null or not is_instance_valid(_rig) or _rig.endoscope_cam == null:
+		return
+	_scope_camera.global_transform = _rig.endoscope_cam.global_transform
+	_scope_camera.fov = _rig.endoscope_cam.fov
+	_scope_camera.near = _rig.endoscope_cam.near
+	_scope_camera.far = _rig.endoscope_cam.far
+	_scope_camera.cull_mask = _rig.endoscope_cam.cull_mask
 # Left click -> pick the route waypoint whose ON-SCREEN position is nearest the
 # click, and drive the tip there via the backend autopilot. Robust to coordinate
 # frames: the waypoints are in the backend meter frame and rendered under the path
@@ -1492,16 +1637,10 @@ func _feed_rig(tip: Dictionary) -> void:
 		_hud.set_coord(tip_world)
 		_tip_world_last = tip_world
 		_tip_world_known = true
-	# Keep the 3D assistant pane in the external OVERVIEW angle (VPP §2.3). An inside
-	# follow/endoscope camera sees the lumen wall at grazing angles where the 半透 walls
-	# stack into a solid cyan blob; OVERVIEW shows the whole vessel tree cleanly (the
-	# fresnel glow reads as a glass tree). The operator can still press C for follow.
+	# Keep the middle-bottom 3D pane in external navigation by default; the
+	# endoscope reference pane is visible above it.
 	if not _auto_followed:
-		# Current behavior: first real tip pose enters FOLLOW unless the operator
-		# already moved the camera. The route-aware rig handles fallback internally.
 		_auto_followed = true
-		if not _camera_user_controlled:
-			_set_camera_mode(CamMode.FOLLOW)
 
 
 # Camera orbit/follow uses the same front point the renderer draws as the

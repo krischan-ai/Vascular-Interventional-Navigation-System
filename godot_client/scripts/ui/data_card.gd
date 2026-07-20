@@ -19,23 +19,23 @@ func _init(title: String, value: String, unit: String, color: Color, bar_pct := 
 	size_flags_vertical = Control.SIZE_EXPAND_FILL
 
 	var vb := VBoxContainer.new()
-	vb.add_theme_constant_override("separation", 2)
+	vb.add_theme_constant_override("separation", 1)
 	add_child(vb)
 
-	vb.add_child(UiStyle.label(title, UiStyle.TEXT_MID, 14))
+	vb.add_child(UiStyle.label(title, UiStyle.TEXT_MID, 12))
 
 	var valrow := HBoxContainer.new()
 	valrow.add_theme_constant_override("separation", 4)
-	_value = UiStyle.label(value, color, 28)
+	_value = UiStyle.label(value, color, 22)
 	valrow.add_child(_value)
-	_unit = UiStyle.label(unit, UiStyle.TEXT2, 14)
+	_unit = UiStyle.label(unit, UiStyle.TEXT2, 11)
 	_unit.size_flags_vertical = Control.SIZE_SHRINK_END
 	valrow.add_child(_unit)
 	vb.add_child(valrow)
 
 	# Optional hint line (doc/11 §13 卡8: "请保持谨慎操作").
 	if hint != "":
-		_hint = UiStyle.label(hint, UiStyle.TEXT2, 12)
+		_hint = UiStyle.label(hint, UiStyle.TEXT2, 10)
 		vb.add_child(_hint)
 
 	var spacer := Control.new()
@@ -47,7 +47,7 @@ func _init(title: String, value: String, unit: String, color: Color, bar_pct := 
 	_bar.min_value = 0.0
 	_bar.max_value = 100.0
 	_bar.value = bar_pct
-	_bar.custom_minimum_size = Vector2(0, 5)
+	_bar.custom_minimum_size = Vector2(0, 4)
 	var styles := UiStyle.bar_style(color)
 	_bar.add_theme_stylebox_override("background", styles[0])
 	_bar.add_theme_stylebox_override("fill", styles[1])
