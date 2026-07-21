@@ -15,7 +15,7 @@ var values := PackedFloat32Array([0.08, 0.12, 0.10, 0.18, 0.22, 0.16, 0.30, 0.42
 		queue_redraw()
 
 func _init() -> void:
-	custom_minimum_size = Vector2(180, 132)
+	custom_minimum_size = Vector2(160, 104)
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 
 func _draw() -> void:

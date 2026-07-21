@@ -22,11 +22,11 @@ func _init(title: String, value: String, unit: String, color: Color, bar_pct := 
 	vb.add_theme_constant_override("separation", 1)
 	add_child(vb)
 
-	vb.add_child(UiStyle.label(title, UiStyle.TEXT_MID, 12))
+	vb.add_child(UiStyle.label(title, UiStyle.TEXT_MID, 11))
 
 	var valrow := HBoxContainer.new()
 	valrow.add_theme_constant_override("separation", 4)
-	_value = UiStyle.label(value, color, 22)
+	_value = UiStyle.label(value, color, 20)
 	valrow.add_child(_value)
 	_unit = UiStyle.label(unit, UiStyle.TEXT2, 11)
 	_unit.size_flags_vertical = Control.SIZE_SHRINK_END

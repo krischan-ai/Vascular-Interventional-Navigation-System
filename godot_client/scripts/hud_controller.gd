@@ -167,6 +167,7 @@ func _build_data(root: Control) -> void:
 	var panel := PanelContainer.new()
 	panel.add_theme_stylebox_override("panel", UiStyle.panel_box(0.92, 10))
 	UiStyle.place(panel, UiStyle.data_rect())
+	panel.clip_contents = true
 	root.add_child(panel)
 
 	var vb := VBoxContainer.new()
@@ -176,7 +177,7 @@ func _build_data(root: Control) -> void:
 
 	var top := HBoxContainer.new()
 	top.add_theme_constant_override("separation", 8)
-	top.custom_minimum_size = Vector2(0, 80)
+	top.custom_minimum_size = Vector2(0, 72)
 	vb.add_child(top)
 
 	var progress_card := PanelContainer.new()
@@ -228,7 +229,7 @@ func _build_data(root: Control) -> void:
 	var grid := GridContainer.new()
 	grid.columns = 4
 	grid.add_theme_constant_override("h_separation", 8)
-	grid.add_theme_constant_override("v_separation", 6)
+	grid.add_theme_constant_override("v_separation", 5)
 	grid.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	vb.add_child(grid)
 
@@ -237,9 +238,9 @@ func _build_data(root: Control) -> void:
 	_data["speed"] = _dcard(grid, "推进速度", "0.8", "mm/s", UiStyle.BLUE)
 	_data["force"] = _dcard(grid, "接触力", "0.12", "N", UiStyle.BLUE)
 	_data["dwall"] = _dcard(grid, "壁距", "1.8", "mm", UiStyle.GREEN)
-	_data["risk"] = DataCard.new("风险等级", "中风险", "", UiStyle.YELLOW, 70.0, "请谨慎操作")
+	_data["risk"] = DataCard.new("风险等级", "中风险", "", UiStyle.YELLOW, 70.0)
 	grid.add_child(_data["risk"])
-	_data["safety"] = DataCard.new("安全状态", "安全", "", UiStyle.GREEN, 86.0, "保护已启用")
+	_data["safety"] = DataCard.new("安全状态", "安全", "", UiStyle.GREEN, 86.0)
 	grid.add_child(_data["safety"])
 	_data["eta"] = _dcard(grid, "预计到达", "—", "", UiStyle.BLUE)
 
@@ -255,6 +256,7 @@ func _build_rl_training(root: Control) -> void:
 	var panel := PanelContainer.new()
 	panel.add_theme_stylebox_override("panel", UiStyle.panel_box(0.92, 10))
 	UiStyle.place(panel, UiStyle.rl_rect())
+	panel.clip_contents = true
 	root.add_child(panel)
 	var vb := VBoxContainer.new()
 	vb.add_theme_constant_override("separation", 6)
@@ -267,16 +269,16 @@ func _build_rl_training(root: Control) -> void:
 	top.add_child(_mini_info("当前策略", "VesselRL-v2.1", UiStyle.BLUE))
 	var stats := GridContainer.new()
 	stats.columns = 3
-	stats.add_theme_constant_override("h_separation", 8)
+	stats.add_theme_constant_override("h_separation", 5)
 	stats.add_theme_constant_override("v_separation", 8)
 	vb.add_child(stats)
 	stats.add_child(_mini_info("Episode", "128", UiStyle.TEXT))
 	stats.add_child(_mini_info("Step", "32,455", UiStyle.TEXT))
 	stats.add_child(_mini_info("Reward", "+12.36", UiStyle.GREEN))
 	var lower := GridContainer.new()
-	lower.columns = 4
-	lower.add_theme_constant_override("h_separation", 8)
-	lower.add_theme_constant_override("v_separation", 8)
+	lower.columns = 2
+	lower.add_theme_constant_override("h_separation", 5)
+	lower.add_theme_constant_override("v_separation", 5)
 	lower.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	vb.add_child(lower)
 	lower.add_child(_mini_info("回放缓存", "48.5k", UiStyle.GREEN))
@@ -289,6 +291,7 @@ func _build_replay(root: Control) -> void:
 	var panel := PanelContainer.new()
 	panel.add_theme_stylebox_override("panel", UiStyle.panel_box(0.92, 10))
 	UiStyle.place(panel, UiStyle.replay_rect())
+	panel.clip_contents = true
 	root.add_child(panel)
 	var vb := VBoxContainer.new()
 	vb.add_theme_constant_override("separation", 6)
@@ -335,8 +338,8 @@ func _mini_info(title: String, value: String, color: Color) -> PanelContainer:
 	var vb := VBoxContainer.new()
 	vb.add_theme_constant_override("separation", 2)
 	panel.add_child(vb)
-	vb.add_child(UiStyle.label(title, UiStyle.TEXT2, 12))
-	vb.add_child(UiStyle.label(value, color, 14))
+	vb.add_child(UiStyle.label(title, UiStyle.TEXT2, 10))
+	vb.add_child(UiStyle.label(value, color, 12))
 	return panel
 
 
@@ -410,13 +413,13 @@ func _build_bottom(root: Control) -> void:
 	var control_grid := GridContainer.new()
 	control_grid.columns = 4
 	control_grid.add_theme_constant_override("h_separation", 8)
-	control_grid.add_theme_constant_override("v_separation", 6)
+	control_grid.add_theme_constant_override("v_separation", 5)
 	motionp.content.add_child(control_grid)
 
 	_push_btn = _motion_value_card(control_grid, "推进 (Push)", "0.35", UiStyle.BLUE, func(): motion_command.emit(1.0, 0.0))
 	var dial_card := PanelContainer.new()
 	dial_card.add_theme_stylebox_override("panel", UiStyle.card_box(0.74, 7))
-	dial_card.custom_minimum_size = Vector2(168, 132)
+	dial_card.custom_minimum_size = Vector2(168, 112)
 	var dial_v := VBoxContainer.new()
 	dial_v.add_theme_constant_override("separation", 2)
 	dial_card.add_child(dial_v)
@@ -427,7 +430,7 @@ func _build_bottom(root: Control) -> void:
 
 	var preset_card := PanelContainer.new()
 	preset_card.add_theme_stylebox_override("panel", UiStyle.card_box(0.74, 7))
-	preset_card.custom_minimum_size = Vector2(172, 132)
+	preset_card.custom_minimum_size = Vector2(172, 112)
 	var preset_v := VBoxContainer.new()
 	preset_v.add_theme_constant_override("separation", 6)
 	preset_card.add_child(preset_v)
@@ -484,7 +487,7 @@ func _build_bottom(root: Control) -> void:
 func _motion_value_card(grid: GridContainer, title: String, value: String, color: Color, cb: Callable) -> Button:
 	var card := PanelContainer.new()
 	card.add_theme_stylebox_override("panel", UiStyle.card_box(0.74, 7))
-	card.custom_minimum_size = Vector2(128, 132)
+	card.custom_minimum_size = Vector2(128, 112)
 	var vb := VBoxContainer.new()
 	vb.add_theme_constant_override("separation", 6)
 	card.add_child(vb)
@@ -869,7 +872,10 @@ func _update_risk(wall_mm: float, risk_score: float = 0.0) -> void:
 	_top["risk"].set_value(text)
 	_top["risk"].set_color(color)
 	_top["dwall"].set_color(color)
-	_set_data_value("risk", text if text == "正常" else text + "风险")
+	var risk_label := text
+	if text == "中等":
+		risk_label = "中风险"
+	_set_data_value("risk", risk_label)
 	_set_data_color("risk", color)
 	_set_data_color("dwall", color)
 	if _data.has("safety"):

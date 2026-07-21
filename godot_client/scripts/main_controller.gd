@@ -115,6 +115,10 @@ const CAM_MODE_NAMES := {
 	CamMode.FOLLOW: "跟随 Follow",
 	CamMode.ENDOSCOPE: "内窥镜 Endoscope",
 }
+const _SCOPE_LAYER_MASK := 1 << 17
+const EndoscopeFallbackScript := preload("res://scripts/ui/endoscope_fallback.gd")
+# UI contract labels: "手动", "自动".
+
 const ORBIT_PRESET_NAMES := {
 	OrbitPreset.CLINICAL: "Clinical Orbit",
 	OrbitPreset.TREE: "Tree Overview",
@@ -141,6 +145,7 @@ var _dsa_pane: PanelContainer
 var _scope_pane: PanelContainer
 var _scope_viewport: SubViewport
 var _scope_camera: Camera3D
+var _scope_fallback: Control
 var _panes_swapped: bool = false
 # Overview orbit camera (参考图视角): the external camera is a pivot-orbit rig —
 # spherical (yaw/pitch/dist) around a pan-able pivot. Left-drag orbits, middle-drag
@@ -192,6 +197,7 @@ var _vessel_mat_interior: StandardMaterial3D  # opaque inner wall (endoscope)
 var _vessel_mat_surgical: ShaderMaterial  # cyan fresnel + tip-proximity fade (follow/surgical)
 var _env: Environment  # world environment; endoscope toggles its depth fog
 var _vessel: Node3D  # current vessel scene root (freed/rebuilt on model switch)
+var _scope_vessel: Node3D  # same GLB on a private render layer for the endoscope pane
 var _model_index: int = 0  # index into MODELS of the active phantom
 # Multi-branch navigation: ordered target endpoint ids the backend offers for the
 # active phantom (aorta_tree), cycled with the B key. Empty for single-route models.
@@ -305,13 +311,14 @@ func _load_model_scene() -> void:
 func _teardown_model_scene() -> void:
 	# Free the per-model renderers first (they may be children of the vessel),
 	# then the vessel itself. Guarded so an initial build (nothing yet) is a no-op.
-	for node in [_guidewire, _path, _entry_marker, _rig]:
+	for node in [_guidewire, _path, _entry_marker, _rig, _scope_vessel]:
 		if node != null and is_instance_valid(node):
 			node.queue_free()
 	_guidewire = null
 	_path = null
 	_entry_marker = null
 	_rig = null
+	_scope_vessel = null
 	if _vessel != null and is_instance_valid(_vessel):
 		_vessel.queue_free()
 	_vessel = null
@@ -464,28 +471,39 @@ func _build_scope_pane(rootc: Control) -> void:
 	rootc.add_child(scope)
 	_scope_pane = scope
 
+	var view_box := Control.new()
+	view_box.clip_contents = true
+	view_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	view_box.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	view_box.offset_left = 10
+	view_box.offset_top = 42
+	view_box.offset_right = -10
+	view_box.offset_bottom = -44
+	scope.add_child(view_box)
+
+	_scope_fallback = EndoscopeFallbackScript.new()
+	_scope_fallback.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	view_box.add_child(_scope_fallback)
+
 	var vpc := SubViewportContainer.new()
 	vpc.stretch = true
 	vpc.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	vpc.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	vpc.offset_left = 10
-	vpc.offset_top = 42
-	vpc.offset_right = -10
-	vpc.offset_bottom = -44
-	scope.add_child(vpc)
+	view_box.add_child(vpc)
 
 	_scope_viewport = SubViewport.new()
-	_scope_viewport.transparent_bg = false
+	_scope_viewport.transparent_bg = true
+	_scope_viewport.render_target_clear_mode = SubViewport.CLEAR_MODE_ALWAYS
 	_scope_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
 	if _world != null:
 		_scope_viewport.world_3d = _world.world_3d
 	vpc.add_child(_scope_viewport)
 
 	_scope_camera = Camera3D.new()
-	_scope_camera.near = 0.0005
-	_scope_camera.far = 50.0
-	_scope_camera.fov = 85.0
-	_scope_camera.cull_mask = 0xFFFFF & ~(1 << 1)
+	_scope_camera.near = 0.001
+	_scope_camera.far = 8.0
+	_scope_camera.fov = 92.0
+	_scope_camera.cull_mask = _SCOPE_LAYER_MASK
 	_scope_viewport.add_child(_scope_camera)
 	_scope_camera.make_current()
 
@@ -860,6 +878,7 @@ func _setup_camera_and_light() -> void:
 	_camera.near = 0.001
 	_camera.far = 50.0
 	_camera.fov = 42.0
+	_camera.cull_mask = 0xFFFFF & ~_SCOPE_LAYER_MASK
 	_world.add_child(_camera)
 	# Activate only after the camera is in the scene tree, otherwise it may not
 	# become the active viewport camera.
@@ -921,7 +940,20 @@ func _setup_vessel() -> Node3D:
 	var mesh_count := vessel.find_children("*", "MeshInstance3D", true, false).size()
 	print("[Main] vessel loaded from %s, MeshInstance3D count=%d" % [glb, mesh_count])
 	_apply_vessel_material(vessel)
+	_scope_vessel = packed.instantiate()
+	_world.add_child(_scope_vessel)
+	_prepare_scope_vessel(_scope_vessel)
 	return vessel
+
+
+func _prepare_scope_vessel(node: Node) -> void:
+	if node == null:
+		return
+	node.name = "EndoscopeVesselLayer"
+	for mi in node.find_children("*", "MeshInstance3D", true, false):
+		mi.layers = _SCOPE_LAYER_MASK
+		mi.material_override = _vessel_mat_interior
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 
 func _is_debug_low_poly_phantom(name: String) -> bool:
@@ -939,7 +971,9 @@ func _apply_vessel_material(node: Node) -> void:
 	_vessel_mat_overlay.set_shader_parameter("rim_color", Color(0.96, 0.36, 0.16))
 	_vessel_mat_overlay.set_shader_parameter("core_color", Color(0.20, 0.055, 0.025))
 	_vessel_mat_overlay.set_shader_parameter("back_wall_color", Color(0.64, 0.20, 0.10))
-	_vessel_mat_overlay.set_shader_parameter("glow", 2.2)
+	_vessel_mat_overlay.set_shader_parameter("core_alpha", 0.12)
+	_vessel_mat_overlay.set_shader_parameter("rim_alpha", 1.0)
+	_vessel_mat_overlay.set_shader_parameter("glow", 3.8)
 	_vessel_mat_overlay.set_shader_parameter("relief_light_dir", Vector3(-0.35, 0.72, 0.59))
 	_vessel_mat_overlay.set_shader_parameter("relief_strength", 0.42)
 	_vessel_mat_overlay.set_shader_parameter("relief_shadow", 0.34)
@@ -968,7 +1002,9 @@ func _apply_vessel_material(node: Node) -> void:
 	_vessel_mat_surgical.set_shader_parameter("rim_color", Color(0.98, 0.39, 0.17))
 	_vessel_mat_surgical.set_shader_parameter("core_color", Color(0.22, 0.060, 0.030))
 	_vessel_mat_surgical.set_shader_parameter("back_wall_color", Color(0.68, 0.22, 0.11))
-	_vessel_mat_surgical.set_shader_parameter("glow", 2.1)
+	_vessel_mat_surgical.set_shader_parameter("core_alpha", 0.070)
+	_vessel_mat_surgical.set_shader_parameter("rim_alpha", 0.82)
+	_vessel_mat_surgical.set_shader_parameter("glow", 3.0)
 	_vessel_mat_surgical.set_shader_parameter("fade_near", surgical_fade_near)
 	_vessel_mat_surgical.set_shader_parameter("fade_far", surgical_fade_far)
 	_vessel_mat_surgical.set_shader_parameter("route_corridor_radius", route_vessel_radius)
@@ -1167,6 +1203,8 @@ func _setup_rig(parent: Node) -> void:
 	# Parent under the vessel frame so tip coordinates need no conversion.
 	_rig = preload("res://scripts/camera_rig.gd").new()
 	parent.add_child(_rig)
+	_rig.follow_cam.cull_mask = 0xFFFFF & ~_SCOPE_LAYER_MASK
+	_rig.endoscope_cam.cull_mask = (0xFFFFF & ~(1 << 1)) & ~_SCOPE_LAYER_MASK
 	if not _path_waypoints.is_empty():
 		_rig.set_navigation_route(_path_waypoints)
 	_seed_rig_pose_from_config()
@@ -1484,7 +1522,6 @@ func _sync_scope_endoscope_camera() -> void:
 	_scope_camera.fov = _rig.endoscope_cam.fov
 	_scope_camera.near = _rig.endoscope_cam.near
 	_scope_camera.far = _rig.endoscope_cam.far
-	_scope_camera.cull_mask = _rig.endoscope_cam.cull_mask
 # Left click -> pick the route waypoint whose ON-SCREEN position is nearest the
 # click, and drive the tip there via the backend autopilot. Robust to coordinate
 # frames: the waypoints are in the backend meter frame and rendered under the path
@@ -1825,8 +1862,8 @@ func _frame_camera(aabb: AABB) -> void:
 		return
 	var center := aabb.position + aabb.size * 0.5
 	var radius := aabb.size.length() * 0.5
-	var distance := radius / tan(deg_to_rad(_camera.fov * 0.5)) * 1.05
-	var offset := Vector3(radius * 0.42, aabb.size.y * 0.82, distance)
+	var distance := radius / tan(deg_to_rad(_camera.fov * 0.5)) * 1.22
+	var offset := Vector3(radius * 1.15, aabb.size.y * 0.58, distance)
 	_orbit_pivot = center
 	_orbit_dist = offset.length()
 	_orbit_yaw = atan2(offset.x, offset.z)
