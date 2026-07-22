@@ -16,7 +16,7 @@ compatibility/default_parent_skeleton_in_mesh_instance_3d=true
 
 config/name="CathSim VPP Client"
 run/main_scene="res://scenes/main.tscn"
-config/features=PackedStringArray("4.6", "Forward Plus")
+config/features=PackedStringArray("4.7", "Forward Plus")
 
 [display]
 
@@ -27,4 +27,4 @@ window/stretch/mode="canvas_items"
 
 [network]
 
-config/server_url="ws://192.168.1.107:9000/ws/session"
+config/server_url="ws://localhost:9000/ws/session"

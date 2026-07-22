@@ -35,11 +35,11 @@ signal shape_intent_received(result: Dictionary)      ## shape_intent echo {acti
 # reliably reaches the target on full-length VPP vessels. Only takes effect when
 # a path is planned (low_tort sessions stay physics-driven regardless).
 @export var guided: bool = true
-# Interactive performance profile: a lighter guidewire and fewer physics
-# substeps cut per-step cost ~10-15x for responsive control (full fidelity is
-# n_bodies=80, n_substeps=3).
+# Interactive Newton profile.  Eight substeps matches the force-drive validation
+# profile closely enough to keep the wire contained during push/torque input.
+# Backends may still override this through CATHSIM_NEWTON_SUBSTEPS.
 @export var n_bodies: int = 40
-@export var n_substeps: int = 2
+@export var n_substeps: int = 8
 
 @export var session_retry_interval: float = 3.0  ## resend session_start until acknowledged
 @export var ack_timeout: float = 2.0  ## clear in-flight control if no response arrives

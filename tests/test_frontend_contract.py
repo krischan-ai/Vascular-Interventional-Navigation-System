@@ -19,6 +19,7 @@ def test_hud_uses_backend_dashboard_fields():
         assert field in main
 
     assert "last_latency_ms" in ws
+    assert "@export var n_substeps: int = 8" in ws
     assert "物理仿真 PHYSICS · 手动 MANUAL" not in main
     assert '"手动"' in main
     assert '"自动"' in main
@@ -77,6 +78,7 @@ def test_hud_uses_backend_dashboard_fields():
     assert "blood_vessels_visual_native.glb" in main
     assert "%s_visual_native.glb" in main
     assert '@export var phantom: String = "case_001_vpp"' in main
+    assert '@export var physics_engine: String = "newton_demo"' in main
     assert '@export var target: String = "endpoints_1"' in main
     assert "func _is_debug_low_poly_phantom" in main
     assert "debug low-poly phantom" in main

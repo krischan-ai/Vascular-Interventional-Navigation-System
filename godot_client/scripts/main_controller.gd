@@ -44,13 +44,22 @@ extends Node3D
 #     start/end endpoints (LPS millimeters) documented in godot_client/README.md.
 const MODELS: Array = [
 	{
-		"name": "项目初始模型 Low-Tort",
+		"name": "主动脉树 Aorta-Tree (Newton)",
+		"phantom": "aorta_tree",
+		"target": "root",
+		"case_id": "case_001",
+		"start": [],
+		"end": [],
+		"physics_engine": "newton_demo",
+	},
+	{
+		"name": "项目初始模型 Low-Tort (MuJoCo)",
 		"phantom": "low_tort",
 		"target": "bca",
 		"case_id": "case_001",
 		"start": [],
 		"end": [],
-		"physics_engine": "auto",
+		"physics_engine": "mujoco",
 	},
 	{
 		"name": "主动脉干 Aorta-Trunk",
@@ -62,7 +71,7 @@ const MODELS: Array = [
 		"physics_engine": "mujoco",
 	},
 	{
-		"name": "主动脉树 Aorta-Tree",
+		"name": "主动脉树 Aorta-Tree (MuJoCo)",
 		"phantom": "aorta_tree",
 		"target": "root",
 		"case_id": "case_001",
