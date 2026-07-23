@@ -475,6 +475,12 @@ class WebSocketHandler:
                 route_target=params.route_target,
             )
             conn_state.session_id = session_id
+            # Session creation can spend longer than PONG_TIMEOUT compiling the
+            # first Newton/Warp kernels.  The ping loop intentionally suspends
+            # timeout checks while session_id is None; restart its clock when the
+            # session becomes active so it does not immediately reject a healthy
+            # client using the stale pre-compilation timestamp.
+            conn_state.last_pong_time = time.time()
             conn_state.batch_mode = params.batch_mode
 
             # Multi-branch phantoms expose their selectable branch tips so the

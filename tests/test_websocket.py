@@ -367,6 +367,7 @@ class TestWebSocketHandlerUnit:
         handler._session_manager.get_session.return_value = engine
         conn = MagicMock()
         conn.session_id = None
+        conn.last_pong_time = 0.0
         conn.batch_mode = False
         conn.path_sent = False
 
@@ -376,6 +377,7 @@ class TestWebSocketHandlerUnit:
         asyncio.run(handler._handle_session_start(conn, {"batch_mode": True}))
 
         assert conn.session_id == "session-1"
+        assert conn.last_pong_time > 0.0
         assert conn.batch_mode is True
         assert send_mock.await_count == 1
         assert send_mock.await_args.args[1].value == "session_started"
