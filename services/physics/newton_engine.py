@@ -140,6 +140,16 @@ def _feed_budget(requested: float, slack: float, max_slack: float) -> float:
     return min(requested, max(0.0, max_slack - slack))
 
 
+def _insertion_complete(insert_s: float, max_insert_s: float, eps: float = 1e-9) -> bool:
+    """Whether a positive insertion budget has actually been exhausted.
+
+    Short routes can produce ``max_insert_s == 0`` when the simulated rod is
+    longer than the route. That is not a completed episode; route progress is
+    responsible for declaring success in that case.
+    """
+    return max_insert_s > eps and insert_s >= max_insert_s - eps
+
+
 def _quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """Hamilton product of two [x, y, z, w] quaternions."""
     ax, ay, az, aw = a
@@ -186,6 +196,11 @@ class NewtonEngine:
         guidewire_design: GuidewireDesign | None = None,
         procedure_design: ProcedureDesign | None = None,
         support_system: CoaxialSupportSystem | None = None,
+        rod_length: float | None = None,
+        rod_seg_len: float | None = None,
+        free_len: float | None = None,
+        max_slack: float | None = None,
+        insertion_margin: float | None = None,
         **_unused,
     ) -> None:
         if path is None or path.total_len <= 0.0:
@@ -200,8 +215,12 @@ class NewtonEngine:
         self._substeps = int(os.environ.get("CATHSIM_NEWTON_SUBSTEPS", str(n_substeps or 6)))
         self._iterations = int(os.environ.get("CATHSIM_NEWTON_ITERS", "2"))
         self._sim_dt = self._control_dt / self._substeps
-        self._rod_length = float(os.environ.get("CATHSIM_NEWTON_ROD_LENGTH", "0.06"))
-        self._rod_seg_len = float(os.environ.get("CATHSIM_NEWTON_SEG_LEN", "0.003"))
+        self._rod_length = float(
+            rod_length if rod_length is not None else os.environ.get("CATHSIM_NEWTON_ROD_LENGTH", "0.06")
+        )
+        self._rod_seg_len = float(
+            rod_seg_len if rod_seg_len is not None else os.environ.get("CATHSIM_NEWTON_SEG_LEN", "0.003")
+        )
         active_sim_length_mm = self._rod_length * 1000.0
         if guidewire_design is not None:
             self.guidewire_design = guidewire_design
@@ -251,7 +270,9 @@ class NewtonEngine:
         # (sheath_bodies=1 reproduces the original root-only D4 behavior).
         self._sheath_bodies = int(os.environ.get("CATHSIM_NEWTON_SHEATH_BODIES", "-1"))
         # Distal wire length (m) left free beyond the sheath in auto mode.
-        self._free_len = float(os.environ.get("CATHSIM_NEWTON_FREE_LEN", "0.03"))
+        self._free_len = float(
+            free_len if free_len is not None else os.environ.get("CATHSIM_NEWTON_FREE_LEN", "0.03")
+        )
         self.support_system = support_system or default_support_system(
             guidewire_tip_arclen_mm=self._rod_length * 1000.0,
             free_wire_length_mm=self._free_len * 1000.0,
@@ -261,7 +282,17 @@ class NewtonEngine:
         # it exceeds max_slack the forward feed budget is exhausted and holding
         # W no longer piles wire into a buckle. Pull-back always allowed (it is
         # the recovery move). <=0 disables the guard.
-        self._max_slack = float(os.environ.get("CATHSIM_NEWTON_MAX_SLACK", "0.012"))
+        self._max_slack = float(
+            max_slack if max_slack is not None else os.environ.get("CATHSIM_NEWTON_MAX_SLACK", "0.012")
+        )
+        # How far before the route endpoint insertion is considered exhausted.
+        # Stage-0 aorta_tree endpoint_0 is only ~30.7 mm long; the previous 1 mm
+        # hard margin stopped scripted pushes around 96% progress.
+        self._insertion_margin = float(
+            insertion_margin
+            if insertion_margin is not None
+            else os.environ.get("CATHSIM_NEWTON_INSERTION_MARGIN", "0.0")
+        )
         # Torsion steering: rotate input integrated (rad/s at rotate=1) into a
         # twist applied to the root anchor frame about the local tangent (D4c).
         self._rotate_speed = float(os.environ.get("CATHSIM_NEWTON_ROTATE_SPEED", "3.0"))
@@ -300,6 +331,15 @@ class NewtonEngine:
         self._base_arc = None
         self._max_s_ins = 0.0
 
+    def _update_insert_limit(self) -> None:
+        if self._base_arc is None:
+            self._max_s_ins = 0.0
+            return
+        cl_seg = float(self._cl_cum[-1])
+        rod_span = float(self._base_arc[-1])
+        self._max_s_ins = max(0.0, cl_seg - rod_span - max(0.0, self._insertion_margin))
+        self._insert_s = float(np.clip(self._insert_s, 0.0, self._max_s_ins))
+
     def _default_radius_m(self) -> float:
         try:
             return self.guidewire_profile.segment_by_name("main_support_shaft").radius_mm / 1000.0
@@ -325,6 +365,7 @@ class NewtonEngine:
         self._radii = self._centerline_radii()
         self._cl_cum = self._centerline_cumlen()
         self._insert_s = 0.0
+        self._update_insert_limit()
 
     def _centerline_cumlen(self) -> np.ndarray:
         seg = np.linalg.norm(np.diff(self._centerline, axis=0), axis=1)
@@ -488,7 +529,7 @@ class NewtonEngine:
     # the model geometry at build time (rebuild required).
     _LIVE_PARAMS = (
         "bend", "tip_bend", "soft_tip", "stretch", "push_speed", "rotate_speed",
-        "sheath_bodies", "free_len", "max_slack",
+        "sheath_bodies", "free_len", "max_slack", "insertion_margin",
     )
     _REBUILD_PARAMS = ("jtip_deg", "jtip_bodies", "contact_ke", "wall_thickness", "rod_length")
     # Live params that change the glue mask (recomputed in place, no rebuild).
@@ -514,6 +555,8 @@ class NewtonEngine:
                 rebuild = True
             if key in self._GLUE_PARAMS:
                 reglue = True
+            if key == "insertion_margin":
+                self._update_insert_limit()
         if rebuild:
             # Geometry changed: drop the cached model so the next step rebuilds
             # it (and re-settles) with the new shape, preserving insertion depth.
@@ -540,6 +583,7 @@ class NewtonEngine:
             "sheath_bodies": self._sheath_bodies,
             "free_len": self._free_len,
             "max_slack": self._max_slack,
+            "insertion_margin": self._insertion_margin,
             "bend_profile": self._bend_profile(max(0, int(round(self._rod_length / self._rod_seg_len)))).tolist(),
         }
 
@@ -598,8 +642,7 @@ class NewtonEngine:
         self._alpha = self._glue_alpha(nb)
         seg = np.linalg.norm(np.diff(self._centerline, axis=0), axis=1)
         self._cl_cum = np.concatenate([[0.0], np.cumsum(seg)])
-        cl_seg = float(self._cl_cum[-1])
-        self._max_s_ins = max(0.0, cl_seg - float(self._base_arc[-1]) - 1e-3)
+        self._update_insert_limit()
         self._twist = 0.0
         self._initialized = True
 
@@ -721,6 +764,7 @@ class NewtonEngine:
             "max_insert_s_m": self._max_s_ins,
             "free_len_m": self._free_len,
             "max_slack_m": self._max_slack,
+            "insertion_margin_m": self._insertion_margin,
             "sheath_bodies": self._sheath_bodies,
             "contact_ke": self._contact_ke,
             "guidewire": self._guidewire_diagnostics(),
@@ -924,7 +968,7 @@ class NewtonEngine:
             tip_arclen = float(min(_nearest_arclen(self._centerline, self._cl_cum, tip), self._path.total_len))
         else:
             tip_arclen = float(min(self._insert_s + self._base_arc[-1], self._path.total_len))
-        done = bool(self._insert_s >= self._max_s_ins - 1e-9)
+        done = _insertion_complete(self._insert_s, self._max_s_ins)
         return RawPose(
             tip_position=[float(v) for v in tip],
             tip_direction=[float(v) for v in direction],

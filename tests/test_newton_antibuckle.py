@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 
 from services.physics.base import PlannedPath
-from services.physics.newton_engine import NewtonEngine, _feed_budget
+from services.physics.newton_engine import NewtonEngine, _feed_budget, _insertion_complete
 
 
 def _straight_path(total_len: float = 0.3, n: int = 61) -> PlannedPath:
@@ -36,6 +36,44 @@ def engine(monkeypatch) -> NewtonEngine:
     monkeypatch.delenv("CATHSIM_NEWTON_SHEATH_BODIES", raising=False)
     monkeypatch.delenv("CATHSIM_NEWTON_MAX_SLACK", raising=False)
     return NewtonEngine(path=_straight_path())
+
+
+def test_zero_insertion_budget_is_not_completion():
+    assert _insertion_complete(0.0, 0.0) is False
+    assert _insertion_complete(0.5, 1.0) is False
+    assert _insertion_complete(1.0, 1.0) is True
+
+
+def test_constructor_params_override_newton_env(monkeypatch):
+    monkeypatch.setenv("CATHSIM_NEWTON_ROD_LENGTH", "0.06")
+    monkeypatch.setenv("CATHSIM_NEWTON_FREE_LEN", "0.03")
+    monkeypatch.setenv("CATHSIM_NEWTON_MAX_SLACK", "0.012")
+    monkeypatch.setenv("CATHSIM_NEWTON_INSERTION_MARGIN", "0.001")
+
+    tuned = NewtonEngine(
+        path=_straight_path(),
+        rod_length=0.012,
+        free_len=0.006,
+        max_slack=0.006,
+        insertion_margin=0.0,
+    )
+
+    assert tuned._rod_length == pytest.approx(0.012)
+    assert tuned._free_len == pytest.approx(0.006)
+    assert tuned._max_slack == pytest.approx(0.006)
+    assert tuned._insertion_margin == pytest.approx(0.0)
+
+
+def test_insert_limit_uses_configurable_margin(engine):
+    engine._cl_cum = np.asarray([0.0, 0.030])
+    engine._base_arc = np.asarray([0.0, 0.003, 0.006])
+    engine._insert_s = 1.0
+    engine._insertion_margin = 0.00025
+
+    engine._update_insert_limit()
+
+    assert engine._max_s_ins == pytest.approx(0.02375)
+    assert engine._insert_s == pytest.approx(0.02375)
 
 
 class TestFeedBudget:
