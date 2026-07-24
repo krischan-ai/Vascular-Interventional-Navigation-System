@@ -36,22 +36,28 @@ signal wheel_zoom(steps: int, screen_pos: Vector2)
 signal autopilot_off
 
 @export var send_interval: float = 0.05  ## seconds (~20 Hz)
+@export var push_scale: float = 0.35
+@export var rotate_scale: float = 0.25
 
 var _accum: float = 0.0
 var _left_held: bool = false
 var _mid_held: bool = false
+var _control_enabled: bool = false
 
 
 func _input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		if event.physical_keycode == KEY_R:
-			reset_requested.emit()
+			if _control_enabled:
+				reset_requested.emit()
 		elif event.physical_keycode == KEY_C:
 			view_cycle.emit()
 		elif event.physical_keycode == KEY_M:
-			model_cycle.emit()
+			if _control_enabled:
+				model_cycle.emit()
 		elif event.physical_keycode == KEY_B:
-			branch_cycle.emit()
+			if _control_enabled:
+				branch_cycle.emit()
 		elif event.physical_keycode == KEY_X:
 			pane_swap.emit()
 		elif event.physical_keycode == KEY_ESCAPE:
@@ -84,19 +90,33 @@ func _process(delta: float) -> void:
 	if _accum < send_interval:
 		return
 	_accum = 0.0
+	if not _control_enabled:
+		input_state.emit(0.0, 0.0)
+		return
 
 	var push := 0.0
 	if Input.is_physical_key_pressed(KEY_W):
-		push += 1.0
+		push += push_scale
 	if Input.is_physical_key_pressed(KEY_S):
-		push -= 1.0
+		push -= push_scale
 
 	var rotate := 0.0
 	if Input.is_physical_key_pressed(KEY_D):
-		rotate += 1.0
+		rotate += rotate_scale
 	if Input.is_physical_key_pressed(KEY_A):
-		rotate -= 1.0
+		rotate -= rotate_scale
 
 	input_state.emit(push, rotate)
 	if push != 0.0 or rotate != 0.0:
 		control.emit(push, rotate)
+
+
+func set_control_enabled(enabled: bool) -> void:
+	_control_enabled = enabled
+	if not enabled:
+		input_state.emit(0.0, 0.0)
+
+
+func set_control_profile(new_push_scale: float, new_rotate_scale: float) -> void:
+	push_scale = clampf(absf(new_push_scale), 0.0, 1.0)
+	rotate_scale = clampf(absf(new_rotate_scale), 0.0, 1.0)

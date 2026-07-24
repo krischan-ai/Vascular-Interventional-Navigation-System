@@ -40,6 +40,9 @@ class TestWebSocketHandlerUnit:
         assert MessageType.STATE_UPDATE.value == "state_update"
         assert MessageType.PING.value == "ping"
         assert MessageType.PONG.value == "pong"
+        assert MessageType.EMERGENCY_STOP.value == "emergency_stop"
+        assert MessageType.RESUME.value == "resume"
+        assert MessageType.CONTROL_REJECTED.value == "control_rejected"
 
     def test_control_data_validation(self):
         from services.websocket_handler import ControlData
@@ -134,6 +137,8 @@ class TestWebSocketHandlerUnit:
             path_progress=0.25,
             path_deviation=0.001,
             remaining_distance=0.75,
+            path_total_distance=1.0,
+            path_travelled_distance=0.25,
             vessel_radius=0.004,
             eta_seconds=3.0,
             risk_score=0.2,
@@ -152,12 +157,24 @@ class TestWebSocketHandlerUnit:
 
         assert batch["fidelity_mode"] == "physics"
         assert batch["path"]["remaining_distance"] == 0.75
+        assert batch["path"]["total_distance"] == 1.0
+        assert batch["path"]["travelled_distance"] == 0.25
         assert batch["path"]["vessel_radius"] == 0.004
         assert batch["path"]["eta_seconds"] == 3.0
         assert batch["safety"]["risk_score"] == 0.2
         assert batch["safety"]["risk_regions"] == []
-        assert batch["schema_version"] == "navigation_visual_v2"
+        assert batch["schema_version"] == "navigation_visual_v3"
         assert isinstance(batch["timestamp_ms"], int)
+        # v3 canonical fields use the same data.<field> path as state_update.
+        assert batch["contact_force"] == 0.12
+        assert batch["wall_distance"] == 0.0012
+        assert batch["path_progress"] == 0.25
+        assert batch["remaining_distance"] == 0.75
+        assert batch["path_total_distance"] == 1.0
+        assert batch["path_travelled_distance"] == 0.25
+        assert batch["vessel_radius"] == 0.004
+        assert batch["eta_seconds"] == 3.0
+        assert batch["safety_status"] == "DANGER_WARNING"
         mechanics = batch["safety"]["guidewire_mechanics"]
         assert mechanics["source"] == "navigation_engine.risk_assessor"
         assert mechanics["tip_force_n"] == 0.12
@@ -167,6 +184,13 @@ class TestWebSocketHandlerUnit:
         assert mechanics["safety_level"] == "warning"
         assert mechanics["stop_required"] is False
         assert mechanics["reason_codes"] == ["WALL_DISTANCE_WARNING"]
+        assert batch["safety"]["status"] == "DANGER_WARNING"
+        assert batch["safety"]["safety_level"] == "warning"
+        assert batch["safety"]["reason_codes"] == ["WALL_DISTANCE_WARNING"]
+        assert batch["safety"]["source"] == "navigation_engine.risk_assessor"
+        assert batch["safety"]["timestamp_ms"] == batch["timestamp_ms"]
+        assert batch["safety"]["data_status"] == "fresh"
+        assert batch["safety"]["contact_force"] == 0.12
         assert batch["engine"] == "DummyBackend"
         assert batch["diagnostics"]["drive"] == "force"
         assert batch["diagnostics"]["slack_m"] == 0.002
@@ -228,6 +252,39 @@ class TestWebSocketHandlerUnit:
         assert batch["risk"]["normal_poking_score_text"] == "\u672a\u77e5"
         assert batch["risk"]["tangential_slide_score"] is None
         assert batch["risk"]["tangential_slide_score_text"] == "\u672a\u77e5"
+
+    def test_state_update_v3_contract_preserves_unknown_optional_values(self):
+        from services.navigation_engine import NavigationState
+        from services.session_manager import SessionManager
+        from services.websocket_handler import WebSocketHandler
+
+        state = NavigationState(
+            contact_force=0.08,
+            wall_distance=0.002,
+            path_progress=0.4,
+            vessel_radius=None,
+            eta_seconds=None,
+            latency_ms=None,
+            safety_status="SAFE_NAV",
+            risk_score=0.1,
+        )
+        payload = WebSocketHandler(SessionManager())._state_to_dict(
+            state, timestamp_ms=1718534400033
+        )
+
+        assert payload["schema_version"] == "navigation_visual_v3"
+        assert payload["timestamp_ms"] == 1718534400033
+        assert payload["data_status"] == "fresh"
+        assert payload["source"] == "navigation_engine"
+        assert payload["contact_force"] == 0.08
+        assert payload["path_progress"] == 0.4
+        assert payload["vessel_radius"] is None
+        assert payload["eta_seconds"] is None
+        assert payload["latency_ms"] is None
+        assert payload["safety"]["status"] == "SAFE_NAV"
+        assert payload["safety"]["safety_level"] == "safe"
+        assert payload["safety"]["source"] == "navigation_engine.risk_assessor"
+        assert payload["safety"]["timestamp_ms"] == 1718534400033
 
     def test_state_batch_visual_level_uses_real_risk_level_before_stop(self):
         from services.navigation_engine import NavigationState
@@ -545,6 +602,75 @@ class TestWebSocketIntegration:
             assert "tip_position" in state_response["data"]
             assert state_response["data"]["episode_length"] == 1
 
+    def test_websocket_emergency_stop_rejects_control_until_confirmed_resume(self):
+        """The backend owns the stop latch; resume never restores intent implicitly."""
+        client = TestClient(app)
+
+        with client.websocket_connect("/ws/session") as websocket:
+            websocket.send_json({
+                "type": "session_start",
+                "data": {"phantom": "low_tort", "target": "bca"},
+            })
+            started = _recv(websocket)
+            assert started["type"] == "session_started"
+            assert started["data"]["control_state"]["emergency_stop_latched"] is False
+
+            websocket.send_json({
+                "type": "emergency_stop",
+                "data": {"reason": "operator_test"},
+            })
+            stopped = _recv(websocket)
+            assert stopped["type"] == "emergency_stop_confirmed"
+            assert stopped["data"]["status"] == "latched"
+            assert stopped["data"]["control_state"]["emergency_stop_latched"] is True
+
+            websocket.send_json({
+                "type": "control",
+                "data": {"delta_push": 0.5, "delta_rotate": 0.0},
+            })
+            rejected = _recv(websocket)
+            assert rejected["type"] == "control_rejected"
+            assert rejected["data"]["reason"] == "EMERGENCY_STOP_LATCHED"
+
+            websocket.send_json({"type": "resume", "data": {}})
+            resumed = _recv(websocket)
+            assert resumed["type"] == "resume_confirmed"
+            assert resumed["data"]["status"] == "resumed"
+            assert resumed["data"]["control_state"]["emergency_stop_latched"] is False
+
+            time.sleep(0.04)
+            websocket.send_json({
+                "type": "control",
+                "data": {"delta_push": 0.2, "delta_rotate": 0.0},
+            })
+            state = _recv(websocket)
+            assert state["type"] == "state_update"
+            assert state["data"]["control_state"]["emergency_stop_latched"] is False
+
+    def test_websocket_control_config_returns_effective_protections(self):
+        client = TestClient(app)
+
+        with client.websocket_connect("/ws/session") as websocket:
+            websocket.send_json({
+                "type": "session_start",
+                "data": {"phantom": "low_tort", "target": "bca"},
+            })
+            _recv(websocket)
+            websocket.send_json({
+                "type": "control_config",
+                "data": {
+                    "torque_limit_enabled": False,
+                    "withdrawal_protection_enabled": True,
+                    "auto_stop_push_enabled": True,
+                },
+            })
+            response = _recv(websocket)
+            assert response["type"] == "control_config"
+            protections = response["data"]["control_state"]["protections"]
+            assert protections["torque_limit_enabled"] is False
+            assert protections["withdrawal_protection_enabled"] is True
+            assert protections["auto_stop_push_enabled"] is True
+
     def test_websocket_session_reset(self):
         """Test reset command via WebSocket."""
         client = TestClient(app)
@@ -675,15 +801,24 @@ class TestWebSocketIntegration:
 
             data = response["data"]
             for key in (
+                "schema_version",
+                "timestamp_ms",
+                "data_status",
+                "source",
                 "tip_quaternion",
+                "contact_force",
                 "wall_distance",
                 "curvature",
                 "path_progress",
                 "path_deviation",
                 "safety_status",
                 "risk_score",
+                "safety",
             ):
                 assert key in data
+            assert data["schema_version"] == "navigation_visual_v3"
+            assert data["safety"]["status"] == data["safety_status"]
+            assert data["safety"]["contact_force"] == data["contact_force"]
             assert data["safety_status"] in (
                 "SAFE_NAV",
                 "DANGER_WARNING",
@@ -716,6 +851,21 @@ class TestWebSocketIntegration:
             assert response["type"] == "state_batch"
             data = response["data"]
             assert set(data) >= {"tip", "bodies", "path", "safety", "episode"}
+            assert data["schema_version"] == "navigation_visual_v3"
+            for key in (
+                "contact_force",
+                "wall_distance",
+                "curvature",
+                "velocity",
+                "path_progress",
+                "path_deviation",
+                "remaining_distance",
+                "path_total_distance",
+                "path_travelled_distance",
+                "safety_status",
+                "risk_score",
+            ):
+                assert key in data
             assert "position" in data["tip"]
             assert isinstance(data["bodies"], list)
             assert len(data["bodies"]) > 0
@@ -726,6 +876,10 @@ class TestWebSocketIntegration:
                 "DANGER_WARNING",
                 "COLLISION_STOP",
             )
+            assert data["safety"]["status"] == data["safety_status"]
+            assert data["safety"]["contact_force"] == data["contact_force"]
+            assert isinstance(data["safety"]["reason_codes"], list)
+            assert data["safety"]["source"] == "navigation_engine.risk_assessor"
             assert data["episode"]["length"] == 1
 
 

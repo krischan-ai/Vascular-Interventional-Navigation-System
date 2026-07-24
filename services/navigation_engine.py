@@ -83,6 +83,8 @@ class NavigationState:
     path_progress: float = 0.0
     path_deviation: float = 0.0
     remaining_distance: float = 0.0
+    path_total_distance: float | None = None
+    path_travelled_distance: float | None = None
     vessel_radius: float | None = None
     eta_seconds: float | None = None
     latency_ms: float | None = None
@@ -111,6 +113,8 @@ class NavigationState:
             "path_progress": self.path_progress,
             "path_deviation": self.path_deviation,
             "remaining_distance": self.remaining_distance,
+            "path_total_distance": self.path_total_distance,
+            "path_travelled_distance": self.path_travelled_distance,
             "vessel_radius": self.vessel_radius,
             "eta_seconds": self.eta_seconds,
             "latency_ms": self.latency_ms,
@@ -758,6 +762,16 @@ class NavigationEngine:
         path_progress = float(np.clip(path_progress, 0.0, 1.0))
 
         remaining_distance = self._compute_remaining_distance(path_progress)
+        path_total_distance = (
+            float(self._path.total_len)
+            if self._path is not None and self._path.total_len > 0.0
+            else None
+        )
+        path_travelled_distance = (
+            float(path_progress * path_total_distance)
+            if path_total_distance is not None
+            else None
+        )
         vessel_radius = self._compute_vessel_radius(path_progress)
         eta_seconds = self._compute_eta_seconds(remaining_distance, velocity)
 
@@ -779,6 +793,8 @@ class NavigationEngine:
             path_progress=float(path_progress),
             path_deviation=float(path_deviation),
             remaining_distance=float(remaining_distance),
+            path_total_distance=path_total_distance,
+            path_travelled_distance=path_travelled_distance,
             vessel_radius=vessel_radius,
             eta_seconds=eta_seconds,
             fidelity_mode=self.fidelity_mode,

@@ -48,6 +48,8 @@ class TestNavigationStateDataclass:
         assert "done" in result
         assert "reward" in result
         assert result["remaining_distance"] == 0.0
+        assert result["path_total_distance"] is None
+        assert result["path_travelled_distance"] is None
         assert result["vessel_radius"] is None
         assert result["fidelity_mode"] == "physics"
         assert result["risk_regions"] == []
@@ -84,6 +86,104 @@ class TestSessionManagerUnit:
         sessions = manager.list_sessions()
         assert sessions == []
 
+    def test_emergency_stop_latches_and_rejects_nonzero_control(self, monkeypatch):
+        from services.navigation_engine import NavigationState
+        import services.session_manager as session_manager_module
+
+        class DummyEngine:
+            def __init__(self, **_kwargs):
+                self.intent_calls = []
+                self.step_calls = []
+                self.params = {"jtip_deg": 35.0}
+
+            def reset(self):
+                return NavigationState()
+
+            def step(self, push, rotate):
+                self.step_calls.append((push, rotate))
+                return NavigationState(episode_length=len(self.step_calls))
+
+            def set_shape_intent(self, intent, active=True):
+                self.intent_calls.append((intent, active))
+                return {"active": active, "mode": "off" if not active else "centerline"}
+
+            def set_engine_params(self, params):
+                self.params.update(params)
+                return dict(self.params)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(session_manager_module, "NavigationEngine", DummyEngine)
+        manager = session_manager_module.SessionManager()
+        session_id, initial = manager.create_session()
+        engine = manager.get_session(session_id)
+
+        stopped = manager.emergency_stop(session_id)
+        assert stopped["emergency_stop_latched"] is True
+        assert engine.intent_calls[-1] == (None, False)
+
+        with pytest.raises(session_manager_module.ControlRejectedError):
+            manager.step(session_id, 0.4, 0.0)
+        assert engine.step_calls == []
+        assert manager.step(session_id, 0.0, 0.0) is initial
+        assert engine.step_calls == []
+
+        resumed = manager.resume(session_id)
+        assert resumed["emergency_stop_latched"] is False
+        state = manager.step(session_id, 0.4, 0.0)
+        assert state.episode_length == 1
+        assert engine.step_calls == [(0.4, 0.0)]
+
+    def test_control_protections_apply_backend_effective_values(self, monkeypatch):
+        from services.navigation_engine import NavigationState
+        import services.session_manager as session_manager_module
+
+        class DummyEngine:
+            def __init__(self, **_kwargs):
+                self.step_calls = []
+                self.params = {"jtip_deg": 42.0}
+
+            def reset(self):
+                return NavigationState(path_progress=0.0, path_travelled_distance=0.0)
+
+            def step(self, push, rotate):
+                self.step_calls.append((push, rotate))
+                return NavigationState(path_progress=0.1, path_travelled_distance=0.01)
+
+            def set_shape_intent(self, _intent, active=True):
+                return {"active": active}
+
+            def set_engine_params(self, params):
+                self.params.update(params)
+                return dict(self.params)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(session_manager_module, "NavigationEngine", DummyEngine)
+        manager = session_manager_module.SessionManager()
+        session_id, _ = manager.create_session()
+        engine = manager.get_session(session_id)
+
+        manager.step(session_id, -0.3, 1.0)
+        assert engine.step_calls[-1] == (0.0, 0.5)
+        applied = manager.get_control_state(session_id)["last_applied_control"]
+        assert set(applied["protection_reasons"]) == {
+            "WITHDRAWAL_AT_ENTRY_BLOCKED",
+            "TORQUE_COMMAND_LIMITED",
+        }
+
+        disabled = manager.update_control_config(
+            session_id,
+            jtip_assist_enabled=False,
+            torque_limit_enabled=False,
+        )
+        assert disabled["protections"]["jtip_assist_enabled"] is False
+        assert engine.params["jtip_deg"] == 0.0
+        manager.update_control_config(session_id, jtip_assist_enabled=True)
+        assert engine.params["jtip_deg"] == 42.0
+
 
 class TestSchemas:
     """Test Pydantic schemas."""
@@ -119,6 +219,8 @@ class TestSchemas:
 
         state = NavigationState(
             remaining_distance=0.12,
+            path_total_distance=0.2,
+            path_travelled_distance=0.08,
             vessel_radius=0.003,
             eta_seconds=2.5,
             fidelity_mode="guided",
@@ -128,6 +230,8 @@ class TestSchemas:
         response = _state_to_response(state)
 
         assert response.remaining_distance == 0.12
+        assert response.path_total_distance == 0.2
+        assert response.path_travelled_distance == 0.08
         assert response.vessel_radius == 0.003
         assert response.eta_seconds == 2.5
         assert response.fidelity_mode == "guided"
@@ -160,6 +264,8 @@ class TestNavigationStateExtended:
             "path_progress",
             "path_deviation",
             "remaining_distance",
+            "path_total_distance",
+            "path_travelled_distance",
             "vessel_radius",
             "eta_seconds",
             "latency_ms",
@@ -377,6 +483,9 @@ class TestGuidedMode:
         assert state.tip_position == pytest.approx([0.0, 0.0, 0.0])
         assert state.path_progress == 0.0
         assert state.path_deviation == 0.0
+        assert state.path_total_distance == pytest.approx(3.0)
+        assert state.path_travelled_distance == pytest.approx(0.0)
+        assert state.remaining_distance == pytest.approx(3.0)
         assert state.safety_status == "STANDBY"
         assert engine.entry_pose["position"] == pytest.approx([0.0, 0.0, 0.0])
 
@@ -393,6 +502,9 @@ class TestGuidedMode:
                 break
         assert state.done is True
         assert state.path_progress == pytest.approx(1.0)
+        assert state.path_total_distance == pytest.approx(3.0)
+        assert state.path_travelled_distance == pytest.approx(3.0)
+        assert state.remaining_distance == pytest.approx(0.0)
         # Reached the planned target (last path point).
         assert state.tip_position == pytest.approx([3.0, 0.0, 0.0])
 

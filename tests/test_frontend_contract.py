@@ -16,7 +16,7 @@ def test_hud_uses_backend_dashboard_fields():
 
     for field in ("remaining_distance", "vessel_radius", "eta_seconds", "latency_ms"):
         assert field in hud
-        assert field in main
+    assert "var metrics := batch.duplicate(true)" in main
 
     assert "last_latency_ms" in ws
     assert "@export var n_substeps: int = 8" in ws
@@ -146,3 +146,108 @@ def test_hud_uses_backend_dashboard_fields():
     assert '.lerp(Color(0.05, 0.95, 1.0), 0.38)' in guidewire
     assert "func set_landmarks_visible" in entry
     assert "_landmarks_visible: bool = false" in entry
+
+
+def test_frontend_emergency_control_and_reconnect_contract():
+    ws = (ROOT / "godot_client/scripts/websocket_client.gd").read_text(encoding="utf-8")
+    main = (ROOT / "godot_client/scripts/main_controller.gd").read_text(encoding="utf-8")
+    hud = (ROOT / "godot_client/scripts/hud_controller.gd").read_text(encoding="utf-8")
+    inputs = (ROOT / "godot_client/scripts/input_handler.gd").read_text(encoding="utf-8")
+    dial = (ROOT / "godot_client/scripts/ui/intent_dial.gd").read_text(encoding="utf-8")
+
+    # The frontend requests a backend latch; it never substitutes a one-shot zero
+    # control frame or displays success before the acknowledgement.
+    assert 'func send_emergency_stop(reason: String = "operator") -> bool' in ws
+    assert 'func send_resume() -> bool' in ws
+    assert '"emergency_stop_confirmed"' in ws
+    assert '"resume_confirmed"' in ws
+    assert "func controls_blocked() -> bool" in ws
+    emergency_handler = main.split("func _on_emergency_stop() -> void:", 1)[1].split(
+        "\nfunc ", 1
+    )[0]
+    assert "send_control(0.0, 0.0)" not in emergency_handler
+    assert "func confirm_emergency_stop" in hud
+    assert "急停已由后端锁存" in hud
+
+    # Keyboard, pointer navigation, automatic ticks and mouse buttons share the
+    # same emergency/session gate.
+    assert "var _controls_blocked: bool = true" in main
+    assert "if _controls_blocked or not _autopilot_active" in main
+    assert "if _controls_blocked or _path_waypoints.is_empty()" in main
+    assert "func set_control_enabled(enabled: bool)" in inputs
+    assert "if not _control_enabled" in inputs
+
+    # A closed WebSocket gets a fresh peer, a recreated session, and old-session
+    # frames are filtered by their server session id.
+    assert "func _connect_socket(is_retry: bool)" in ws
+    assert "_socket = WebSocketPeer.new()" in ws
+    assert "func _message_matches_session" in ws
+    assert '"reconnecting"' in ws
+    assert '"session_failed"' in ws
+
+    # Presets scale both button and keyboard commands; up/down directions differ.
+    assert "push += push_scale" in inputs
+    assert "push -= push_scale" in inputs
+    assert "rotate += rotate_scale" in inputs
+    assert "rotate -= rotate_scale" in inputs
+    assert "_send_push.bind(1.0)" in hud
+    assert "_send_push.bind(-1.0)" in hud
+    assert "_send_rotate.bind(1.0)" in hud
+    assert "_send_rotate.bind(-1.0)" in hud
+    assert "func _set_speed_preset" in hud
+    assert "func _apply_angle_step" in hud
+    assert "func set_input(push: float, rotate: float)" in dial
+    assert "control_profile_changed.connect(_input.set_control_profile)" in main
+
+    # All four protection switches now round-trip through a backend config ack.
+    assert "func send_control_config(config: Dictionary)" in ws
+    assert "protection_changed" in hud
+    assert "control_config_received" in ws
+    for key in (
+        "jtip_assist_enabled",
+        "torque_limit_enabled",
+        "withdrawal_protection_enabled",
+        "auto_stop_push_enabled",
+    ):
+        assert key in hud
+
+
+def test_endoscope_pane_uses_live_vessel_world_and_real_controls():
+    main = (ROOT / "godot_client/scripts/main_controller.gd").read_text(encoding="utf-8")
+    fallback = (ROOT / "godot_client/scripts/ui/endoscope_fallback.gd").read_text(
+        encoding="utf-8"
+    )
+    overlay = (ROOT / "godot_client/scripts/ui/endoscope_overlay.gd").read_text(
+        encoding="utf-8"
+    )
+    icons = (ROOT / "godot_client/scripts/ui/pane_tool_icon.gd").read_text(
+        encoding="utf-8"
+    )
+
+    # The scope owns an isolated 3D world and renders the real vessel copy from
+    # the guidewire's live front pose instead of a decorative 2D tunnel.
+    assert "_scope_viewport.own_world_3d = true" in main
+    assert "_scope_viewport.add_child(_scope_vessel)" in main
+    assert "_rig.endoscope_cam.global_transform" in main
+    assert "interpolate_with" in main
+    assert "func _scope_frame_ready() -> bool" in main
+    assert "_connection_ready" in main
+    assert "_scope_has_tip" in main
+    assert '"● LIVE" if ready else "○ WAIT"' in main
+    assert "00:12:36" not in main
+
+    # Illumination and wall appearance are part of the render path, while the
+    # bottom controls change real frontend state or produce an output file.
+    assert "FastNoiseLite.new()" in main
+    assert "_scope_vessel_mat" in main
+    assert "func _on_scope_record_toggled" in main
+    assert "func _on_scope_brightness_changed" in main
+    assert "func _capture_scope_frame" in main
+    assert "func _toggle_scope_fullscreen" in main
+
+    assert "等待腔镜数据" in fallback
+    assert "range(28)" not in fallback
+    assert "draw_colored_polygon" not in fallback
+    assert "class_name EndoscopeOverlay" in overlay
+    for kind in ("refresh", "record", "brightness", "capture", "fullscreen"):
+        assert f'"{kind}"' in icons

@@ -16,6 +16,10 @@ from typing import Any
 from services.navigation_engine import NavigationEngine, NavigationState
 
 
+class ControlRejectedError(RuntimeError):
+    """Raised when a session safety latch rejects a control command."""
+
+
 @dataclass
 class SessionInfo:
     """Metadata about a navigation session."""
@@ -27,6 +31,19 @@ class SessionInfo:
     last_active: datetime
     episode_count: int = 0
     total_steps: int = 0
+    emergency_stop_latched: bool = False
+    emergency_stop_reason: str | None = None
+    emergency_stop_at: datetime | None = None
+    jtip_assist_enabled: bool = True
+    jtip_assist_supported: bool = False
+    jtip_angle_deg: float = 35.0
+    torque_limit_enabled: bool = True
+    torque_command_limit: float = 0.5
+    withdrawal_protection_enabled: bool = True
+    auto_stop_push_enabled: bool = True
+    last_state: NavigationState | None = field(default=None, repr=False)
+    last_applied_control: dict[str, Any] = field(default_factory=dict)
+    rejected_control_count: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -38,6 +55,25 @@ class SessionInfo:
             "last_active": self.last_active.isoformat(),
             "episode_count": self.episode_count,
             "total_steps": self.total_steps,
+            "control_state": {
+                "emergency_stop_latched": self.emergency_stop_latched,
+                "emergency_stop_reason": self.emergency_stop_reason,
+                "emergency_stop_at": (
+                    self.emergency_stop_at.isoformat()
+                    if self.emergency_stop_at is not None
+                    else None
+                ),
+                "protections": {
+                    "jtip_assist_enabled": self.jtip_assist_enabled,
+                    "jtip_assist_supported": self.jtip_assist_supported,
+                    "torque_limit_enabled": self.torque_limit_enabled,
+                    "torque_command_limit": self.torque_command_limit,
+                    "withdrawal_protection_enabled": self.withdrawal_protection_enabled,
+                    "auto_stop_push_enabled": self.auto_stop_push_enabled,
+                },
+                "last_applied_control": dict(self.last_applied_control),
+                "rejected_control_count": self.rejected_control_count,
+            },
         }
 
 
@@ -130,6 +166,13 @@ class SessionManager:
             initial_state = engine.reset()
 
             self._sessions[session_id] = engine
+            deform_params = engine.set_engine_params({})
+            jtip_supported = deform_params is not None and "jtip_deg" in deform_params
+            jtip_angle = (
+                float(deform_params["jtip_deg"])
+                if jtip_supported and float(deform_params["jtip_deg"]) > 0.0
+                else 35.0
+            )
             self._session_info[session_id] = SessionInfo(
                 session_id=session_id,
                 phantom=phantom,
@@ -138,6 +181,14 @@ class SessionManager:
                 last_active=datetime.now(),
                 episode_count=1,
                 total_steps=0,
+                jtip_assist_enabled=(
+                    bool(float(deform_params["jtip_deg"]) > 0.0)
+                    if jtip_supported
+                    else False
+                ),
+                jtip_assist_supported=jtip_supported,
+                jtip_angle_deg=jtip_angle,
+                last_state=initial_state,
             )
 
             return session_id, initial_state
@@ -177,15 +228,189 @@ class SessionManager:
         Returns:
             NavigationState after the step
         """
-        engine = self.get_session(session_id)
-        state = engine.step(delta_push, delta_rotate)
-
         with self._lock:
+            if session_id not in self._sessions:
+                raise KeyError(f"Session not found: {session_id}")
+
             info = self._session_info[session_id]
+            info.last_active = datetime.now()
+            if info.emergency_stop_latched:
+                if abs(delta_push) > 1e-9 or abs(delta_rotate) > 1e-9:
+                    info.rejected_control_count += 1
+                    raise ControlRejectedError(
+                        "Emergency stop is latched; non-zero control was rejected"
+                    )
+                # A neutral frame must never advance an already armed ShapeIntent.
+                # Return the most recently confirmed state without stepping physics.
+                if info.last_state is None:
+                    raise ControlRejectedError("Emergency stop is latched")
+                info.last_applied_control = {
+                    "requested_push": float(delta_push),
+                    "requested_rotate": float(delta_rotate),
+                    "applied_push": 0.0,
+                    "applied_rotate": 0.0,
+                    "protection_reasons": ["EMERGENCY_STOP_LATCHED"],
+                }
+                return info.last_state
+
+            applied_push = float(delta_push)
+            applied_rotate = float(delta_rotate)
+            protection_reasons: list[str] = []
+
+            if (
+                info.torque_limit_enabled
+                and abs(applied_rotate) > info.torque_command_limit
+            ):
+                applied_rotate = max(
+                    -info.torque_command_limit,
+                    min(info.torque_command_limit, applied_rotate),
+                )
+                protection_reasons.append("TORQUE_COMMAND_LIMITED")
+
+            previous = info.last_state
+            if info.withdrawal_protection_enabled and applied_push < 0.0 and previous:
+                travelled = previous.path_travelled_distance
+                at_entry = (
+                    travelled is not None and travelled <= 1e-9
+                ) or (travelled is None and previous.path_progress <= 0.0)
+                if at_entry:
+                    applied_push = 0.0
+                    protection_reasons.append("WITHDRAWAL_AT_ENTRY_BLOCKED")
+
+            if (
+                info.auto_stop_push_enabled
+                and applied_push > 0.0
+                and previous is not None
+                and previous.safety_status == "COLLISION_STOP"
+            ):
+                applied_push = 0.0
+                protection_reasons.append("SAFETY_STOP_PUSH_BLOCKED")
+
+            engine = self._sessions[session_id]
+            state = engine.step(applied_push, applied_rotate)
             info.total_steps += 1
             info.last_active = datetime.now()
+            info.last_state = state
+            info.last_applied_control = {
+                "requested_push": float(delta_push),
+                "requested_rotate": float(delta_rotate),
+                "applied_push": applied_push,
+                "applied_rotate": applied_rotate,
+                "protection_reasons": protection_reasons,
+            }
 
-        return state
+            return state
+
+    def emergency_stop(self, session_id: str, reason: str = "operator") -> dict[str, Any]:
+        """Latch a session stop and disengage any active ShapeIntent controller."""
+        with self._lock:
+            if session_id not in self._sessions:
+                raise KeyError(f"Session not found: {session_id}")
+            info = self._session_info[session_id]
+            engine = self._sessions[session_id]
+            engine.set_shape_intent(None, active=False)
+            info.emergency_stop_latched = True
+            info.emergency_stop_reason = reason
+            info.emergency_stop_at = datetime.now()
+            info.last_active = datetime.now()
+            info.last_applied_control = {
+                "requested_push": 0.0,
+                "requested_rotate": 0.0,
+                "applied_push": 0.0,
+                "applied_rotate": 0.0,
+                "protection_reasons": ["EMERGENCY_STOP_LATCHED"],
+            }
+            return self._control_state_locked(info)
+
+    def resume(self, session_id: str) -> dict[str, Any]:
+        """Release a latched stop without re-engaging automatic navigation."""
+        with self._lock:
+            if session_id not in self._sessions:
+                raise KeyError(f"Session not found: {session_id}")
+            info = self._session_info[session_id]
+            info.emergency_stop_latched = False
+            info.emergency_stop_reason = None
+            info.emergency_stop_at = None
+            info.last_active = datetime.now()
+            info.last_applied_control = {
+                "requested_push": 0.0,
+                "requested_rotate": 0.0,
+                "applied_push": 0.0,
+                "applied_rotate": 0.0,
+                "protection_reasons": [],
+            }
+            return self._control_state_locked(info)
+
+    def is_emergency_stopped(self, session_id: str) -> bool:
+        with self._lock:
+            if session_id not in self._session_info:
+                raise KeyError(f"Session not found: {session_id}")
+            return self._session_info[session_id].emergency_stop_latched
+
+    def get_control_state(self, session_id: str) -> dict[str, Any]:
+        with self._lock:
+            if session_id not in self._session_info:
+                raise KeyError(f"Session not found: {session_id}")
+            return self._control_state_locked(self._session_info[session_id])
+
+    def update_control_config(
+        self,
+        session_id: str,
+        *,
+        jtip_assist_enabled: bool | None = None,
+        torque_limit_enabled: bool | None = None,
+        withdrawal_protection_enabled: bool | None = None,
+        auto_stop_push_enabled: bool | None = None,
+    ) -> dict[str, Any]:
+        """Apply operator protection toggles and return their effective state."""
+        with self._lock:
+            if session_id not in self._sessions:
+                raise KeyError(f"Session not found: {session_id}")
+            info = self._session_info[session_id]
+            engine = self._sessions[session_id]
+
+            if torque_limit_enabled is not None:
+                info.torque_limit_enabled = bool(torque_limit_enabled)
+            if withdrawal_protection_enabled is not None:
+                info.withdrawal_protection_enabled = bool(
+                    withdrawal_protection_enabled
+                )
+            if auto_stop_push_enabled is not None:
+                info.auto_stop_push_enabled = bool(auto_stop_push_enabled)
+
+            if jtip_assist_enabled is not None and info.jtip_assist_supported:
+                effective = engine.set_engine_params({}) or {}
+                current_angle = float(effective.get("jtip_deg", 0.0))
+                if current_angle > 0.0:
+                    info.jtip_angle_deg = current_angle
+                target_angle = info.jtip_angle_deg if jtip_assist_enabled else 0.0
+                applied = engine.set_engine_params({"jtip_deg": target_angle}) or {}
+                info.jtip_assist_enabled = float(applied.get("jtip_deg", 0.0)) > 0.0
+
+            info.last_active = datetime.now()
+            return self._control_state_locked(info)
+
+    @staticmethod
+    def _control_state_locked(info: SessionInfo) -> dict[str, Any]:
+        return {
+            "emergency_stop_latched": info.emergency_stop_latched,
+            "emergency_stop_reason": info.emergency_stop_reason,
+            "emergency_stop_at": (
+                info.emergency_stop_at.isoformat()
+                if info.emergency_stop_at is not None
+                else None
+            ),
+            "protections": {
+                "jtip_assist_enabled": info.jtip_assist_enabled,
+                "jtip_assist_supported": info.jtip_assist_supported,
+                "torque_limit_enabled": info.torque_limit_enabled,
+                "torque_command_limit": info.torque_command_limit,
+                "withdrawal_protection_enabled": info.withdrawal_protection_enabled,
+                "auto_stop_push_enabled": info.auto_stop_push_enabled,
+            },
+            "last_applied_control": dict(info.last_applied_control),
+            "rejected_control_count": info.rejected_control_count,
+        }
 
     def reset_session(self, session_id: str) -> NavigationState:
         """Reset a session's environment.
@@ -203,6 +428,7 @@ class SessionManager:
             info = self._session_info[session_id]
             info.episode_count += 1
             info.last_active = datetime.now()
+            info.last_state = state
 
         return state
 
