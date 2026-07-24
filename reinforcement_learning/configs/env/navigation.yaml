@@ -1,0 +1,9 @@
+env:
+  id: cathsim/NavigationGym-v0
+  phantom: aorta_tree
+  route_target: endpoint_0
+  action_mode: shape_intent
+  physics_hz: 60
+  action_repeat: 4
+  max_policy_steps: 400
+  success_progress: 0.98

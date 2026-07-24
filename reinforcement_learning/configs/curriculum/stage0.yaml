@@ -1,0 +1,6 @@
+curriculum:
+  stage: 0
+  routes: [straight, single_bend]
+  promotion_success_rate: 0.90
+  rollback_success_rate: 0.70
+  evaluation_seeds: [0, 1, 2, 3, 4]

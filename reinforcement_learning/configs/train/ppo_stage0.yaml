@@ -1,0 +1,7 @@
+algorithm: PPO
+policy: MultiInputPolicy
+total_timesteps: 100000
+n_envs: 1
+seed: 0
+eval_episodes: 5
+checkpoint_fraction: 0.10

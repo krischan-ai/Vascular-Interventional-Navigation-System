@@ -1,0 +1,9 @@
+reward:
+  progress: 2.0
+  alignment: 0.2
+  deviation: -0.3
+  contact: -0.5
+  risk: -0.3
+  smoothness: -0.05
+  success: 10.0
+  failure: -10.0

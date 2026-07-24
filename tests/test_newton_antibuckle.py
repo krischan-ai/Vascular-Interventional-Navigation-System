@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 
 from services.physics.base import PlannedPath
-from services.physics.newton_engine import NewtonEngine, _feed_budget
+from services.physics.newton_engine import NewtonEngine, _feed_budget, _insertion_complete
 
 
 def _straight_path(total_len: float = 0.3, n: int = 61) -> PlannedPath:
@@ -36,6 +36,12 @@ def engine(monkeypatch) -> NewtonEngine:
     monkeypatch.delenv("CATHSIM_NEWTON_SHEATH_BODIES", raising=False)
     monkeypatch.delenv("CATHSIM_NEWTON_MAX_SLACK", raising=False)
     return NewtonEngine(path=_straight_path())
+
+
+def test_zero_insertion_budget_is_not_completion():
+    assert _insertion_complete(0.0, 0.0) is False
+    assert _insertion_complete(0.5, 1.0) is False
+    assert _insertion_complete(1.0, 1.0) is True
 
 
 class TestFeedBudget:
@@ -229,3 +235,69 @@ class TestSegmentedStiffness:
 
         assert "bend_profile" in params
         assert params["bend_profile"][-1] == pytest.approx(engine._tip_bend)
+
+class TestDeviceDiagnostics:
+    """Segmented guidewire and support metadata exposed by Newton diagnostics."""
+
+    def test_diagnostics_exposes_guidewire_profile_and_support(self, engine):
+        diag = engine.diagnostics()
+
+        assert diag["guidewire"]["profile_name"] == "soft_j_tip_training_wire"
+        assert diag["guidewire"]["tip_shape"] == "j_tip"
+        assert diag["guidewire"]["current_tip_segment"] == "pre_shaped_soft_tip"
+        assert diag["guidewire"]["segment_count"] == 6
+        assert diag["support"]["effective_support_type"] == "microcatheter"
+        assert diag["support"]["free_wire_length_mm"] == pytest.approx(30.0)
+
+    def test_profile_supplies_newton_jtip_default(self, engine):
+        assert engine._jtip_deg == pytest.approx(engine.guidewire_profile.tip_shape.precurve_angle_deg)
+        assert engine._jtip_bodies >= 1
+
+    def test_body_metadata_marks_segments_and_support_state(self, engine):
+        engine._alpha = np.asarray([1.0, 1.0, 0.0, 0.0])
+
+        root = engine._body_segment_metadata(0, 4)
+        tip = engine._body_segment_metadata(3, 4)
+
+        assert root["material_segment"] == "proximal_control"
+        assert root["support_state"] == "inside_support_tube"
+        assert tip["material_segment"] == "atraumatic_cap"
+        assert tip["support_state"] == "distal_free_span"
+
+
+class TestGuidewireRiskMetrics:
+    """Geometry-derived guidewire risk metrics without importing Newton."""
+
+    def test_tip_wall_metrics_detects_tangential_wall_slide(self, engine):
+        xyz = np.asarray([
+            [0.0022, 0.0, 0.045],
+            [0.0022, 0.0, 0.050],
+        ])
+
+        metrics = engine._tip_wall_metrics(xyz, 0.05)
+
+        assert metrics["normal_poking_score"] < 0.2
+        assert metrics["tangential_slide_score"] > 0.35
+        assert metrics["wall_slide_state"] == "WALL_SLIDE_OK"
+
+    def test_tip_wall_metrics_detects_normal_poking(self, engine):
+        xyz = np.asarray([
+            [0.0015, 0.0, 0.050],
+            [0.0026, 0.0, 0.050],
+        ])
+
+        metrics = engine._tip_wall_metrics(xyz, 0.05)
+
+        assert metrics["normal_poking_score"] >= 0.7
+        assert metrics["wall_slide_state"] == "TIP_POKING_WARNING"
+
+    def test_torsion_lag_tracks_jtip_plane_response(self, engine):
+        engine._twist = np.deg2rad(90.0)
+        engine._jtip_bodies = 2
+        xyz = np.asarray([
+            [0.0, 0.0, 0.042],
+            [0.0, 0.0, 0.045],
+            [-0.002, 0.0, 0.048],
+        ])
+
+        assert engine._torsion_lag_deg(xyz, 0.048) == pytest.approx(0.0, abs=1e-6)

@@ -1,0 +1,619 @@
+"""NewtonEngine demo backend for front-end physics validation.
+
+This is intentionally a small, opt-in demo engine.  It reuses the D0/D1 Newton
+recipe (``add_rod`` + ``SolverVBD`` + thick-wall SDF tube), builds the tube along
+the active planned path, and implements the existing ``PhysicsEngine`` seam so
+Godot can render real Newton guidewire bodies through the current WebSocket
+protocol.
+"""
+
+from __future__ import annotations
+
+import math
+import os
+from typing import Sequence
+
+import numpy as np
+
+from services.physics.base import MAX_WALL_DISTANCE, PlannedPath, RawPose, quat_from_direction
+
+
+def _parallel_frames(points: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    tang = np.zeros_like(points)
+    tang[:-1] = points[1:] - points[:-1]
+    tang[-1] = tang[-2]
+    tang /= np.linalg.norm(tang, axis=1, keepdims=True) + 1e-12
+
+    ref = np.array([0.0, 1.0, 0.0]) if abs(tang[0, 1]) < 0.9 else np.array([1.0, 0.0, 0.0])
+    nrm = np.zeros_like(points)
+    nrm[0] = np.cross(tang[0], ref)
+    nrm[0] /= np.linalg.norm(nrm[0])
+    for i in range(1, len(points)):
+        v = nrm[i - 1] - tang[i] * float(np.dot(nrm[i - 1], tang[i]))
+        nv = float(np.linalg.norm(v))
+        nrm[i] = v / nv if nv > 1e-9 else nrm[i - 1]
+    return tang, nrm, np.cross(tang, nrm)
+
+
+def _resample(points: np.ndarray, ds: float) -> np.ndarray:
+    points = _dedupe_consecutive(points)
+    seg = np.linalg.norm(np.diff(points, axis=0), axis=1)
+    cum = np.concatenate([[0.0], np.cumsum(seg)])
+    samples = np.arange(0.0, cum[-1], ds)
+    if len(samples) == 0 or samples[-1] < cum[-1]:
+        samples = np.append(samples, cum[-1])
+    out = []
+    for s in samples:
+        idx = int(np.searchsorted(cum, s))
+        if idx <= 0:
+            out.append(points[0])
+        elif idx >= len(points):
+            out.append(points[-1])
+        else:
+            t = (s - cum[idx - 1]) / max(cum[idx] - cum[idx - 1], 1e-12)
+            out.append(points[idx - 1] + t * (points[idx] - points[idx - 1]))
+    return _dedupe_consecutive(np.asarray(out, dtype=np.float64))
+
+
+def _dedupe_consecutive(points: np.ndarray, eps: float = 1e-9) -> np.ndarray:
+    """Drop consecutive duplicate points that break Newton cable frames."""
+    pts = np.asarray(points, dtype=np.float64)
+    if len(pts) <= 1:
+        return pts
+    keep = [pts[0]]
+    for point in pts[1:]:
+        if float(np.linalg.norm(point - keep[-1])) > eps:
+            keep.append(point)
+    return np.asarray(keep, dtype=np.float64)
+
+
+def _point_at_s(points: np.ndarray, s: float) -> np.ndarray:
+    seg = np.linalg.norm(np.diff(points, axis=0), axis=1)
+    cum = np.concatenate([[0.0], np.cumsum(seg)])
+    s = float(np.clip(s, 0.0, cum[-1]))
+    idx = int(np.searchsorted(cum, s))
+    if idx <= 0:
+        return points[0].copy()
+    if idx >= len(points):
+        return points[-1].copy()
+    t = (s - cum[idx - 1]) / max(cum[idx] - cum[idx - 1], 1e-12)
+    return points[idx - 1] + t * (points[idx] - points[idx - 1])
+
+
+def _sample_along(points: np.ndarray, length: float, seg_len: float) -> np.ndarray:
+    seg = np.linalg.norm(np.diff(points, axis=0), axis=1)
+    total = float(np.sum(seg))
+    length = float(np.clip(length, 0.0, total))
+    samples = np.arange(0.0, length + 0.5 * seg_len, seg_len)
+    if len(samples) == 0 or samples[-1] < length:
+        samples = np.append(samples, length)
+    samples = np.clip(samples, 0.0, length)
+    return _dedupe_consecutive(np.asarray([_point_at_s(points, s) for s in samples]))
+
+
+def _point_to_polyline_distance(point: np.ndarray, points: np.ndarray) -> float:
+    a = points[:-1]
+    b = points[1:]
+    ab = b - a
+    ap = point - a
+    denom = np.einsum("ij,ij->i", ab, ab) + 1e-18
+    t = np.clip(np.einsum("ij,ij->i", ap, ab) / denom, 0.0, 1.0)
+    proj = a + t[:, None] * ab
+    return float(np.sqrt(np.min(np.sum((point - proj) ** 2, axis=1))))
+
+
+def _nearest_arclen(points: np.ndarray, cum: np.ndarray, xyz: np.ndarray) -> float:
+    """Arc length of the nearest point on the polyline to ``xyz`` (scalar)."""
+    a, b = points[:-1], points[1:]
+    ab = b - a
+    denom = np.einsum("ij,ij->i", ab, ab) + 1e-18
+    ap = xyz - a
+    t = np.clip(np.einsum("ij,ij->i", ap, ab) / denom, 0.0, 1.0)
+    proj = a + t[:, None] * ab
+    d2 = np.sum((xyz - proj) ** 2, axis=1)
+    i = int(np.argmin(d2))
+    return float(cum[i] + t[i] * (cum[i + 1] - cum[i]))
+
+
+def _quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Hamilton product of two [x, y, z, w] quaternions."""
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return np.array([
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+        aw * bw - ax * bx - ay * by - az * bz,
+    ])
+
+
+def _quat_axis_angle(axis: np.ndarray, angle: float) -> np.ndarray:
+    """[x, y, z, w] quaternion of a rotation ``angle`` (rad) about unit-ish ``axis``."""
+    n = float(np.linalg.norm(axis))
+    if n < 1e-12:
+        return np.array([0.0, 0.0, 0.0, 1.0])
+    u = axis / n
+    s = math.sin(angle / 2.0)
+    return np.array([u[0] * s, u[1] * s, u[2] * s, math.cos(angle / 2.0)])
+
+
+class NewtonEngine:
+    """Opt-in Newton physics demo backend.
+
+    Enable with ``CATHSIM_PHYSICS_ENGINE=newton_demo``.  The engine is aimed at a
+    front-end proof of life: short guidewire segment, real centerline, SDF wall,
+    current WebSocket rendering.  It is not the final optimized Newton backend.
+    """
+
+    def __init__(
+        self,
+        *,
+        path: PlannedPath | None,
+        n_substeps: int | None = None,
+        entry_point: Sequence[float] | None = None,
+        entry_direction: Sequence[float] | None = None,
+        **_unused,
+    ) -> None:
+        if path is None or path.total_len <= 0.0:
+            raise ValueError("Newton demo engine requires a planned path/centerline")
+
+        self._path = path
+        self._entry_point = entry_point
+        self._entry_direction = entry_direction
+        self._control_dt = float(os.environ.get("CATHSIM_NEWTON_CONTROL_DT", "0.0333333333"))
+        # D3 (doc/08) validated config: variable-radius tube wall + graded soft-anchor
+        # drive at 6 substeps x 2 VBD iterations ~= 60fps, contained on aorta_tree.
+        self._substeps = int(os.environ.get("CATHSIM_NEWTON_SUBSTEPS", str(n_substeps or 6)))
+        self._iterations = int(os.environ.get("CATHSIM_NEWTON_ITERS", "2"))
+        self._sim_dt = self._control_dt / self._substeps
+        self._rod_length = float(os.environ.get("CATHSIM_NEWTON_ROD_LENGTH", "0.06"))
+        self._rod_radius = float(os.environ.get("CATHSIM_NEWTON_ROD_RADIUS", "0.0004"))
+        self._rod_seg_len = float(os.environ.get("CATHSIM_NEWTON_SEG_LEN", "0.003"))
+        # Fallback lumen radius when a route ships no per-point radii.
+        self._lumen_radius = float(os.environ.get("CATHSIM_NEWTON_LUMEN_RADIUS", "0.0025"))
+        self._min_radius = float(os.environ.get("CATHSIM_NEWTON_MIN_RADIUS", "0.0015"))
+        self._wall_thickness = float(os.environ.get("CATHSIM_NEWTON_WALL_THICKNESS", "0.006"))
+        self._sdf_voxel = float(os.environ.get("CATHSIM_NEWTON_SDF_VOXEL", "0.0005"))
+        self._lumen_band = float(os.environ.get("CATHSIM_NEWTON_LUMEN_BAND", "0.015"))
+        self._push_speed = float(os.environ.get("CATHSIM_NEWTON_PUSH_SPEED", "0.05"))
+        # D4 drive model: "force" = real force transmission (proximal sheath fed,
+        # distal free physics, push carried by the cable stretch constraint,
+        # `rotate` twists the J-tip); "anchor" = D3 graded soft-anchor fallback.
+        self._drive = os.environ.get("CATHSIM_NEWTON_DRIVE", "force").strip().lower()
+        _force = self._drive == "force"
+        # Conforming shaft (bend~20) hugs vessel curvature and stays contained;
+        # a stiff shaft (bend~50, the D3 anchor default) chords through outer walls
+        # on sharp bends. See spikes/D4_RESULTS.md.
+        self._bend = float(os.environ.get("CATHSIM_NEWTON_BEND", "20.0" if _force else "50.0"))
+        # Force drive needs a near-inextensible rod so the push transmits instead
+        # of the stretch constraint being shocked into 80-240% strain (D4a finding).
+        self._stretch = float(os.environ.get("CATHSIM_NEWTON_STRETCH", "3.0e7" if _force else "1.0e5"))
+        self._contact_ke = float(os.environ.get("CATHSIM_NEWTON_CONTACT_KE", "3000000" if _force else "1000000"))
+        # 软头硬身: distal `soft_tip` joints ramp from `bend` down to `tip_bend`.
+        self._soft_tip = int(os.environ.get("CATHSIM_NEWTON_SOFT_TIP", "10" if _force else "0"))
+        self._tip_bend = float(os.environ.get("CATHSIM_NEWTON_TIP_BEND", "2.0"))
+        # Force drive: proximal bodies glued to the centered route (the sheath/
+        # introducer + already-traversed wire) and fed forward; everything distal
+        # is free physics. sheath_bodies=1 => only the driven root is glued.
+        self._sheath_bodies = int(os.environ.get("CATHSIM_NEWTON_SHEATH_BODIES", "1"))
+        # Torsion steering: rotate input integrated (rad/s at rotate=1) into a
+        # twist applied to the root anchor frame about the local tangent (D4c).
+        self._rotate_speed = float(os.environ.get("CATHSIM_NEWTON_ROTATE_SPEED", "3.0"))
+        # Pre-bent J-tip rest shape: the distal `jtip_bodies` segments curve off
+        # the tangent by `jtip_deg` total, giving `rotate` real branch-selecting
+        # authority at sharp bends (incidental curvature alone is too weak). 0 deg
+        # = straight tip (behaves like the pre-J-tip build).
+        self._jtip_deg = float(os.environ.get("CATHSIM_NEWTON_JTIP_DEG", "35.0" if _force else "0.0"))
+        self._jtip_bodies = int(os.environ.get("CATHSIM_NEWTON_JTIP_BODIES", "3"))
+        self._settle_steps = int(os.environ.get("CATHSIM_NEWTON_SETTLE_STEPS", "20"))
+        self._twist = 0.0
+        # Graded soft-anchor (anchor mode): proximal glued, distal ramp of
+        # `free_span` bodies kept soft (tip_alpha) so the tip deflects.
+        self._free_span = int(os.environ.get("CATHSIM_NEWTON_FREE_SPAN", "6"))
+        self._tip_alpha = float(os.environ.get("CATHSIM_NEWTON_TIP_ALPHA", "0.3"))
+
+        self._centerline = _resample(self._path.points, 0.002)
+        self._radii = self._centerline_radii()
+        self._insert_s = 0.0
+        self._initialized = False
+        self._model = None
+        self._solver = None
+        self._s0 = None
+        self._s1 = None
+        self._control = None
+        self._contacts = None
+        self._rod_bodies: list[int] = []
+        self._alpha = None
+        self._base_arc = None
+        self._max_s_ins = 0.0
+
+    def set_path(self, path: PlannedPath | None) -> None:
+        """Replace the planned path and force the Newton scene to be rebuilt.
+
+        Newton builds collision SDF and rod bodies from the centerline during
+        initialization. A route switch changes that geometry, so merely swapping
+        ``_path`` is not enough; the cached model/state must be discarded.
+        """
+        if path is None or path.total_len <= 0.0:
+            raise ValueError("Newton demo engine requires a planned path/centerline")
+        self.close()
+        self._path = path
+        self._centerline = _resample(self._path.points, 0.002)
+        self._radii = self._centerline_radii()
+        self._insert_s = 0.0
+
+    def _centerline_radii(self) -> np.ndarray:
+        """Per-node lumen radius along the resampled centerline.
+
+        Uses the route's real per-point radii (VMTK inscribed radius) when the
+        path carries them, interpolated by arc length onto ``self._centerline``;
+        falls back to a constant lumen radius otherwise.
+        """
+        n = len(self._centerline)
+        path_radii = getattr(self._path, "radii", None)
+        if path_radii is None:
+            return np.full(n, self._lumen_radius, dtype=np.float64)
+        seg = np.linalg.norm(np.diff(self._centerline, axis=0), axis=1)
+        cl_cum = np.concatenate([[0.0], np.cumsum(seg)])
+        radii = np.interp(cl_cum, self._path.cumlen, np.asarray(path_radii, dtype=np.float64))
+        return np.maximum(radii, self._min_radius)
+
+    @property
+    def is_initialized(self) -> bool:
+        return self._initialized
+
+    @property
+    def control_timestep(self) -> float:
+        return self._control_dt
+
+    def _build_tube_mesh(self, newton):
+        """Variable-radius thick-wall annulus tube swept along the centerline.
+
+        The lumen (inner ring at the local radius) is the free/positive SDF region
+        and the wall (out to +wall_thickness) is solid; a single lumen surface would
+        instead make the lumen solid and expel the rod (doc/08 D2 finding). The
+        ``lumen_band`` must cover the widest local radius or a wide lumen's tip
+        tunnels the SDF's central no-band region.
+        """
+        _, nrm, binm = _parallel_frames(self._centerline)
+        angles = np.linspace(0.0, 2.0 * math.pi, 24, endpoint=False)
+        verts = []
+        for p, r, n, b in zip(self._centerline, self._radii, nrm, binm):
+            for radius in (r, r + self._wall_thickness):
+                for a in angles:
+                    d = math.cos(a) * n + math.sin(a) * b
+                    verts.append(p + radius * d)
+
+        k_around = len(angles)
+        stride = 2 * k_around
+
+        def vi(i: int, ring: int, k: int) -> int:
+            return i * stride + ring * k_around + (k % k_around)
+
+        tris: list[int] = []
+        for i in range(len(self._centerline) - 1):
+            for k in range(k_around):
+                kn = (k + 1) % k_around
+                tris += [vi(i, 0, k), vi(i + 1, 0, k), vi(i + 1, 0, kn)]
+                tris += [vi(i, 0, k), vi(i + 1, 0, kn), vi(i, 0, kn)]
+                tris += [vi(i, 1, k), vi(i, 1, kn), vi(i + 1, 1, kn)]
+                tris += [vi(i, 1, k), vi(i + 1, 1, kn), vi(i + 1, 1, k)]
+        for i, flip in ((0, False), (len(self._centerline) - 1, True)):
+            for k in range(k_around):
+                kn = (k + 1) % k_around
+                a, b, c, d = vi(i, 0, k), vi(i, 0, kn), vi(i, 1, kn), vi(i, 1, k)
+                tris += [a, c, b, a, d, c] if flip else [a, b, c, a, c, d]
+
+        mesh = newton.Mesh(np.asarray(verts, dtype=np.float32), np.asarray(tris, dtype=np.int32), is_solid=True)
+        mesh.build_sdf(
+            target_voxel_size=self._sdf_voxel,
+            narrow_band_range=(-self._wall_thickness, self._lumen_band),
+        )
+        return mesh
+
+    def _apply_jtip(self, rod_pts: np.ndarray) -> np.ndarray:
+        """Curve the distal `jtip_bodies` segments into a pre-bent J-tip rest shape.
+
+        The straight-sampled tip is rebuilt as an arc bending `jtip_deg` off the
+        local tangent (in an arbitrary plane -- torsion rotates it at runtime).
+        The baked curvature is held by bend stiffness, so `rotate` twisting the
+        shaft reorients this J to select branches (D4c steering authority).
+        """
+        if self._jtip_deg <= 0.0 or self._jtip_bodies <= 0 or len(rod_pts) < self._jtip_bodies + 2:
+            return rod_pts
+        pts = np.asarray(rod_pts, dtype=np.float64).copy()
+        n = len(pts)
+        k = min(self._jtip_bodies, n - 2)
+        i0 = n - 1 - k  # last shaft node = base of the J
+        tang = pts[i0] - pts[i0 - 1]
+        tn = float(np.linalg.norm(tang))
+        tang = tang / tn if tn > 1e-9 else np.array([0.0, 0.0, 1.0])
+        ref = np.array([0.0, 1.0, 0.0]) if abs(tang[1]) < 0.9 else np.array([1.0, 0.0, 0.0])
+        axis = np.cross(tang, ref)
+        axis /= np.linalg.norm(axis) + 1e-12
+        dphi = math.radians(self._jtip_deg) / k
+        c, s = math.cos(dphi), math.sin(dphi)
+        d = tang.copy()
+        p = pts[i0].copy()
+        for j in range(1, k + 1):
+            # Rodrigues rotation of the heading about `axis` by dphi per segment.
+            d = d * c + np.cross(axis, d) * s + axis * float(np.dot(axis, d)) * (1.0 - c)
+            p = p + self._rod_seg_len * d
+            pts[i0 + j] = p
+        return pts
+
+    def _apply_joint_stiffness(self) -> None:
+        """Write stretch/bend/soft-tip into ``joint_target_ke`` (no rebuild).
+
+        Cable-joint DOF layout is ``[stretch, bend]`` per joint: even indices are
+        stretch, odd are bend. The distal ``soft_tip`` joints ramp from ``bend``
+        down to ``tip_bend`` (软头硬身). Reusable so the live parameter panel can
+        re-tune shaft/tip stiffness on the fly.
+        """
+        if self._model is None or not self._rod_bodies:
+            return
+        ke = self._model.joint_target_ke.numpy()
+        nj = len(self._rod_bodies) - 1
+        for j in range(nj):
+            ke[2 * j] = self._stretch
+            ke[2 * j + 1] = self._bend
+        for i in range(min(self._soft_tip, nj)):
+            j = nj - 1 - i
+            frac = (i + 1) / self._soft_tip
+            ke[2 * j + 1] = self._bend * (1.0 - frac) + self._tip_bend * frac
+        self._model.joint_target_ke.assign(ke)
+
+    # Deformation params that live-update (no scene rebuild) vs. those baked into
+    # the model geometry at build time (rebuild required).
+    _LIVE_PARAMS = ("bend", "tip_bend", "soft_tip", "stretch", "push_speed", "rotate_speed")
+    _REBUILD_PARAMS = ("jtip_deg", "jtip_bodies", "contact_ke", "wall_thickness", "rod_length")
+
+    def set_deform_params(self, **params) -> dict:
+        """Live-tune guidewire deformation for the interactive parameter panel.
+
+        Accepts any of: ``bend``, ``tip_bend``, ``soft_tip``, ``stretch``,
+        ``push_speed``, ``rotate_speed`` (applied immediately via joint stiffness /
+        drive gains), and ``jtip_deg``/``jtip_bodies``/``contact_ke`` (geometry,
+        which force a scene rebuild on the next step). Returns the effective
+        deform-param state so the client HUD can reflect clamps.
+        """
+        rebuild = False
+        for key, val in params.items():
+            attr = f"_{key}"
+            if not hasattr(self, attr):
+                continue
+            setattr(self, attr, type(getattr(self, attr))(val))
+            if key in self._REBUILD_PARAMS:
+                rebuild = True
+        if rebuild:
+            # Geometry changed: drop the cached model so the next step rebuilds
+            # it (and re-settles) with the new shape, preserving insertion depth.
+            self.close()
+        elif self._initialized:
+            self._apply_joint_stiffness()
+        return self.deform_params
+
+    @property
+    def deform_params(self) -> dict:
+        return {
+            "bend": self._bend,
+            "tip_bend": self._tip_bend,
+            "soft_tip": self._soft_tip,
+            "stretch": self._stretch,
+            "push_speed": self._push_speed,
+            "rotate_speed": self._rotate_speed,
+            "jtip_deg": self._jtip_deg,
+            "jtip_bodies": self._jtip_bodies,
+            "contact_ke": self._contact_ke,
+        }
+
+    def _ensure_initialized(self) -> None:
+        if self._initialized:
+            return
+
+        import newton
+        import warp as wp
+
+        wp.init()
+        builder = newton.ModelBuilder()
+        builder.rigid_gap = 0.0
+        builder.default_shape_cfg.density = 1800.0
+        builder.default_shape_cfg.ke = self._contact_ke
+        builder.default_shape_cfg.kd = 1.0
+        builder.default_shape_cfg.mu = 0.2
+
+        wall_cfg = newton.ModelBuilder.ShapeConfig(ke=self._contact_ke, kd=1.0, mu=0.2)
+        builder.add_shape_mesh(body=-1, mesh=self._build_tube_mesh(newton), cfg=wall_cfg, label="vessel")
+
+        rod_pts = _sample_along(self._centerline, self._rod_length, self._rod_seg_len)
+        rod_pts = self._apply_jtip(rod_pts)
+        quats = newton.utils.create_parallel_transport_cable_quaternions([wp.vec3(*p) for p in rod_pts], twist_total=0.0)
+        rod_bodies, rod_joints = builder.add_rod(
+            positions=[wp.vec3(*p) for p in rod_pts],
+            quaternions=quats,
+            radius=self._rod_radius,
+            stretch_stiffness=self._stretch,
+            stretch_damping=0.0,
+            bend_stiffness=self._bend,
+            bend_damping=1.0e-1,
+            label="guidewire",
+        )
+
+        root = rod_bodies[0]
+        builder.body_mass[root] = 0.0
+        builder.body_inv_mass[root] = 0.0
+        builder.body_inertia[root] = wp.mat33(0.0)
+        builder.body_inv_inertia[root] = wp.mat33(0.0)
+
+        builder.color(balance_colors=False)
+        self._model = builder.finalize()
+        self._model.set_gravity((0.0, 0.0, 0.0))
+        self._rod_bodies = list(rod_bodies)
+        self._apply_joint_stiffness()
+
+        self._solver = newton.solvers.SolverVBD(self._model, iterations=self._iterations)
+        self._s0 = self._model.state()
+        self._s1 = self._model.state()
+        self._control = self._model.control()
+        self._contacts = self._model.contacts()
+
+        nb = len(self._rod_bodies)
+        self._base_arc = np.arange(nb) * self._rod_seg_len
+        # Glue mask: which bodies are kinematically fed along the centered route.
+        # force (D4): only the proximal `sheath_bodies` glued, rest free physics.
+        # anchor (D3): proximal glued + distal soft ramp.
+        alpha = np.zeros(nb)
+        if self._drive == "force":
+            alpha[: max(1, self._sheath_bodies)] = 1.0
+        else:
+            alpha[:] = 1.0
+            for i in range(self._free_span):
+                j = nb - 1 - i
+                if j >= 0:
+                    frac = (i + 1) / self._free_span
+                    alpha[j] = max(self._tip_alpha, 1.0 - frac * (1.0 - self._tip_alpha))
+        self._alpha = alpha
+        seg = np.linalg.norm(np.diff(self._centerline, axis=0), axis=1)
+        self._cl_cum = np.concatenate([[0.0], np.cumsum(seg)])
+        cl_seg = float(self._cl_cum[-1])
+        self._max_s_ins = max(0.0, cl_seg - float(self._base_arc[-1]) - 1e-3)
+        self._twist = 0.0
+        self._initialized = True
+
+        # Let the free rod relax into the lumen before driving (force mode), so
+        # the first push does not fight an off-lumen initial pose.
+        if self._drive == "force" and self._settle_steps > 0:
+            self._settle(self._settle_steps)
+
+    def reset(self) -> RawPose:
+        self._initialized = False
+        self._insert_s = 0.0
+        self._twist = 0.0
+        self._ensure_initialized()
+        return self._raw_pose()
+
+    def _tangent_at_s(self, s: float) -> np.ndarray:
+        eps = max(self._rod_seg_len, 1e-4)
+        d = _point_at_s(self._centerline, s + eps) - _point_at_s(self._centerline, s - eps)
+        n = float(np.linalg.norm(d))
+        return d / n if n > 1e-9 else np.array([0.0, 0.0, 1.0])
+
+    def _apply_glue(self, s_ins: float) -> None:
+        """Feed the glued (sheath/proximal) bodies along the centered route and, in
+        force mode, apply the accumulated torsion to the driven root frame.
+
+        Force mode glues only the proximal ``sheath_bodies`` and twists the root
+        anchor about the local tangent (D4c steering); the free distal length and
+        tip emerge from physics. Anchor mode glues per the graded soft-anchor mask.
+        """
+        rb = np.asarray(self._rod_bodies)
+        glued = self._alpha > 0.0
+        if not glued.any():
+            return
+        alpha = self._alpha[glued][:, None]
+        target = np.asarray([_point_at_s(self._centerline, a + s_ins) for a in self._base_arc[glued]])
+        bq = self._s0.body_q.numpy()
+        bq[rb[glued], :3] = (1.0 - alpha) * bq[rb[glued], :3] + alpha * target
+        if self._drive == "force":
+            tangent = self._tangent_at_s(s_ins)
+            base_q = np.asarray(quat_from_direction(tangent), dtype=np.float64)
+            root_q = _quat_mul(_quat_axis_angle(tangent, self._twist), base_q)
+            bq[rb[0], 3:7] = root_q
+        self._s0.body_q.assign(bq)
+
+    def _settle(self, steps: int) -> None:
+        for _ in range(steps):
+            self._s0.clear_forces()
+            self._model.collide(self._s0, self._contacts)
+            self._solver.step(self._s0, self._s1, self._control, self._contacts, self._sim_dt)
+            self._s0, self._s1 = self._s1, self._s0
+            self._apply_glue(self._insert_s)
+
+    def step(self, push: float, rotate: float) -> RawPose:
+        self._ensure_initialized()
+
+        direction = 1.0 if push >= 0.0 else -1.0
+        prev_insert_s = self._insert_s
+        self._insert_s = float(
+            np.clip(
+                self._insert_s + direction * abs(push) * self._push_speed * self._control_dt,
+                0.0,
+                self._max_s_ins,
+            )
+        )
+        # Integrate rotate into the root-frame twist that steers the J-tip (D4c).
+        self._twist += float(rotate) * self._rotate_speed * self._control_dt
+
+        for sub in range(self._substeps):
+            frac = (sub + 1) / self._substeps
+            s_ins = prev_insert_s + (self._insert_s - prev_insert_s) * frac
+            self._s0.clear_forces()
+            self._model.collide(self._s0, self._contacts)
+            self._solver.step(self._s0, self._s1, self._control, self._contacts, self._sim_dt)
+            self._s0, self._s1 = self._s1, self._s0
+            self._apply_glue(s_ins)
+
+        return self._raw_pose()
+
+    def _raw_pose(self) -> RawPose:
+        q = self._s0.body_q.numpy()
+        xyz = q[self._rod_bodies, :3]
+        tip = xyz[-1]
+        prev = xyz[-2] if len(xyz) > 1 else xyz[-1] - np.array([0.0, 0.0, 1.0])
+        direction = tip - prev
+        norm = float(np.linalg.norm(direction))
+        if norm <= 1e-9:
+            direction = np.array([0.0, 0.0, 1.0])
+        else:
+            direction = direction / norm
+
+        # Per-body breach against the local (variable) lumen radius via nearest node.
+        d2 = np.sum((xyz[:, None, :] - self._centerline[None, :, :]) ** 2, axis=2)
+        nearest = np.argmin(d2, axis=1)
+        dist = np.sqrt(d2[np.arange(len(xyz)), nearest])
+        breach = dist + self._rod_radius - self._radii[nearest]  # >0 => poking past wall
+        worst = float(breach.max())
+        wall_distance = max(0.0, -worst)
+        contact_force = max(0.0, worst) * self._contact_ke
+        target = self._path.points[-1].tolist()
+        # Anchor mode rides the route so inserted arc is exact; force mode lets the
+        # tip physically lag, so report its actual projected arc along the route.
+        if self._drive == "force":
+            tip_arclen = float(min(_nearest_arclen(self._centerline, self._cl_cum, tip), self._path.total_len))
+        else:
+            tip_arclen = float(min(self._insert_s + self._base_arc[-1], self._path.total_len))
+        done = bool(self._insert_s >= self._max_s_ins - 1e-9)
+        return RawPose(
+            tip_position=[float(v) for v in tip],
+            tip_direction=[float(v) for v in direction],
+            tip_quaternion=quat_from_direction(direction),
+            contact_force=float(contact_force),
+            wall_distance=float(min(wall_distance, MAX_WALL_DISTANCE)),
+            target_position=[float(v) for v in target],
+            joint_positions=[],
+            joint_velocities=[],
+            reward=0.0,
+            done=done,
+            arclen=tip_arclen,
+        )
+
+    def render_bodies(self) -> list[dict[str, list[float]]]:
+        if not self._initialized:
+            return []
+        q = self._s0.body_q.numpy()
+        bodies = []
+        for body in self._rod_bodies:
+            pos = [float(v) for v in q[body, :3]]
+            quat = [float(v) for v in q[body, 3:7]]
+            bodies.append({"pos": pos, "quat": quat})
+        return bodies
+
+    def close(self) -> None:
+        self._model = None
+        self._solver = None
+        self._s0 = None
+        self._s1 = None
+        self._control = None
+        self._contacts = None
+        self._rod_bodies = []
+        self._initialized = False

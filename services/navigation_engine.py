@@ -194,6 +194,7 @@ class NavigationEngine:
         wire_length: float = 0.12,
         wall_lean: float = 0.0025,
         route_target: str | None = None,
+        newton_params: dict[str, Any] | None = None,
     ):
         """Initialize the navigation engine.
 
@@ -246,6 +247,10 @@ class NavigationEngine:
                        bends like a tensioned wire. 0 disables (centerline).
             route_target: Optional branch endpoint id for multi-route phantoms
                           that ship routes.json (e.g. ``aorta_tree``).
+            newton_params: Optional Newton backend calibration values, such as
+                          ``rod_length``, ``free_len``, ``max_slack`` and
+                          ``insertion_margin``. These replace ad-hoc process
+                          environment variables for training runs.
         """
         self.phantom = phantom
         self.target = target
@@ -276,6 +281,7 @@ class NavigationEngine:
         self._wire_length = float(wire_length)
         self._wall_lean = float(wall_lean)
         self._route_target = route_target
+        self._newton_params = dict(newton_params or {})
 
         self._episode_length = 0
         self._previous_tip_pos = None
@@ -347,6 +353,7 @@ class NavigationEngine:
             advance_per_step=self._advance_per_step,
             wall_lean=self._wall_lean,
             engine_mode=self._physics_engine,
+            newton_params=self._newton_params,
         )
 
     def _default_centerline_points(self) -> list[list[float]] | None:

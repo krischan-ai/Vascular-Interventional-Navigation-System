@@ -15,6 +15,16 @@ from typing import Sequence
 
 import numpy as np
 
+from services.devices import (
+    CoaxialSupportSystem,
+    GuidewireDesign,
+    GuidewireProfile,
+    ProcedureDesign,
+    default_guidewire_design,
+    default_procedure_design,
+    default_support_system,
+    design_from_profile,
+)
 from services.physics.base import MAX_WALL_DISTANCE, PlannedPath, RawPose, quat_from_direction
 
 
@@ -130,6 +140,16 @@ def _feed_budget(requested: float, slack: float, max_slack: float) -> float:
     return min(requested, max(0.0, max_slack - slack))
 
 
+def _insertion_complete(insert_s: float, max_insert_s: float, eps: float = 1e-9) -> bool:
+    """Whether a positive insertion budget has actually been exhausted.
+
+    Short routes can produce ``max_insert_s == 0`` when the simulated rod is
+    longer than the route. That is not a completed episode; route progress is
+    responsible for declaring success in that case.
+    """
+    return max_insert_s > eps and insert_s >= max_insert_s - eps
+
+
 def _quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """Hamilton product of two [x, y, z, w] quaternions."""
     ax, ay, az, aw = a
@@ -152,6 +172,11 @@ def _quat_axis_angle(axis: np.ndarray, angle: float) -> np.ndarray:
     return np.array([u[0] * s, u[1] * s, u[2] * s, math.cos(angle / 2.0)])
 
 
+def _wrap_degrees(angle: float) -> float:
+    """Wrap an angle to [-180, 180] degrees."""
+    return (float(angle) + 180.0) % 360.0 - 180.0
+
+
 class NewtonEngine:
     """Opt-in Newton physics demo backend.
 
@@ -167,6 +192,15 @@ class NewtonEngine:
         n_substeps: int | None = None,
         entry_point: Sequence[float] | None = None,
         entry_direction: Sequence[float] | None = None,
+        guidewire_profile: GuidewireProfile | None = None,
+        guidewire_design: GuidewireDesign | None = None,
+        procedure_design: ProcedureDesign | None = None,
+        support_system: CoaxialSupportSystem | None = None,
+        rod_length: float | None = None,
+        rod_seg_len: float | None = None,
+        free_len: float | None = None,
+        max_slack: float | None = None,
+        insertion_margin: float | None = None,
         **_unused,
     ) -> None:
         if path is None or path.total_len <= 0.0:
@@ -181,9 +215,29 @@ class NewtonEngine:
         self._substeps = int(os.environ.get("CATHSIM_NEWTON_SUBSTEPS", str(n_substeps or 6)))
         self._iterations = int(os.environ.get("CATHSIM_NEWTON_ITERS", "2"))
         self._sim_dt = self._control_dt / self._substeps
-        self._rod_length = float(os.environ.get("CATHSIM_NEWTON_ROD_LENGTH", "0.06"))
-        self._rod_radius = float(os.environ.get("CATHSIM_NEWTON_ROD_RADIUS", "0.0004"))
-        self._rod_seg_len = float(os.environ.get("CATHSIM_NEWTON_SEG_LEN", "0.003"))
+        self._rod_length = float(
+            rod_length if rod_length is not None else os.environ.get("CATHSIM_NEWTON_ROD_LENGTH", "0.06")
+        )
+        self._rod_seg_len = float(
+            rod_seg_len if rod_seg_len is not None else os.environ.get("CATHSIM_NEWTON_SEG_LEN", "0.003")
+        )
+        active_sim_length_mm = self._rod_length * 1000.0
+        if guidewire_design is not None:
+            self.guidewire_design = guidewire_design
+            self.guidewire_profile = guidewire_design.profile
+        elif guidewire_profile is not None:
+            self.guidewire_profile = guidewire_profile
+            self.guidewire_design = design_from_profile(guidewire_profile)
+        else:
+            self.guidewire_design = default_guidewire_design(
+                active_sim_length_mm=active_sim_length_mm
+            )
+            self.guidewire_profile = self.guidewire_design.profile
+        self.procedure_design = procedure_design or default_procedure_design()
+        self._rod_radius = float(os.environ.get(
+            "CATHSIM_NEWTON_ROD_RADIUS",
+            str(self._default_radius_m()),
+        ))
         # Fallback lumen radius when a route ships no per-point radii.
         self._lumen_radius = float(os.environ.get("CATHSIM_NEWTON_LUMEN_RADIUS", "0.0025"))
         self._min_radius = float(os.environ.get("CATHSIM_NEWTON_MIN_RADIUS", "0.0015"))
@@ -212,17 +266,33 @@ class NewtonEngine:
         # is free physics. sheath_bodies=-1 (default) resolves automatically so
         # only the distal ``free_len`` of wire is free -- a long unsupported
         # column buckles into loops under blocked push (doc/08 §9.1 sheath
-        # constraint / §28.9 抗屈曲). Explicit >0 forces that exact glue count
+        # constraint / §28.9 抗屈�?. Explicit >0 forces that exact glue count
         # (sheath_bodies=1 reproduces the original root-only D4 behavior).
         self._sheath_bodies = int(os.environ.get("CATHSIM_NEWTON_SHEATH_BODIES", "-1"))
         # Distal wire length (m) left free beyond the sheath in auto mode.
-        self._free_len = float(os.environ.get("CATHSIM_NEWTON_FREE_LEN", "0.03"))
+        self._free_len = float(
+            free_len if free_len is not None else os.environ.get("CATHSIM_NEWTON_FREE_LEN", "0.03")
+        )
+        self.support_system = support_system or default_support_system(
+            guidewire_tip_arclen_mm=self._rod_length * 1000.0,
+            free_wire_length_mm=self._free_len * 1000.0,
+        )
         # Prolapse guard (force mode): stop feeding wire when the tip stops
         # advancing. slack = fed arclen - actual tip arclen along the route; once
         # it exceeds max_slack the forward feed budget is exhausted and holding
         # W no longer piles wire into a buckle. Pull-back always allowed (it is
         # the recovery move). <=0 disables the guard.
-        self._max_slack = float(os.environ.get("CATHSIM_NEWTON_MAX_SLACK", "0.012"))
+        self._max_slack = float(
+            max_slack if max_slack is not None else os.environ.get("CATHSIM_NEWTON_MAX_SLACK", "0.012")
+        )
+        # How far before the route endpoint insertion is considered exhausted.
+        # Stage-0 aorta_tree endpoint_0 is only ~30.7 mm long; the previous 1 mm
+        # hard margin stopped scripted pushes around 96% progress.
+        self._insertion_margin = float(
+            insertion_margin
+            if insertion_margin is not None
+            else os.environ.get("CATHSIM_NEWTON_INSERTION_MARGIN", "0.0")
+        )
         # Torsion steering: rotate input integrated (rad/s at rotate=1) into a
         # twist applied to the root anchor frame about the local tangent (D4c).
         self._rotate_speed = float(os.environ.get("CATHSIM_NEWTON_ROTATE_SPEED", "3.0"))
@@ -231,8 +301,14 @@ class NewtonEngine:
         # the tangent by `jtip_deg` total, giving `rotate` real branch-selecting
         # authority at sharp bends (incidental curvature alone is too weak). 0 deg
         # = straight tip (behaves like the pre-J-tip build).
-        self._jtip_deg = float(os.environ.get("CATHSIM_NEWTON_JTIP_DEG", "35.0" if _force else "0.0"))
-        self._jtip_bodies = int(os.environ.get("CATHSIM_NEWTON_JTIP_BODIES", "3"))
+        self._jtip_deg = float(os.environ.get(
+            "CATHSIM_NEWTON_JTIP_DEG",
+            str(self.guidewire_profile.tip_shape.precurve_angle_deg if _force else 0.0),
+        ))
+        self._jtip_bodies = int(os.environ.get(
+            "CATHSIM_NEWTON_JTIP_BODIES",
+            str(self._default_jtip_bodies()),
+        ))
         self._settle_steps = int(os.environ.get("CATHSIM_NEWTON_SETTLE_STEPS", "20"))
         self._twist = 0.0
         # Graded soft-anchor (anchor mode): proximal glued, distal ramp of
@@ -242,6 +318,7 @@ class NewtonEngine:
 
         self._centerline = _resample(self._path.points, 0.002)
         self._radii = self._centerline_radii()
+        self._cl_cum = self._centerline_cumlen()
         self._insert_s = 0.0
         self._initialized = False
         self._model = None
@@ -254,6 +331,25 @@ class NewtonEngine:
         self._alpha = None
         self._base_arc = None
         self._max_s_ins = 0.0
+
+    def _update_insert_limit(self) -> None:
+        if self._base_arc is None:
+            self._max_s_ins = 0.0
+            return
+        cl_seg = float(self._cl_cum[-1])
+        rod_span = float(self._base_arc[-1])
+        self._max_s_ins = max(0.0, cl_seg - rod_span - max(0.0, self._insertion_margin))
+        self._insert_s = float(np.clip(self._insert_s, 0.0, self._max_s_ins))
+
+    def _default_radius_m(self) -> float:
+        try:
+            return self.guidewire_profile.segment_by_name("main_support_shaft").radius_mm / 1000.0
+        except KeyError:
+            return 0.0004
+
+    def _default_jtip_bodies(self) -> int:
+        tip_len_m = self.guidewire_profile.tip_shape.tip_length_mm / 1000.0
+        return max(1, int(round(tip_len_m / max(self._rod_seg_len, 1.0e-6))))
 
     def set_path(self, path: PlannedPath | None) -> None:
         """Replace the planned path and force the Newton scene to be rebuilt.
@@ -268,7 +364,13 @@ class NewtonEngine:
         self._path = path
         self._centerline = _resample(self._path.points, 0.002)
         self._radii = self._centerline_radii()
+        self._cl_cum = self._centerline_cumlen()
         self._insert_s = 0.0
+        self._update_insert_limit()
+
+    def _centerline_cumlen(self) -> np.ndarray:
+        seg = np.linalg.norm(np.diff(self._centerline, axis=0), axis=1)
+        return np.concatenate([[0.0], np.cumsum(seg)])
 
     def _centerline_radii(self) -> np.ndarray:
         """Per-node lumen radius along the resampled centerline.
@@ -428,7 +530,7 @@ class NewtonEngine:
     # the model geometry at build time (rebuild required).
     _LIVE_PARAMS = (
         "bend", "tip_bend", "soft_tip", "stretch", "push_speed", "rotate_speed",
-        "sheath_bodies", "free_len", "max_slack", "support_speed",
+        "sheath_bodies", "free_len", "max_slack", "support_speed", "insertion_margin",
     )
     _REBUILD_PARAMS = ("jtip_deg", "jtip_bodies", "contact_ke", "wall_thickness", "rod_length")
     # Live params that change the glue mask (recomputed in place, no rebuild).
@@ -454,6 +556,8 @@ class NewtonEngine:
                 rebuild = True
             if key in self._GLUE_PARAMS:
                 reglue = True
+            if key == "insertion_margin":
+                self._update_insert_limit()
         if rebuild:
             # Geometry changed: drop the cached model so the next step rebuilds
             # it (and re-settles) with the new shape, preserving insertion depth.
@@ -483,6 +587,7 @@ class NewtonEngine:
             "free_len": self._free_len,
             "max_slack": self._max_slack,
             "support_speed": self._support_speed,
+            "insertion_margin": self._insertion_margin,
             "bend_profile": self._bend_profile(max(0, int(round(self._rod_length / self._rod_seg_len)))).tolist(),
         }
 
@@ -541,8 +646,7 @@ class NewtonEngine:
         self._alpha = self._glue_alpha(nb)
         seg = np.linalg.norm(np.diff(self._centerline, axis=0), axis=1)
         self._cl_cum = np.concatenate([[0.0], np.cumsum(seg)])
-        cl_seg = float(self._cl_cum[-1])
-        self._max_s_ins = max(0.0, cl_seg - float(self._base_arc[-1]) - 1e-3)
+        self._update_insert_limit()
         self._twist = 0.0
         self._initialized = True
 
@@ -783,8 +887,12 @@ class NewtonEngine:
             "max_insert_s_m": self._max_s_ins,
             "free_len_m": self._free_len,
             "max_slack_m": self._max_slack,
+            "insertion_margin_m": self._insertion_margin,
             "sheath_bodies": self._sheath_bodies,
             "contact_ke": self._contact_ke,
+            "guidewire": self._guidewire_diagnostics(),
+            "support": self._support_diagnostics(self._rod_length * 1000.0),
+            "procedure": self._procedure_diagnostics(),
         }
         if body_count > 0:
             out["sheath_bodies_resolved"] = self._sheath_count(body_count)
@@ -796,6 +904,8 @@ class NewtonEngine:
         fed_arclen = self._insert_s + float(self._base_arc[-1])
         slack = fed_arclen - tip_arclen
         worst, wall_distance, contact_force = self._breach_stats(xyz)
+        wall_metrics = self._tip_wall_metrics(xyz, tip_arclen)
+        torsion_lag_deg = self._torsion_lag_deg(xyz, tip_arclen)
         out.update({
             "tip_arclen_m": tip_arclen,
             "fed_arclen_m": fed_arclen,
@@ -808,6 +918,12 @@ class NewtonEngine:
             "max_breach_m": worst,
             "wall_distance_m": min(wall_distance, MAX_WALL_DISTANCE),
             "contact_force": contact_force,
+            "normal_poking_score": wall_metrics["normal_poking_score"],
+            "tangential_slide_score": wall_metrics["tangential_slide_score"],
+            "wall_slide_state": wall_metrics["wall_slide_state"],
+            "guidewire": self._guidewire_diagnostics(tip_arclen * 1000.0, torsion_lag_deg),
+            "support": self._support_diagnostics(tip_arclen * 1000.0),
+            "procedure": self._procedure_diagnostics(),
         })
         return out
 
@@ -967,6 +1083,121 @@ class NewtonEngine:
             "risk": risk,
         }
 
+    def _guidewire_diagnostics(
+        self,
+        arclen_mm: float | None = None,
+        torsion_lag_deg: float | None = None,
+    ) -> dict:
+        segment = (
+            self.guidewire_profile.segment_at(arclen_mm)
+            if arclen_mm is not None
+            else self.guidewire_profile.distal_segments[1]
+        )
+        return {
+            **self.guidewire_design.diagnostics(),
+            "profile_name": self.guidewire_profile.name,
+            "tip_shape": self.guidewire_profile.tip_shape.shape_type,
+            "current_tip_segment": segment.name,
+            "torsion_lag_deg": torsion_lag_deg,
+            "total_length_mm": self.guidewire_profile.total_length_mm,
+            "segment_count": len(self.guidewire_profile.segments),
+            "jtip_deg": self._jtip_deg,
+            "jtip_bodies": self._jtip_bodies,
+        }
+
+    def _support_diagnostics(self, guidewire_tip_arclen_mm: float) -> dict:
+        return {
+            "effective_support_type": self.support_system.effective_support_type(),
+            "effective_support_tip_mm": self.support_system.effective_support_tip(),
+            "support_ratio": self.support_system.support_ratio(guidewire_tip_arclen_mm),
+            "free_wire_length_mm": self.support_system.free_wire_length_mm(guidewire_tip_arclen_mm),
+        }
+
+    def _procedure_diagnostics(self) -> dict:
+        return self.procedure_design.diagnostics(self.guidewire_design.summary_zh())
+
+    def _tip_wall_metrics(self, xyz: np.ndarray, tip_arclen: float) -> dict:
+        """Tip wall-interaction quality from current rod geometry."""
+        if len(xyz) < 2:
+            return {
+                "normal_poking_score": None,
+                "tangential_slide_score": None,
+                "wall_slide_state": "UNKNOWN",
+            }
+
+        tip = np.asarray(xyz[-1], dtype=np.float64)
+        prev = np.asarray(xyz[-2], dtype=np.float64)
+        tip_dir = tip - prev
+        tip_norm = float(np.linalg.norm(tip_dir))
+        if tip_norm <= 1e-9:
+            return {
+                "normal_poking_score": None,
+                "tangential_slide_score": None,
+                "wall_slide_state": "UNKNOWN",
+            }
+        tip_dir /= tip_norm
+
+        idx = int(np.searchsorted(self._cl_cum, float(tip_arclen)))
+        idx = int(np.clip(idx, 0, len(self._centerline) - 1))
+        center = self._centerline[idx]
+        tangent = self._tangent_at_s(tip_arclen)
+        radial = tip - center
+        radial = radial - tangent * float(np.dot(radial, tangent))
+        radial_norm = float(np.linalg.norm(radial))
+        if radial_norm <= 1e-9:
+            normal_score = 0.0
+            tangential_score = 0.0
+        else:
+            radial_unit = radial / radial_norm
+            radius = max(float(self._radii[idx]), self._rod_radius, 1e-9)
+            proximity = float(np.clip((radial_norm + self._rod_radius) / radius, 0.0, 1.0))
+            outward = max(0.0, float(np.dot(tip_dir, radial_unit)))
+            tangent_align = abs(float(np.dot(tip_dir, tangent)))
+            normal_score = float(np.clip(outward * proximity, 0.0, 1.0))
+            tangential_score = float(np.clip(tangent_align * proximity * (1.0 - normal_score), 0.0, 1.0))
+
+        if normal_score >= 0.7:
+            state = "TIP_POKING_WARNING"
+        elif tangential_score >= 0.35:
+            state = "WALL_SLIDE_OK"
+        else:
+            state = "FREE_CENTERED"
+        return {
+            "normal_poking_score": normal_score,
+            "tangential_slide_score": tangential_score,
+            "wall_slide_state": state,
+        }
+
+    def _torsion_lag_deg(self, xyz: np.ndarray, tip_arclen: float) -> float | None:
+        """Approximate twist lag between commanded root twist and J-tip plane."""
+        if len(xyz) < 3 or self._jtip_deg <= 0.0:
+            return 0.0
+
+        tip = np.asarray(xyz[-1], dtype=np.float64)
+        base_idx = max(0, len(xyz) - 1 - max(1, int(self._jtip_bodies)))
+        base = np.asarray(xyz[base_idx], dtype=np.float64)
+        tangent = self._tangent_at_s(tip_arclen)
+        lateral = tip - base
+        lateral = lateral - tangent * float(np.dot(lateral, tangent))
+        lateral_norm = float(np.linalg.norm(lateral))
+        if lateral_norm <= 1e-9:
+            return abs(_wrap_degrees(math.degrees(self._twist)))
+        lateral /= lateral_norm
+
+        ref = np.array([0.0, 1.0, 0.0]) if abs(tangent[1]) < 0.9 else np.array([1.0, 0.0, 0.0])
+        ref = ref - tangent * float(np.dot(ref, tangent))
+        ref_norm = float(np.linalg.norm(ref))
+        if ref_norm <= 1e-9:
+            return abs(_wrap_degrees(math.degrees(self._twist)))
+        ref /= ref_norm
+
+        observed = math.degrees(math.atan2(
+            float(np.dot(np.cross(ref, lateral), tangent)),
+            float(np.dot(ref, lateral)),
+        ))
+        commanded = math.degrees(self._twist)
+        return abs(_wrap_degrees(commanded - observed))
+
     def step(self, push: float, rotate: float) -> RawPose:
         self._ensure_initialized()
 
@@ -1016,7 +1247,7 @@ class NewtonEngine:
             tip_arclen = float(min(_nearest_arclen(self._centerline, self._cl_cum, tip), self._path.total_len))
         else:
             tip_arclen = float(min(self._insert_s + self._base_arc[-1], self._path.total_len))
-        done = bool(self._insert_s >= self._max_s_ins - 1e-9)
+        done = _insertion_complete(self._insert_s, self._max_s_ins)
         return RawPose(
             tip_position=[float(v) for v in tip],
             tip_direction=[float(v) for v in direction],
@@ -1031,15 +1262,40 @@ class NewtonEngine:
             arclen=tip_arclen,
         )
 
-    def render_bodies(self) -> list[dict[str, list[float]]]:
+    def _body_segment_metadata(self, index: int, count: int) -> dict[str, str | float]:
+        """Material/support labels for a rendered body, root -> tip order."""
+        if count <= 1:
+            distal_arclen_mm = 0.0
+        else:
+            frac_from_root = float(index) / float(count - 1)
+            distal_arclen_mm = (1.0 - frac_from_root) * self.guidewire_profile.total_length_mm
+        segment = self.guidewire_profile.segment_at(distal_arclen_mm)
+        supported = (
+            self._alpha is not None
+            and index < len(self._alpha)
+            and float(self._alpha[index]) >= 0.5
+        )
+        return {
+            "arclen_mm": distal_arclen_mm,
+            "material_segment": segment.name,
+            "support_state": "inside_support_tube" if supported else "distal_free_span",
+            "guidewire_design_name": self.guidewire_design.name,
+        }
+
+    def render_bodies(self) -> list[dict[str, object]]:
         if not self._initialized:
             return []
         q = self._s0.body_q.numpy()
-        bodies = []
-        for body in self._rod_bodies:
+        bodies: list[dict[str, object]] = []
+        count = len(self._rod_bodies)
+        for index, body in enumerate(self._rod_bodies):
             pos = [float(v) for v in q[body, :3]]
             quat = [float(v) for v in q[body, 3:7]]
-            bodies.append({"pos": pos, "quat": quat})
+            bodies.append({
+                "pos": pos,
+                "quat": quat,
+                **self._body_segment_metadata(index, count),
+            })
         return bodies
 
     def close(self) -> None:
