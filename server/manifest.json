@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "name": "cathsim-server",
+  "description": "CathSim backend, simulation and reinforcement-learning server distribution",
+  "required": [
+    "LICENSE",
+    "README.md",
+    "pyproject.toml",
+    "services",
+    "src/cathsim",
+    "reinforcement_learning/README.md",
+    "reinforcement_learning/configs",
+    "reinforcement_learning/scripts",
+    "reinforcement_learning/requirements-backend.txt",
+    "reinforcement_learning/requirements-train.txt",
+    "server"
+  ],
+  "optional": [
+    "data",
+    "environment.yml",
+    ".ruff.toml",
+    "scripts",
+    "spikes",
+    "tools"
+  ],
+  "exclude_names": [
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".venv",
+    ".venv310",
+    "logs",
+    "models",
+    "runs"
+  ],
+  "exclude_globs": [
+    "*.pyc",
+    "*.pyo",
+    "*.bak",
+    "--host",
+    "--logdir",
+    "--port",
+    "tools/audit_visual_geometry.py",
+    "tools/export_godot_assets.py"
+  ],
+  "forbidden_top_level": [
+    "godot_client",
+    "docs",
+    "doc",
+    "_intent_backup",
+    "_rl_s0_backup_20260722_165142",
+    "_rl_s0_backup_20260722_165603",
+    "services_backup_20260701_152108"
+  ]
+}

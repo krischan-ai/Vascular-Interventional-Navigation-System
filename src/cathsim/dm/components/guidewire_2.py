@@ -5,7 +5,7 @@ from dm_control import mjcf
 from dm_control import composer
 
 from cathsim.dm.components.base_models import BaseGuidewire
-from cathsim.dm.utils import get_env_config
+from cathsim.dm.core_utils import get_env_config
 
 import xml.etree.ElementTree as ET
 from xml.dom import minidom

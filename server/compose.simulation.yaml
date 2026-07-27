@@ -1,0 +1,34 @@
+name: cathsim-simulation-runtime
+
+services:
+  cathsim-simulation:
+    image: cathsim-simulation:local
+    pull_policy: never
+    container_name: cathsim-simulation
+    restart: unless-stopped
+    stop_grace_period: 30s
+    gpus: all
+    shm_size: "2gb"
+
+    ports:
+      - "${CATHSIM_SIMULATION_HOST_PORT:-19001}:9000"
+
+    environment:
+      CATHSIM_PHYSICS_ENGINE: newton
+      CATHSIM_VPP_DATA_ROOT: /app/data/vpp_assets
+      CATHSIM_NEWTON_SUBSTEPS: "${CATHSIM_NEWTON_SUBSTEPS:-6}"
+      CATHSIM_NEWTON_ITERS: "${CATHSIM_NEWTON_ITERS:-2}"
+      CATHSIM_NEWTON_PUSH_SPEED: "${CATHSIM_NEWTON_PUSH_SPEED:-0.05}"
+      CUDA_VISIBLE_DEVICES: "${CUDA_VISIBLE_DEVICES:-0}"
+      MUJOCO_GL: egl
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,graphics
+      NVIDIA_VISIBLE_DEVICES: all
+
+    security_opt:
+      - no-new-privileges:true
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"

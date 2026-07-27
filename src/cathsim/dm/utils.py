@@ -6,11 +6,17 @@ from pathlib import Path
 
 import gymnasium as gym
 import numpy as np
-import yaml
 from cathsim.gym.wrappers import (
     GoalEnvWrapper,
     MultiInputImageWrapper,
     SingleDict2Array,
+)
+from cathsim.dm.core_utils import (
+    distance,
+    filter_mask,
+    get_config,
+    get_env_config,
+    normalize_rgba,
 )
 from dm_control.viewer.application import Application
 from gymnasium import wrappers
@@ -52,62 +58,6 @@ def map_val(g: callable, d: dict):
             return (k, g(v))
 
     return itemmap(f, d)
-
-
-def normalize_rgba(rgba: list) -> list:
-    new_rgba = [c / 255.0 for c in rgba]
-    new_rgba[-1] = rgba[-1]
-    return new_rgba
-
-
-def filter_mask(segment_image: np.ndarray):
-    """
-    Convert the segment image to a mask
-
-    Args:
-      segment_image: np.ndarray: The segment image
-
-    Returns:
-        np.ndarray: The mask
-    """
-    geom_ids = segment_image[:, :, 0]
-    geom_ids = geom_ids.astype(np.float64) + 1
-    geom_ids = geom_ids / geom_ids.max()
-    segment_image = 255 * geom_ids
-    return segment_image
-
-
-def distance(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Calculate the Euclidean distance
-
-    Args:
-      a: np.ndarray: The first point
-      b: np.ndarray: The second point
-
-    Returns:
-        np.ndarray: The distance between the two points
-    """
-    assert a.shape == b.shape
-    return np.linalg.norm(a - b, axis=-1)
-
-
-def get_env_config(config: str = None) -> dict:
-    config_folder = Path(__file__).parent / "config"
-    if config is None:
-        config_path = config_folder / "env.yaml"
-    else:
-        config_path = config_folder / f"{config}.yaml"
-    if config_path.exists():
-        config = get_config(config_path)
-        return config
-    else:
-        raise FileNotFoundError(f"Could not find config file {config_path}")
-
-
-def get_config(config_path: Path = None) -> dict:
-    with open(config_path, "r") as f:
-        config = yaml.safe_load(f)
-    return config
 
 
 WRAPPERS = {

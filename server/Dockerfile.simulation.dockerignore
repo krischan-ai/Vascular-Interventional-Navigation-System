@@ -1,0 +1,14 @@
+**
+!LICENSE
+!README.md
+!services/
+!services/**
+!src/
+!src/cathsim/
+!src/cathsim/dm/
+!src/cathsim/dm/**
+!data/
+!data/**
+!server/
+!server/requirements-simulation.txt
+!server/verify_simulation.py

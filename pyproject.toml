@@ -46,6 +46,7 @@ dependencies = [
 where = ["src"]
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
 markers = [
     "slow: tests that require MuJoCo physics initialization",
 ]

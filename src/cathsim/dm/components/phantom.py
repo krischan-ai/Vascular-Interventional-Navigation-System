@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from cathsim.dm.components.base_models import BasePhantom
-from cathsim.dm.utils import get_env_config, normalize_rgba
+from cathsim.dm.core_utils import get_env_config, normalize_rgba
 from dm_control import mjcf
 
 phantom_config = get_env_config("phantom")

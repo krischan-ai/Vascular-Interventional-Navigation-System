@@ -6,7 +6,7 @@ from dm_control import composer
 
 from cathsim.dm.observables import JointObservables
 from cathsim.dm.components.base_models import BaseGuidewire
-from cathsim.dm.utils import get_env_config
+from cathsim.dm.core_utils import get_env_config
 
 
 guidewire_config = get_env_config("guidewire")

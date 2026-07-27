@@ -7,7 +7,7 @@ import trimesh
 from cathsim.dm.components import Guidewire, Phantom, Tip
 from cathsim.dm.fluid import apply_fluid_force
 from cathsim.dm.observables import CameraObservable
-from cathsim.dm.utils import distance, filter_mask, get_env_config
+from cathsim.dm.core_utils import distance, filter_mask, get_env_config
 from cathsim.dm.visualization import (
     create_camera_matrix,
     point2pixel,

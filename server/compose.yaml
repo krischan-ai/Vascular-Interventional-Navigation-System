@@ -1,0 +1,66 @@
+x-cathsim-environment: &cathsim-environment
+  CATHSIM_PHYSICS_ENGINE: "${CATHSIM_PHYSICS_ENGINE:-newton}"
+  CATHSIM_VPP_DATA_ROOT: "/app/data/vpp_assets"
+  CATHSIM_NEWTON_SUBSTEPS: "${CATHSIM_NEWTON_SUBSTEPS:-6}"
+  CATHSIM_NEWTON_ITERS: "${CATHSIM_NEWTON_ITERS:-2}"
+  CATHSIM_NEWTON_PUSH_SPEED: "${CATHSIM_NEWTON_PUSH_SPEED:-0.05}"
+  CUDA_VISIBLE_DEVICES: "${CUDA_VISIBLE_DEVICES:-0}"
+  MUJOCO_GL: "egl"
+  NVIDIA_DRIVER_CAPABILITIES: "compute,utility,graphics"
+  NVIDIA_VISIBLE_DEVICES: "${NVIDIA_VISIBLE_DEVICES:-all}"
+
+x-cathsim-image: &cathsim-image
+  image: "${CATHSIM_IMAGE:-cathsim-server:local}"
+  build:
+    context: ..
+    dockerfile: server/Dockerfile
+    args:
+      CUDA_IMAGE: "${CATHSIM_CUDA_IMAGE:-nvidia/cuda:12.1.1-runtime-ubuntu22.04}"
+      APT_MIRROR: "${CATHSIM_APT_MIRROR:-https://repo.huaweicloud.com/ubuntu}"
+      CATHSIM_UID: "${CATHSIM_UID:-1000}"
+      CATHSIM_GID: "${CATHSIM_GID:-1000}"
+      PIP_INDEX_URL: "${CATHSIM_PIP_INDEX_URL:-https://mirrors.huaweicloud.com/repository/pypi/simple}"
+  gpus: all
+  shm_size: "2gb"
+  environment: *cathsim-environment
+  volumes:
+    - ../reinforcement_learning/logs:/app/reinforcement_learning/logs
+    - ../reinforcement_learning/models:/app/reinforcement_learning/models
+    - ../reinforcement_learning/runs:/app/reinforcement_learning/runs
+
+services:
+  cathsim-server:
+    <<: *cathsim-image
+    ports:
+      - "${CATHSIM_PORT:-9000}:9000"
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  cathsim-train:
+    <<: *cathsim-image
+    profiles: ["training"]
+    command:
+      - python
+      - reinforcement_learning/scripts/train_navigation.py
+      - --algorithm
+      - "${CATHSIM_RL_ALGORITHM:-ppo}"
+      - --run-name
+      - "${CATHSIM_RUN_NAME:-stage0_endpoint_0}"
+      - --output-dir
+      - reinforcement_learning/runs
+      - --phantom
+      - "${CATHSIM_PHANTOM:-aorta_tree}"
+      - --route-target
+      - "${CATHSIM_ROUTE_TARGET:-endpoint_0}"
+      - --action-mode
+      - "${CATHSIM_ACTION_MODE:-shape_intent}"
+      - --physics-engine
+      - "${CATHSIM_PHYSICS_ENGINE:-newton}"
+      - --total-timesteps
+      - "${CATHSIM_TOTAL_TIMESTEPS:-100000}"
+      - --seed
+      - "${CATHSIM_SEED:-0}"
+      - --eval-episodes
+      - "${CATHSIM_EVAL_EPISODES:-5}"
+      - --no-progress-bar
+    restart: "no"
