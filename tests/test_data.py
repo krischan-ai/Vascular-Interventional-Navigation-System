@@ -1,21 +1,20 @@
-import gym
+import numpy as np
+
 from cathsim.rl.data import Trajectory, TrajectoriesDataset
-from torch.utils import data
 
 
-def test_trajectory(
-    obs_space: gym.spaces, act_space: gym.spaces, len: int = 3, n_trajectories: int = 2
-):
-    trajectories = []
-    obs = obs_space.sample()
-    act = act_space.sample()
+def test_trajectory_dataset_round_trip(tmp_path):
+    for trajectory_index in range(2):
+        trajectory = Trajectory()
+        for step in range(3):
+            trajectory.add_transition(
+                head_pos=np.array([trajectory_index, step, step + 1], dtype=float)
+            )
+        trajectory.to_array().save(tmp_path / f"trajectory_{trajectory_index}.pkl")
 
-    for n in range(n_trajectories):
-        trajectory = Trajectory(keys=["obs", "act"])
-        for i in range(len):
-            trajectory.add_transition(obs=obs, act=act)
-        trajectories.append(trajectory)
+    dataset = TrajectoriesDataset(tmp_path, lazy_load=False)
+    (start, goal), path = dataset[0]
 
-    t_dataset = TrajectoriesDataset(trajectories)
-
-    return trajectories
+    assert len(dataset) == 2
+    assert start.shape == goal.shape == (3,)
+    assert path.shape == (300, 3)

@@ -1,13 +1,13 @@
 # CathSim VPP — Godot 客户端（阶段八）
 
-Godot 4.4 渲染客户端，通过 WebSocket 连接 `services` 后端，实时显示血管、导丝，
+Godot 4.7 渲染客户端，通过 WebSocket 连接 `services` 后端，实时显示血管、导丝，
 并接收键盘控制。对应 `doc/01-总体技术方案.md` 的 Godot 渲染交互层。
 
 ## 目录结构
 
 ```
 godot_client/
-├── project.godot              # Godot 4.4 项目配置（Forward+，后端 URL）
+├── project.godot              # Godot 4.7 项目配置（Forward+，后端 URL）
 ├── scenes/
 │   └── main.tscn              # 主场景（仅根节点 + main_controller.gd）
 ├── scripts/
@@ -29,19 +29,23 @@ godot_client/
 
 Godot 只能导入 glTF/GLB，无法直接读 VTK/STL。
 
-**当前默认渲染 low_tort 体模**（与后端默认仿真的 phantom 一致，二者同坐标系、导丝叠加对齐）：
+**当前默认渲染真实 VPP `case_001` 血管，并使用 Newton 后端**。完整数据应位于
+`data/vpp_assets/case_001`，其中包含原始血管、中心线图、半径、25 条目标路线、
+MuJoCo 碰撞网格和派生 GLB：
 
 ```powershell
-python tools/export_godot_assets.py --phantom low_tort
+conda run -n cathsim-dev python tools/validate_vpp_assets.py data/vpp_assets/case_001
 ```
-输出 `godot_client/assets/models/low_tort.glb`（约 0.3MB）。
+首次运行前可执行 `scripts/validate_godot.ps1`，它会自动寻找 Godot、导入 GLB
+并检查脚本运行错误。
 
 VPP 真实血管（case_001，约 10MB）：
 
 ```powershell
-python tools/export_godot_assets.py
+conda run -n cathsim-dev python tools/export_godot_assets.py --case-id case_001 --quality visual_high
 ```
-输出 `godot_client/assets/models/blood_vessels.glb`。
+输出 `godot_client/assets/models/blood_vessels_visual_high.glb`；原生表面版本使用
+`--quality visual_native`。
 
 ## VPP 真实血管导航（阶段十）
 
@@ -67,15 +71,14 @@ python tools/export_godot_assets.py
 
 ## 运行
 
-1. 启动后端服务（**必须用安装了 `cathsim` 的 `.venv` Python**，否则建会话时报
-   `ModuleNotFoundError: No module named 'cathsim'`）：
+1. 启动后端服务（必须使用安装了项目依赖和 Newton/Warp 的 Python）：
 
    ```powershell
-   # 推荐：直接用 venv 的 python 启动（默认端口 9000）
-   .\.venv\Scripts\python.exe -m services.main
+   # Windows 推荐：自动选择 .venv 或 cathsim-dev，并设置可写的 Warp 缓存
+   .\start_backend.bat
 
-   # 或用 uvicorn 显式指定端口
-   .\.venv\Scripts\python.exe -m uvicorn services.main:app --host 0.0.0.0 --port 9000
+   # 或直接使用当前开发环境（默认端口 9000）
+   conda run -n cathsim-dev python -m services.main
    ```
 
    > 默认端口为 **9000**，而非 8000：Windows（Hyper-V/winnat）保留了动态 TCP
@@ -83,7 +86,8 @@ python tools/export_godot_assets.py
    > `CATHSIM_PORT` 覆盖（用 `python -m services.main` 启动时生效）。
    > 仿真不渲染像素（`use_pixels=False`），无需设置 `MUJOCO_GL`。
 
-2. 用 Godot 4.4 打开 `godot_client/`（首次打开会自动导入 GLB 并生成 `.godot/` 缓存）。
+2. 双击 `start_godot.bat`，或用 Godot 4.7 打开 `godot_client/`。启动脚本会在
+   PATH、桌面和下载目录中查找 Godot，因此无需把桌面目录加入 PATH。
 
 3. 按 F5 运行。客户端会自动连接 `ws://localhost:9000/ws/session`，
    以 `batch_mode=true` 开启会话（获取导丝 body 渲染数据）。

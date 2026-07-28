@@ -192,6 +192,11 @@ def remote_install_command(
     remote_python: str,
     port: int,
     substeps: int,
+    iterations: int,
+    settle_steps: int,
+    settle_min_steps: int,
+    return_settle_steps: int,
+    rotate_speed: float,
     push_speed: float,
 ) -> str:
     payload = {
@@ -200,6 +205,11 @@ def remote_install_command(
         "remote_python": remote_python,
         "port": port,
         "substeps": substeps,
+        "iterations": iterations,
+        "settle_steps": settle_steps,
+        "settle_min_steps": settle_min_steps,
+        "return_settle_steps": return_settle_steps,
+        "rotate_speed": rotate_speed,
         "push_speed": push_speed,
     }
     payload_json = json.dumps(payload)
@@ -284,6 +294,11 @@ def remote_install_command(
             env.update({
                 "CATHSIM_PHYSICS_ENGINE": "newton_demo",
                 "CATHSIM_NEWTON_SUBSTEPS": str(cfg["substeps"]),
+                "CATHSIM_NEWTON_ITERS": str(cfg["iterations"]),
+                "CATHSIM_NEWTON_SETTLE_STEPS": str(cfg["settle_steps"]),
+                "CATHSIM_NEWTON_SETTLE_MIN_STEPS": str(cfg["settle_min_steps"]),
+                "CATHSIM_NEWTON_RETURN_SETTLE_STEPS": str(cfg["return_settle_steps"]),
+                "CATHSIM_NEWTON_ROTATE_SPEED": str(cfg["rotate_speed"]),
                 "CATHSIM_NEWTON_PUSH_SPEED": str(cfg["push_speed"]),
                 "CATHSIM_PORT": str(port),
                 "CATHSIM_VPP_DATA_ROOT": str(project / "data" / "vpp_assets"),
@@ -389,7 +404,50 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--substeps",
         type=int,
-        default=int(_config_default(config, "substeps", "CATHSIM_NEWTON_SUBSTEPS", "6")),
+        default=int(_config_default(config, "substeps", "CATHSIM_NEWTON_SUBSTEPS", "8")),
+    )
+    parser.add_argument(
+        "--iterations",
+        type=int,
+        default=int(_config_default(config, "iterations", "CATHSIM_NEWTON_ITERS", "4")),
+    )
+    parser.add_argument(
+        "--settle-steps",
+        type=int,
+        default=int(
+            _config_default(config, "settle_steps", "CATHSIM_NEWTON_SETTLE_STEPS", "480")
+        ),
+    )
+    parser.add_argument(
+        "--settle-min-steps",
+        type=int,
+        default=int(
+            _config_default(
+                config,
+                "settle_min_steps",
+                "CATHSIM_NEWTON_SETTLE_MIN_STEPS",
+                "480",
+            )
+        ),
+    )
+    parser.add_argument(
+        "--return-settle-steps",
+        type=int,
+        default=int(
+            _config_default(
+                config,
+                "return_settle_steps",
+                "CATHSIM_NEWTON_RETURN_SETTLE_STEPS",
+                "120",
+            )
+        ),
+    )
+    parser.add_argument(
+        "--rotate-speed",
+        type=float,
+        default=float(
+            _config_default(config, "rotate_speed", "CATHSIM_NEWTON_ROTATE_SPEED", "5.0")
+        ),
     )
     parser.add_argument(
         "--push-speed",
@@ -434,6 +492,11 @@ def main() -> int:
                 remote_python=args.remote_python,
                 port=args.port,
                 substeps=args.substeps,
+                iterations=args.iterations,
+                settle_steps=args.settle_steps,
+                settle_min_steps=args.settle_min_steps,
+                return_settle_steps=args.return_settle_steps,
+                rotate_speed=args.rotate_speed,
                 push_speed=args.push_speed,
             )
             output = run(

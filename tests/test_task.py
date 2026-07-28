@@ -53,13 +53,21 @@ def test_should_terminate_episode(task):
 @pytest.mark.parametrize("camera_name", ["top_camera", "side"])
 def test_camera_matrix(task, image_size, camera_name):
     name2id = {"top_camera": 0, "side": 2}
-    task.get_camera_matrix(image_size, camera_name)
+    camera_matrix = task.get_camera_matrix(
+        image_size=image_size,
+        camera_name=camera_name,
+    )
 
     env = composer.Environment(task)
     physics = env.physics
-    camera = engine.Camera(physics, height=image_size, width=image_size,
-                           camera_id=name2id[camera_name])
-    __import__('pprint').pprint(task.camera_matrix)
-    __import__('pprint').pprint(camera.matrix)
-    assert np.allclose(task.camera_matrix, camera.matrix), \
-        "Camera matrix is not correct"
+    camera = engine.Camera(
+        physics,
+        height=image_size,
+        width=image_size,
+        camera_id=name2id[camera_name],
+    )
+    try:
+        assert np.allclose(camera_matrix, camera.matrix), \
+            "Camera matrix is not correct"
+    finally:
+        camera._scene.free()

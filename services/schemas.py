@@ -99,6 +99,8 @@ class NavigationStateResponse(BaseModel):
     path_progress: float = Field(default=0.0, description="Planned-path progress [0, 1]")
     path_deviation: float = Field(default=0.0, description="Deviation from path (m)")
     remaining_distance: float = Field(default=0.0, description="Remaining path arc length (m)")
+    path_total_distance: float | None = Field(default=None, description="Total path arc length (m)")
+    path_travelled_distance: float | None = Field(default=None, description="Travelled path arc length (m)")
     vessel_radius: float | None = Field(default=None, description="Local lumen radius (m)")
     eta_seconds: float | None = Field(default=None, description="Estimated seconds to target")
     latency_ms: float | None = Field(default=None, description="Latest measured client/server RTT (ms)")

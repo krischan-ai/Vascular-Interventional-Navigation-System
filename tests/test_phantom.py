@@ -1,9 +1,11 @@
-from cathsim.phantom import Phantom, phantom_config
+from cathsim.dm import Phantom
+from cathsim.dm.components.phantom import phantom_config, phantom_default
+from cathsim.dm.utils import normalize_rgba
 
 
 def test_phantom_build():
     phantom = Phantom()
-    assert phantom.rgba == phantom_config["rgba"]
+    assert phantom.rgba == normalize_rgba(phantom_default["geom"]["rgba"])
     assert phantom.scale == [phantom_config["scale"] for i in range(3)]
     assert phantom._mjcf_root is not None
 
@@ -42,4 +44,4 @@ def test_phantom_get_scale():
 
 def test_phantom_get_rgba():
     phantom = Phantom()
-    assert phantom.get_rgba() == phantom_config["rgba"]
+    assert phantom.get_rgba() == normalize_rgba(phantom_default["geom"]["rgba"])

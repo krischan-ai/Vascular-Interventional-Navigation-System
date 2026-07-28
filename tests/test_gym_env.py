@@ -1,19 +1,41 @@
-from gymnasium.utils.env_checker import check_env
-from gymnasium.wrappers import GrayScaleObservation
-from cathsim.gym.envs import CathSim
 import gymnasium as gym
-import cv2
+import numpy as np
+import pytest
 
-env = gym.make("cathsim/CathSim-v0", target="bca")
-# env = GrayScaleObservation(env, keep_dim=True)
-check_env(env, warn=False, skip_render_check=True)
+import cathsim.gym.envs  # noqa: F401 - registers cathsim/CathSim-v0
 
-for i in range(10):
-    obs = env.reset()
-    done = False
-    while not done:
-        action = [1, 0]
-        obs, reward, terminated, truncated, info = env.step(action)
-        image = env.render_frame(image_size=480)
-        cv2.imshow("image", image)
-        cv2.waitKey(1)
+
+@pytest.fixture(scope="module")
+def env():
+    instance = gym.make(
+        "cathsim/CathSim-v0",
+        phantom="phantom3",
+        target="bca",
+        use_pixels=False,
+        sample_target=False,
+        target_from_sites=False,
+    )
+    yield instance
+    instance.close()
+
+
+def test_gymnasium_reset_and_step_contract(env):
+    observation, info = env.reset(seed=0)
+    next_observation, reward, terminated, truncated, next_info = env.step(
+        np.zeros(env.action_space.shape, dtype=env.action_space.dtype)
+    )
+
+    assert env.observation_space.contains(observation)
+    assert env.observation_space.contains(next_observation)
+    assert isinstance(info, dict)
+    assert np.isscalar(reward)
+    assert isinstance(terminated, bool)
+    assert isinstance(truncated, bool)
+    assert isinstance(next_info, dict)
+
+
+def test_rgb_array_render(env):
+    env.reset()
+    image = env.unwrapped.render_frame(image_size=80)
+    assert image.shape == (80, 80, 3)
+    assert image.dtype == np.uint8

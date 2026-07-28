@@ -1,7 +1,6 @@
 import pytest
 from dm_control import mjcf
-from cathsim.env import Scene
-from unittest import mock
+from cathsim.dm import Scene
 
 
 @pytest.fixture
@@ -14,7 +13,7 @@ def test_add_light(scene):
     assert isinstance(light, mjcf.Element)
     assert (light.pos == [0, 1, 0]).all()
     assert (light.dir == [1, 1, 1]).all()
-    assert light.castshadow == 'true'
+    assert light.castshadow == "true"
 
 
 def test_add_camera(scene):
@@ -32,8 +31,6 @@ def test_add_site(scene):
     assert (site.pos == [0, 1, 0]).all()
 
 
-@mock.patch.object(Scene, "regenerate")
-def test_regenerate(mock_regenerate, scene):
-    random_state = mock.Mock()
-    scene.regenerate(random_state)
-    mock_regenerate.assert_called_once_with(random_state)
+def test_default_cameras(scene):
+    camera_names = {camera.name for camera in scene.cameras}
+    assert camera_names == {"top_camera", "top_camera_close", "side"}

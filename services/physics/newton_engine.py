@@ -210,10 +210,11 @@ class NewtonEngine:
         self._entry_point = entry_point
         self._entry_direction = entry_direction
         self._control_dt = float(os.environ.get("CATHSIM_NEWTON_CONTROL_DT", "0.0333333333"))
-        # D3 (doc/08) validated config: variable-radius tube wall + graded soft-anchor
-        # drive at 6 substeps x 2 VBD iterations ~= 60fps, contained on aorta_tree.
-        self._substeps = int(os.environ.get("CATHSIM_NEWTON_SUBSTEPS", str(n_substeps or 6)))
-        self._iterations = int(os.environ.get("CATHSIM_NEWTON_ITERS", "2"))
+        # Force-drive containment needs enough temporal and solver resolution for
+        # the near-inextensible cable/contact system.  The old Godot 2x2 profile
+        # visibly penetrated the endpoint_1 lumen; 8x4 is the validated D4 profile.
+        self._substeps = int(os.environ.get("CATHSIM_NEWTON_SUBSTEPS", str(n_substeps or 8)))
+        self._iterations = int(os.environ.get("CATHSIM_NEWTON_ITERS", "4"))
         self._sim_dt = self._control_dt / self._substeps
         self._rod_length = float(
             rod_length if rod_length is not None else os.environ.get("CATHSIM_NEWTON_ROD_LENGTH", "0.06")
@@ -295,7 +296,7 @@ class NewtonEngine:
         )
         # Torsion steering: rotate input integrated (rad/s at rotate=1) into a
         # twist applied to the root anchor frame about the local tangent (D4c).
-        self._rotate_speed = float(os.environ.get("CATHSIM_NEWTON_ROTATE_SPEED", "3.0"))
+        self._rotate_speed = float(os.environ.get("CATHSIM_NEWTON_ROTATE_SPEED", "5.0"))
         # Pre-bent J-tip rest shape: the distal `jtip_bodies` segments curve off
         # the tangent by `jtip_deg` total, giving `rotate` real branch-selecting
         # authority at sharp bends (incidental curvature alone is too weak). 0 deg
@@ -308,7 +309,24 @@ class NewtonEngine:
             "CATHSIM_NEWTON_JTIP_BODIES",
             str(self._default_jtip_bodies()),
         ))
-        self._settle_steps = int(os.environ.get("CATHSIM_NEWTON_SETTLE_STEPS", "20"))
+        # A force-driven J-tip must reach a contained equilibrium before its first
+        # pose is exposed.  This is a maximum: `_settle` may stop earlier once the
+        # full rod is contained and its block-to-block motion is below tolerance.
+        self._settle_steps = int(os.environ.get("CATHSIM_NEWTON_SETTLE_STEPS", "480"))
+        # When a pull-back reaches the zero-insertion boundary, let the free tip
+        # dissipate the last elastic oscillation instead of leaving it moving
+        # until the next keypress.  This is a one-time boundary settle, not an
+        # added cost on ordinary W/A/D control frames.
+        self._return_settle_steps = int(
+            os.environ.get("CATHSIM_NEWTON_RETURN_SETTLE_STEPS", "120")
+        )
+        # The endpoint_1 rod becomes geometrically quiet before its torsion chain
+        # is fully conditioned.  Keep the validated 480-step minimum by default;
+        # advanced deployments may lower it explicitly after route-wide testing.
+        self._settle_min_steps = int(os.environ.get("CATHSIM_NEWTON_SETTLE_MIN_STEPS", "480"))
+        self._settle_check_steps = int(os.environ.get("CATHSIM_NEWTON_SETTLE_CHECK_STEPS", "20"))
+        self._settle_tolerance = float(os.environ.get("CATHSIM_NEWTON_SETTLE_TOL", "0.00002"))
+        self._settle_steps_used = 0
         self._twist = 0.0
         # Graded soft-anchor (anchor mode): proximal glued, distal ramp of
         # `free_span` bodies kept soft (tip_alpha) so the tip deflects.
@@ -649,7 +667,7 @@ class NewtonEngine:
         # Let the free rod relax into the lumen before driving (force mode), so
         # the first push does not fight an off-lumen initial pose.
         if self._drive == "force" and self._settle_steps > 0:
-            self._settle(self._settle_steps)
+            self._settle_steps_used = self._settle(self._settle_steps)
 
     def reset(self) -> RawPose:
         self._initialized = False
@@ -711,21 +729,62 @@ class NewtonEngine:
         alpha = self._alpha[glued][:, None]
         target = np.asarray([_point_at_s(self._centerline, a + s_ins) for a in self._base_arc[glued]])
         bq = self._s0.body_q.numpy()
-        bq[rb[glued], :3] = (1.0 - alpha) * bq[rb[glued], :3] + alpha * target
+        glued_indices = np.flatnonzero(glued)
+        glued_bodies = rb[glued]
+        bq[glued_bodies, :3] = (1.0 - alpha) * bq[glued_bodies, :3] + alpha * target
         if self._drive == "force":
-            tangent = self._tangent_at_s(s_ins)
-            base_q = np.asarray(quat_from_direction(tangent), dtype=np.float64)
-            root_q = _quat_mul(_quat_axis_angle(tangent, self._twist), base_q)
-            bq[rb[0], 3:7] = root_q
+            # The supported wire rotates as one driven shaft.  Updating only the
+            # root frame leaves the other glued bodies with stale orientations,
+            # so A/D mostly winds up torsion at a fixed pivot instead of steering
+            # the distal J-tip.  Align and twist every fully supported body in its
+            # local route frame; the distal free span remains pure Newton physics.
+            for local_index, body in zip(glued_indices, glued_bodies):
+                tangent = self._tangent_at_s(s_ins + float(self._base_arc[local_index]))
+                base_q = np.asarray(quat_from_direction(tangent), dtype=np.float64)
+                bq[body, 3:7] = _quat_mul(
+                    _quat_axis_angle(tangent, self._twist), base_q
+                )
         self._s0.body_q.assign(bq)
 
-    def _settle(self, steps: int) -> None:
-        for _ in range(steps):
+        # Directly repositioned support bodies must not retain velocities from the
+        # preceding solver step.  Those stale velocities were re-injecting energy
+        # on the next keypress and produced the apparent one-way pivoting motion.
+        if hasattr(self._s0, "body_qd"):
+            bqd = self._s0.body_qd.numpy()
+            bqd[glued_bodies] = 0.0
+            self._s0.body_qd.assign(bqd)
+
+    def _settle(self, steps: int) -> int:
+        """Relax the freshly built rod until it is contained and nearly static.
+
+        The previous fixed 20-step warm-up returned a visibly moving, penetrating
+        pose.  Check the full rod every small block after a minimum warm-up and
+        stop only when no body moves more than the configured tolerance and the
+        analytic lumen check reports no breach.  Returns the number of steps used.
+        """
+        max_steps = max(0, int(steps))
+        min_steps = min(max_steps, max(0, int(self._settle_min_steps)))
+        check_steps = max(1, int(self._settle_check_steps))
+        previous_xyz = None
+
+        for used in range(1, max_steps + 1):
             self._s0.clear_forces()
             self._model.collide(self._s0, self._contacts)
             self._solver.step(self._s0, self._s1, self._control, self._contacts, self._sim_dt)
             self._s0, self._s1 = self._s1, self._s0
             self._apply_glue(self._insert_s)
+
+            if used % check_steps != 0:
+                continue
+            q = self._s0.body_q.numpy()
+            xyz = q[self._rod_bodies, :3].copy()
+            if used >= min_steps and previous_xyz is not None:
+                motion = float(np.linalg.norm(xyz - previous_xyz, axis=1).max())
+                worst, _, _ = self._breach_stats(xyz)
+                if motion <= self._settle_tolerance and worst <= 0.0:
+                    return used
+            previous_xyz = xyz
+        return max_steps
 
     def _tip_arclen(self) -> float:
         """Actual tip arc length along the route from the current sim state."""
@@ -756,6 +815,7 @@ class NewtonEngine:
             "drive": self._drive,
             "substeps": self._substeps,
             "iterations": self._iterations,
+            "settle_steps_used": self._settle_steps_used,
             "rod_length_m": self._rod_length,
             "rod_seg_len_m": self._rod_seg_len,
             "rod_radius_m": self._rod_radius,
@@ -945,6 +1005,15 @@ class NewtonEngine:
             self._solver.step(self._s0, self._s1, self._control, self._contacts, self._sim_dt)
             self._s0, self._s1 = self._s1, self._s0
             self._apply_glue(s_ins)
+
+        if (
+            self._drive == "force"
+            and advance < 0.0
+            and prev_insert_s > 0.0
+            and self._insert_s <= 1.0e-12
+            and self._return_settle_steps > 0
+        ):
+            self._settle(self._return_settle_steps)
 
         return self._raw_pose()
 
