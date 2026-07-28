@@ -1,5 +1,5 @@
 import pytest
-from cathsim.utils import expand_dict, flatten_dict
+from cathsim.dm.utils import expand_dict, flatten_dict, map_val
 
 
 expand_dict_data = [
@@ -58,11 +58,11 @@ flatten_dict_test_data = [
 def test_flatten_dict(d, key1, key2, expected):
     flat = flatten_dict(d)
     for key in [key1, key2]:
+        if key is None:
+            continue
         actual = flat.get(key)
         expected_val = expected.get(key)
-        assert flat.get(key1) == expected.get(
-            key1
-        ), f"expected val != actual: {expected_val} != {actual}"
+        assert actual == expected_val, f"expected val != actual: {expected_val} != {actual}"
 
 
 # Define the test data outside of the test function so that other test functions can access it
@@ -82,6 +82,7 @@ mapd_test_data = [
 
 
 @pytest.mark.parametrize("d, fn, key, expected", mapd_test_data)
-def test_mapd(d, fn, key, expected):
-    mapped = mapd(d, fn, key)
-    assert mapped == expected, "mapd function doesn't work properly"
+def test_map_val(d, fn, key, expected):
+    assert key is None
+    mapped = map_val(fn, d)
+    assert mapped == expected, "map_val function doesn't work properly"

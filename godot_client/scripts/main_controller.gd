@@ -125,10 +125,14 @@ const CAM_MODE_NAMES := {
 	CamMode.ENDOSCOPE: "内窥镜 Endoscope",
 }
 const _SCOPE_LAYER_MASK := 1 << 17
-const _SCOPE_BASE_ALBEDO := Color(1.0, 0.82, 0.70)
-const _SCOPE_BASE_EMISSION := Color(0.20, 0.035, 0.018)
 const EndoscopeFallbackScript := preload("res://scripts/ui/endoscope_fallback.gd")
 const EndoscopeOverlayScript := preload("res://scripts/ui/endoscope_overlay.gd")
+const EndoscopeMaterialFactoryScript := preload(
+	"res://scripts/rendering/endoscope_material_factory.gd")
+const EndoscopeLightingRigScript := preload(
+	"res://scripts/rendering/endoscope_lighting_rig.gd")
+const EndoscopeCameraFilterScript := preload(
+	"res://scripts/rendering/endoscope_camera_filter.gd")
 # UI contract labels: "手动", "自动".
 
 const ORBIT_PRESET_NAMES := {
@@ -166,6 +170,11 @@ var _scope_rec_button: Button
 var _scope_capture_button: Button
 var _scope_brightness_slider: HSlider
 var _scope_headlight: OmniLight3D
+var _scope_lighting
+var _scope_camera_filter
+var _scope_environment: Environment
+var _scope_radius_target: float = 0.003
+var _scope_target_fov: float = 79.0
 var _scope_has_tip: bool = false
 var _scope_pose_initialized: bool = false
 var _scope_recording: bool = false
@@ -173,6 +182,18 @@ var _scope_record_started_msec: int = 0
 var _scope_record_elapsed_msec: int = 0
 var _scope_fullscreen: bool = false
 @export var scope_camera_smooth: float = 18.0
+@export_enum("baseline", "enhanced") var scope_render_profile: String = "enhanced"
+@export_enum("performance", "balanced", "high") var scope_render_quality: String = "balanced"
+const _SCOPE_PERF_SAMPLE_COUNT := 300
+var _scope_frame_times_ms: Array[float] = []
+var _scope_perf_reported: bool = false
+var _scope_validation_capture_pending: bool = false
+var _scope_validation_capture_frames: int = 0
+var _scope_validation_output: String = ""
+var _scope_validation_motion: bool = false
+var _scope_validation_motion_stage: int = 0
+var _scope_validation_motion_accum: float = 0.0
+var _scope_validation_motion_steps: int = 0
 var _panes_swapped: bool = false
 # Overview orbit camera (参考图视角): the external camera is a pivot-orbit rig —
 # spherical (yaw/pitch/dist) around a pan-able pivot. Left-drag orbits, middle-drag
@@ -221,7 +242,7 @@ var _cam_mode: int = CamMode.OVERVIEW
 var _vessel_meshes: Array = []  # MeshInstance3D nodes of the vessel
 var _vessel_mat_overlay: ShaderMaterial  # cyan fresnel-glow whole-tree (overview/demo)
 var _vessel_mat_interior: StandardMaterial3D  # opaque inner wall (endoscope)
-var _scope_vessel_mat: StandardMaterial3D  # textured warm inner wall for private scope world
+var _scope_vessel_mat: Material  # profile-driven warm inner wall for private scope world
 var _vessel_mat_surgical: ShaderMaterial  # cyan fresnel + tip-proximity fade (follow/surgical)
 var _env: Environment  # world environment; endoscope toggles its depth fog
 var _vessel: Node3D  # current vessel scene root (freed/rebuilt on model switch)
@@ -266,6 +287,13 @@ func _update_debug() -> void:
 
 func _ready() -> void:
 	print("[Main] _ready: building scene")
+	_apply_scope_launch_overrides()
+	_scope_validation_capture_pending = (
+		"--scope-validation-capture" in OS.get_cmdline_user_args())
+	_scope_validation_motion = (
+		"--scope-validation-motion" in OS.get_cmdline_user_args())
+	_scope_validation_capture_pending = (
+		_scope_validation_capture_pending or _scope_validation_motion)
 	# Pick the launch model from the exported phantom name and pull its full
 	# config from MODELS so the table stays the single source of truth.
 	_model_index = _resolve_model_index(phantom)
@@ -278,6 +306,23 @@ func _ready() -> void:
 	_setup_network_and_input()
 	_hud.set_model(str(MODELS[_model_index].name))
 	print("[Main] camera pos=%s current=%s" % [_camera.position, _camera.current])
+
+
+func _apply_scope_launch_overrides() -> void:
+	for argument in OS.get_cmdline_user_args():
+		if argument.begins_with("--scope-render-profile="):
+			var profile_value := argument.trim_prefix("--scope-render-profile=")
+			if profile_value in ["baseline", "enhanced"]:
+				scope_render_profile = profile_value
+		elif argument.begins_with("--scope-render-quality="):
+			var quality_value := argument.trim_prefix("--scope-render-quality=")
+			if quality_value in ["performance", "balanced", "high"]:
+				scope_render_quality = quality_value
+		elif argument.begins_with("--scope-validation-output="):
+			_scope_validation_output = argument.trim_prefix(
+				"--scope-validation-output=")
+	print("[Scope] render profile=%s quality=%s" % [
+		scope_render_profile, scope_render_quality])
 
 
 func _resolve_model_index(phantom_name: String) -> int:
@@ -541,17 +586,16 @@ func _build_scope_pane(rootc: Control) -> void:
 	_scope_camera.cull_mask = _SCOPE_LAYER_MASK
 	_scope_viewport.add_child(_scope_camera)
 	_scope_camera.make_current()
-	_scope_headlight = OmniLight3D.new()
-	_scope_headlight.light_color = Color(1.0, 0.55, 0.36)
-	_scope_headlight.light_energy = 3.2
-	_scope_headlight.light_cull_mask = _SCOPE_LAYER_MASK
-	_scope_headlight.omni_range = 0.095
-	_scope_headlight.omni_attenuation = 1.35
-	_scope_headlight.shadow_enabled = false
-	# This light lives in the scope's private World3D, so it cannot illuminate
-	# the main scene and does not need a renderer-version-specific light mask.
-	_scope_headlight.position = Vector3(0.0, -0.001, -0.002)
-	_scope_camera.add_child(_scope_headlight)
+	_scope_camera_filter = EndoscopeCameraFilterScript.new()
+	_scope_camera_filter.configure(scope_render_quality)
+	_scope_lighting = EndoscopeLightingRigScript.new()
+	_scope_lighting.configure(
+		_SCOPE_LAYER_MASK, scope_render_profile, scope_render_quality)
+	_scope_camera.add_child(_scope_lighting)
+	# Compatibility handle used by older UI code/tests; brightness is now applied
+	# through the full key/fill rig so their energy ratio stays stable.
+	_scope_headlight = _scope_lighting.key_light
+	_apply_scope_render_quality()
 
 	_scope_overlay = EndoscopeOverlayScript.new()
 	_scope_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -645,8 +689,50 @@ func _setup_scope_environment() -> void:
 	# World units are metres. A high density makes a 5–10 cm lumen collapse into
 	# one flat red field; this light haze preserves branch depth without hiding it.
 	env.fog_density = 1.0
+	_scope_environment = env
 	world_env.environment = env
 	_scope_viewport.add_child(world_env)
+
+
+func _apply_scope_render_quality() -> void:
+	if _scope_viewport == null:
+		return
+	# TAA is intentionally disabled for a fast-moving near-wall camera; quality
+	# presets use private-viewport MSAA and never alter the main navigation view.
+	_scope_viewport.use_taa = false
+	if scope_render_profile == "baseline":
+		_scope_viewport.msaa_3d = Viewport.MSAA_DISABLED
+		_scope_target_fov = 85.0
+		if _scope_environment != null:
+			_scope_environment.glow_intensity = 0.34
+			_scope_environment.glow_bloom = 0.06
+			_scope_environment.tonemap_exposure = 1.0
+			_scope_environment.ambient_light_color = Color(0.52, 0.10, 0.045)
+		return
+	if _scope_environment != null:
+		_scope_environment.ambient_light_color = Color(0.58, 0.15, 0.065)
+	match scope_render_quality:
+		"performance":
+			_scope_viewport.msaa_3d = Viewport.MSAA_DISABLED
+			_scope_target_fov = 78.0
+			if _scope_environment != null:
+				_scope_environment.glow_intensity = 0.18
+				_scope_environment.glow_bloom = 0.035
+				_scope_environment.tonemap_exposure = 0.58
+		"high":
+			_scope_viewport.msaa_3d = Viewport.MSAA_4X
+			_scope_target_fov = 80.0
+			if _scope_environment != null:
+				_scope_environment.glow_intensity = 0.28
+				_scope_environment.glow_bloom = 0.05
+				_scope_environment.tonemap_exposure = 0.68
+		_:
+			_scope_viewport.msaa_3d = Viewport.MSAA_2X
+			_scope_target_fov = 79.0
+			if _scope_environment != null:
+				_scope_environment.glow_intensity = 0.24
+				_scope_environment.glow_bloom = 0.04
+				_scope_environment.tonemap_exposure = 0.62
 
 
 func _scope_frame_ready() -> bool:
@@ -675,6 +761,9 @@ func _update_scope_state() -> void:
 			Control.MOUSE_FILTER_STOP if ready else Control.MOUSE_FILTER_IGNORE)
 	if ready:
 		return
+	_scope_pose_initialized = false
+	if _scope_camera_filter != null:
+		_scope_camera_filter.reset()
 	if _scope_recording:
 		_scope_recording = false
 		_scope_record_elapsed_msec = 0
@@ -698,6 +787,8 @@ func _reset_scope_view() -> void:
 	if not _scope_frame_ready():
 		return
 	_scope_pose_initialized = false
+	if _scope_camera_filter != null:
+		_scope_camera_filter.reset()
 	print("[Scope] camera smoothing reset at current guidewire pose")
 
 
@@ -734,30 +825,54 @@ func _update_scope_timer() -> void:
 func _on_scope_brightness_changed(value: float) -> void:
 	var gain := clampf(value, 0.55, 1.35)
 	if _scope_vessel_mat != null:
-		_scope_vessel_mat.albedo_color = Color(
-			_SCOPE_BASE_ALBEDO.r * gain,
-			_SCOPE_BASE_ALBEDO.g * gain,
-			_SCOPE_BASE_ALBEDO.b * gain,
-			1.0)
-		_scope_vessel_mat.emission_energy_multiplier = 0.16 * gain
-	if _scope_headlight != null:
-		_scope_headlight.light_energy = 3.2 * gain
+		EndoscopeMaterialFactoryScript.apply_brightness(_scope_vessel_mat, gain)
+	if _scope_lighting != null and is_instance_valid(_scope_lighting):
+		_scope_lighting.set_brightness(gain)
 
 
 func _capture_scope_frame() -> void:
 	if not _scope_frame_ready() or _scope_viewport == null:
 		return
+	var stamp := Time.get_datetime_string_from_system().replace(":", "-")
+	_save_scope_frame("user://endoscope_capture_%s.png" % stamp)
+
+
+func _save_scope_frame(path: String) -> bool:
 	var image := _scope_viewport.get_texture().get_image()
 	if image == null or image.is_empty():
 		push_warning("[Scope] capture skipped: SubViewport returned no image")
-		return
-	var stamp := Time.get_datetime_string_from_system().replace(":", "-")
-	var path := "user://endoscope_capture_%s.png" % stamp
+		return false
+	if path.contains("scope-validation") or path.contains("scope_validation"):
+		var albedo_format := -1
+		var albedo_texture: Texture2D
+		if _scope_vessel_mat is StandardMaterial3D:
+			albedo_texture = (
+				_scope_vessel_mat as StandardMaterial3D).albedo_texture
+		elif _scope_vessel_mat is ShaderMaterial:
+			albedo_texture = (
+				_scope_vessel_mat as ShaderMaterial).get_shader_parameter(
+					"albedo_texture") as Texture2D
+		if albedo_texture != null:
+			var albedo_image := albedo_texture.get_image()
+			if albedo_image != null and not albedo_image.is_empty():
+				albedo_format = albedo_image.get_format()
+				print("[ScopeValidation] albedo_samples=%s,%s" % [
+					albedo_image.get_pixel(0, 0),
+					albedo_image.get_pixel(
+						int(albedo_image.get_width() / 2),
+						int(albedo_image.get_height() / 2)),
+				])
+		print("[ScopeValidation] image_format=%d albedo_format=%d" % [
+			image.get_format(), albedo_format])
+	if image.get_format() not in [Image.FORMAT_RGB8, Image.FORMAT_RGBA8]:
+		image.convert(Image.FORMAT_RGBA8)
 	var err := image.save_png(path)
 	if err == OK:
 		print("[Scope] frame saved: %s" % ProjectSettings.globalize_path(path))
+		return true
 	else:
 		push_warning("[Scope] failed to save frame (%d): %s" % [err, path])
+		return false
 
 
 func _toggle_scope_fullscreen() -> void:
@@ -1254,41 +1369,16 @@ func _apply_vessel_material(node: Node) -> void:
 	_vessel_mat_interior.emission = Color(0.36, 0.13, 0.12)
 	_vessel_mat_interior.emission_energy_multiplier = 0.3
 
-	# Private scope material: a deterministic red/orange mucosal noise texture adds
-	# surface variation while the geometry remains the actual vessel GLB. Camera-local
-	# lighting and the private world's fog provide relief and branch depth.
-	_scope_vessel_mat = StandardMaterial3D.new()
-	_scope_vessel_mat.albedo_color = _SCOPE_BASE_ALBEDO
-	_scope_vessel_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	_scope_vessel_mat.roughness = 0.72
-	_scope_vessel_mat.metallic = 0.0
-	_scope_vessel_mat.emission_enabled = true
-	_scope_vessel_mat.emission = _SCOPE_BASE_EMISSION
-	_scope_vessel_mat.emission_energy_multiplier = 0.16
-	var tissue_noise := FastNoiseLite.new()
-	tissue_noise.frequency = 0.018
-	tissue_noise.fractal_octaves = 5
-	var tissue_ramp := Gradient.new()
-	tissue_ramp.offsets = PackedFloat32Array([0.0, 0.34, 0.66, 1.0])
-	tissue_ramp.colors = PackedColorArray([
-		Color(0.34, 0.055, 0.025),
-		Color(0.66, 0.16, 0.075),
-		Color(0.90, 0.32, 0.16),
-		Color(0.48, 0.075, 0.035),
-	])
-	var tissue_texture := NoiseTexture2D.new()
-	tissue_texture.width = 512
-	tissue_texture.height = 512
-	tissue_texture.seamless = true
-	tissue_texture.noise = tissue_noise
-	tissue_texture.color_ramp = tissue_ramp
-	_scope_vessel_mat.albedo_texture = tissue_texture
-	# The VPP GLB intentionally has no UV channel. Triplanar projection keeps the
-	# tissue texture attached to the actual vessel surface instead of falling back
-	# to one flat texel (the solid-red result seen in runtime QA).
-	_scope_vessel_mat.uv1_triplanar = true
-	_scope_vessel_mat.uv1_world_triplanar = true
-	_scope_vessel_mat.uv1_scale = Vector3(70.0, 70.0, 70.0)
+	# The private scope material is profile-driven and never displaces the real
+	# vessel mesh. Baseline preserves the previous look; enhanced adds independent
+	# macro colour, mesoscopic roughness and micro-normal triplanar fields.
+	_scope_vessel_mat = EndoscopeMaterialFactoryScript.create_material(
+		scope_render_profile, scope_render_quality)
+	var initial_brightness := 0.92
+	if _scope_brightness_slider != null:
+		initial_brightness = float(_scope_brightness_slider.value)
+	EndoscopeMaterialFactoryScript.apply_brightness(
+		_scope_vessel_mat, initial_brightness)
 
 	# Surgical (follow) material: the same Fresnel glow, additionally faded by
 	# distance from the guidewire tip. Fragments within `fade_near` of the tip keep
@@ -1693,12 +1783,15 @@ func _on_batch(batch: Dictionary) -> void:
 	# they arrive only on the first batch / after a reset or route switch.
 	var path_info: Dictionary = batch.get("path", {})
 	var path_wps: Array = path_info.get("waypoints", [])
+	var radius_value: Variant = path_info.get("vessel_radius", null)
+	if (typeof(radius_value) == TYPE_FLOAT or typeof(radius_value) == TYPE_INT) \
+			and float(radius_value) > 0.0005:
+		_scope_radius_target = clampf(float(radius_value), 0.0015, 0.008)
 	if not path_wps.is_empty():
 		_path_waypoints = path_wps
 		if _rig != null and is_instance_valid(_rig):
 			_rig.set_navigation_route(path_wps)
 		var route_radius := -1.0
-		var radius_value: Variant = path_info.get("vessel_radius", null)
 		if typeof(radius_value) == TYPE_FLOAT or typeof(radius_value) == TYPE_INT:
 			route_radius = float(radius_value)
 		_update_vessel_route_visibility(path_wps, true, route_radius)
@@ -1818,6 +1911,8 @@ func _process(delta: float) -> void:
 	_sync_direction_cube()
 	_sync_scope_endoscope_camera(delta)
 	_update_scope_timer()
+	_sample_scope_performance(delta)
+	_tick_scope_validation_capture(delta)
 	if _controls_blocked or not _autopilot_active:
 		return
 	_autopilot_accum += delta
@@ -1825,6 +1920,82 @@ func _process(delta: float) -> void:
 		return
 	_autopilot_accum = 0.0
 	_ws.send_control(0.0, 0.0)
+
+
+func _tick_scope_validation_capture(delta: float) -> void:
+	if not _scope_validation_capture_pending or not _scope_frame_ready():
+		return
+	if _scope_validation_motion_stage == 1:
+		_scope_validation_motion_accum += delta
+		if _scope_validation_motion_accum < 0.05:
+			return
+		_scope_validation_motion_accum = 0.0
+		if _ws != null and is_instance_valid(_ws) and not _controls_blocked:
+			_ws.send_control(0.28, 0.18)
+			_scope_validation_motion_steps += 1
+		if _scope_validation_motion_steps < 60:
+			return
+		_ws.send_control(0.0, 0.0)
+		_scope_validation_motion_stage = 2
+		_scope_validation_capture_frames = 0
+		print("[ScopeValidation] real motion controls complete: %d" %
+			_scope_validation_motion_steps)
+		return
+	_scope_validation_capture_frames += 1
+	if _scope_validation_capture_frames < 180:
+		return
+	var suffix := ""
+	if _scope_validation_motion:
+		suffix = "before" if _scope_validation_motion_stage == 0 else "after"
+	var path := _scope_validation_capture_path(suffix)
+	if not _save_scope_frame(path):
+		return
+	if _scope_validation_motion and _scope_validation_motion_stage == 0:
+		_scope_validation_motion_stage = 1
+		_scope_validation_capture_frames = 0
+		print("[ScopeValidation] before-motion capture complete")
+	else:
+		_scope_validation_capture_pending = false
+		print("[ScopeValidation] capture complete")
+
+
+func _scope_validation_capture_path(suffix: String) -> String:
+	var path := _scope_validation_output
+	if path.is_empty():
+		path = "user://scope_validation_%s_%s.png" % [
+			scope_render_profile, scope_render_quality]
+	if suffix.is_empty():
+		return path
+	return "%s_%s.%s" % [
+		path.get_basename(), suffix, path.get_extension()]
+
+
+func _sample_scope_performance(delta: float) -> void:
+	if _scope_perf_reported or not _scope_frame_ready():
+		return
+	_scope_frame_times_ms.append(delta * 1000.0)
+	if _scope_frame_times_ms.size() < _SCOPE_PERF_SAMPLE_COUNT:
+		return
+	var sorted_samples := _scope_frame_times_ms.duplicate()
+	sorted_samples.sort()
+	var total_ms := 0.0
+	for sample in _scope_frame_times_ms:
+		total_ms += sample
+	var average_ms := total_ms / float(_scope_frame_times_ms.size())
+	var p95_index := clampi(
+		int(ceil(float(sorted_samples.size()) * 0.95)) - 1,
+		0,
+		sorted_samples.size() - 1)
+	var average_fps := 1000.0 / maxf(average_ms, 0.001)
+	print("[ScopePerf] profile=%s quality=%s frames=%d avg_fps=%.1f avg_ms=%.2f p95_ms=%.2f" % [
+		scope_render_profile,
+		scope_render_quality,
+		_scope_frame_times_ms.size(),
+		average_fps,
+		average_ms,
+		sorted_samples[p95_index],
+	])
+	_scope_perf_reported = true
 
 
 
@@ -1837,13 +2008,36 @@ func _sync_scope_endoscope_camera(delta: float) -> void:
 	if not _scope_pose_initialized:
 		_scope_camera.global_transform = target_transform
 		_scope_pose_initialized = true
+		if _scope_camera_filter != null:
+			_scope_camera_filter.reset()
 	else:
-		var blend := clampf(scope_camera_smooth * delta, 0.0, 1.0)
-		_scope_camera.global_transform = _scope_camera.global_transform.interpolate_with(
-			target_transform, blend)
-	_scope_camera.fov = _rig.endoscope_cam.fov
+		if scope_render_profile == "baseline":
+			var blend := clampf(scope_camera_smooth * delta, 0.0, 1.0)
+			_scope_camera.global_transform = _scope_camera.global_transform.interpolate_with(
+				target_transform, blend)
+		elif _scope_camera_filter != null:
+			_scope_camera.global_transform = _scope_camera_filter.update(
+				target_transform, delta)
+	_scope_camera.fov = (
+		_rig.endoscope_cam.fov
+		if scope_render_profile == "baseline"
+		else _scope_target_fov)
 	_scope_camera.near = _rig.endoscope_cam.near
-	_scope_camera.far = minf(2.0, _rig.endoscope_cam.far)
+	if _scope_lighting != null and is_instance_valid(_scope_lighting):
+		_scope_lighting.update_radius(_scope_radius_target, delta)
+		var radius_m: float = _scope_lighting.get_smoothed_radius()
+		if scope_render_profile == "baseline":
+			_scope_camera.far = minf(2.0, _rig.endoscope_cam.far)
+			if _scope_environment != null:
+				_scope_environment.fog_density = 1.0
+		else:
+			_scope_camera.far = minf(
+				clampf(radius_m * 45.0, 0.30, 0.90),
+				_rig.endoscope_cam.far)
+			if _scope_environment != null:
+				var radius_t := clampf(
+					inverse_lerp(0.0015, 0.006, radius_m), 0.0, 1.0)
+				_scope_environment.fog_density = lerpf(0.35, 0.85, radius_t)
 # Left click -> pick the route waypoint whose ON-SCREEN position is nearest the
 # click, and drive the tip there via the backend autopilot. Robust to coordinate
 # frames: the waypoints are in the backend meter frame and rendered under the path

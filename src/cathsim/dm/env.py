@@ -183,9 +183,8 @@ class Scene(composer.Arena):
         Returns:
             mjcf.Element: The light element
         """
-        light = self._mjcf_root.worldbody.add(
-            "light", pos=pos, dir=dir, castshadow=False, **kwargs
-        )
+        kwargs.setdefault("castshadow", False)
+        light = self._mjcf_root.worldbody.add("light", pos=pos, dir=dir, **kwargs)
 
         return light
 

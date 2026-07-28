@@ -1,5 +1,38 @@
 # Progress Log
 
+## 2026-07-28 MuJoCo 分割与全量测试修复
+- **Status:** in_progress
+- 已恢复会话、读取规划文件并复核 Git 状态；目标源码和 8 个旧测试无用户未提交修改。
+- 已确认修复范围：分割背景兼容层、现代化 8 个旧测试、完整收集和全量 pytest。
+
+## 2026-07-27 本地前后端展示
+- **Status:** in_progress
+- 已运行仓库内 session-catchup，读取三份规划文件并复核 `git diff --stat`；现有未提交腔镜实现保持不变。
+- 当前 9000 端口空闲，配置为 localhost；下一步启动本轮专用后端日志和实际 Godot GUI。
+- 后端启动成功并保持运行：PID 40684，健康接口通过；Warp 缓存使用工作区 `.tmp/warp`，已有本地 WebSocket 连接。
+- Godot GUI PID 34888 启动成功；session `e4bb3db7-ae7c-4c45-b4c1-b6c2762c8b6c` 已收到 NewtonEngine 首个 state_batch（2152 路径点），窗口 `CathSim VPP Client (DEBUG)` 已置前。
+- 最终健康与日志复核通过：前后端进程均响应，运行错误扫描为 CLEAN。前后端保持运行，交由用户本地操作。
+- **Status:** complete
+
+## 2026-07-27 当前工作树本地测试
+- **Status:** in_progress
+- 已确认当前分支 `guidewire-device-procedure-design` 比远端领先 1 个提交，工作树包含尚未提交的腔镜渲染、前端契约测试、文档和规划文件改动；本轮测试保留并覆盖当前工作树，不执行 reset/checkout。
+- 已按 `planning-with-files` 运行会话恢复。全局脚本路径不存在，记录为一次环境路径错误；改用仓库内 `.codex/skills/planning-with-files/scripts/session-catchup.py` 后成功恢复上下文。
+- 下一步：确认 README/测试入口与运行环境，然后执行自动化、Godot、后端和 WebSocket 实测。
+- 环境复核完成：Python/Godot/依赖均可调用；默认 WebSocket 地址是 localhost；本地后端当前未运行。发现两个未知 Godot 进程，因无法安全确认命令行而保持不动。
+- 前端定向回归：`python -m pytest tests/test_frontend_contract.py -q` → `3 passed in 0.05s`。
+- 全量收集：`python -m pytest --collect-only -q` → 收集 261 项，但 8 个旧测试模块发生收集错误并中断；已记录逐项原因，下一轮隔离这些收集级失败后执行其余测试。
+- 静态差异检查：`git diff --check` 通过，仅有 LF→CRLF 提示。
+- 可执行测试第一轮（隔离 8 个 collection error 模块）：`241 passed, 1 skipped, 4 failed, 15 errors in 137.82s`。15 个 setup error 已归因为沙箱不可写的 pytest 默认 Temp；4 个断言期失败均集中在旧 dm_control segmentation 渲染。
+- 工作区 basetemp 复测：`19 passed, 4 failed in 22.04s`；此前 15 个权限型 setup error 全部通过，4 个 dm_control 失败稳定复现。可执行集合合并结果：`256 passed, 1 skipped, 4 failed`。
+- Godot 第一次校验未形成有效结果：显式传入非 console EXE 后 PowerShell 未取得退出码，脚本以空 `$LASTEXITCODE` 误报导入失败；下一次切换 console EXE。
+- Godot console 在沙箱内完成项目启动，但被证书库/AppData 权限错误拦截；获准在正常权限复跑后 `Godot validation passed`，真实 GLB 与 enhanced/balanced 渲染脚本加载正常。
+- 本地后端启动成功，健康接口为 ok/vpp_ready=true/case_001，Warp 识别 RTX 4060。
+- 第一次 WebSocket 探针失败：旧脚本落入 MuJoCo 并使用无效 `endpoint_9` target；已记录服务端栈，下一轮按当前协议显式测试 Newton。
+- 当前协议 WebSocket/Newton 复测通过：`session_started` 确认为 NewtonEngine/newton_demo/physics；初始 20 bodies、139 path points；控制后收到 state_batch（progress≈0.1061、SAFE_NAV）；session_stop 正常。
+- 最终健康检查通过；成功会话未出现 PONG_TIMEOUT/SESSION_ERROR。本轮创建的后端 PID 38812 已关闭，9000 端口恢复空闲。
+- **Status:** complete。产品代码未改；测试证据和遗留问题已写入规划文件。
+
 ## Session: 2026-07-24
 
 ### Phase 1: 需求与现状发现
@@ -166,3 +199,212 @@
   - Godot 运行日志：通过；真实血管 GLB 加载、WebSocket 连接、`session_started`、NewtonEngine `state_batch` 均成功。
 - Errors:
   - `Get-CimInstance Win32_Process` 在非提升权限下返回拒绝访问；已改用 `Get-Process` 和端口监听检查。
+
+### Phase 7: 血管内壁渲染优化方案
+- **Status:** complete
+- Actions taken:
+  - 按用户要求只进入方案阶段，不修改 GDScript 渲染实现。
+  - 复核腔镜相机、同轴头灯、ACES/glow/雾、三平面噪声材质、亮度控制和光学叠加层。
+  - 对照 14% 路径位置实机截图，确认当前优势是真实几何与运动一致，主要短板是微表面、湿润高光、非对称照明、深度分层和运动稳定性。
+  - 核对 Godot 4.7 官方材质、spatial shader、Forward+ 后处理和专用 Viewport 抗锯齿能力；确定“原生材质通道 → 小型 shader → 可选后处理”的渐进路线。
+  - 完成 `doc/4.前端层/腔镜血管内壁渲染优化方案_2026-07-24.md`，覆盖真实性边界、候选路线、阶段 0～4、参数起点、性能预算、测试矩阵和回退策略。
+  - 推荐默认采用多尺度三平面微表面、粗糙度/法线/低强度 clearcoat、偏轴辅光、半径自适应光照与雾、FOV 78～80°、2× MSAA；TAA 与高级后处理保持关闭或可选。
+- Test Results:
+  - 方案审查：通过；内容明确不改变真实 GLB 拓扑，不生成虚假分叉，并区分“视觉近似”与诊断级医学成像。
+  - 实施门禁：通过；本阶段未修改任何 GDScript、场景、材质或运行配置，等待用户确认后再进入基线采集和代码实现。
+- Files created/modified:
+  - `doc/4.前端层/腔镜血管内壁渲染优化方案_2026-07-24.md`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+## Session: 2026-07-24 — 实施血管内壁渲染优化阶段 0～3
+
+### Stage 0: 可复现基线
+- **Status:** complete
+- Actions taken:
+  - 重新完整读取 `planning-with-files`、批准的优化方案以及三份持久计划文件。
+  - 运行 `session-catchup.py`；检测到上一轮方案交付和本轮批准指令，已依据实际 Git 状态恢复。
+  - 确认工作区原有修改和方案文档均保留；未执行 reset/checkout。
+  - 建立阶段 0～3 的执行清单，阶段 4 高级后处理不在本轮范围内。
+  - 复核 `main_controller.gd` 的基线材质、环境、灯光、相机同步和 `state_batch.path.vessel_radius` 数据入口。
+  - 确认当前本地后端健康、Godot/Newton 会话在线，运行日志含真实状态批次和连续路径导航记录，可继续用于增强前后 A/B。
+  - 通过 Godot 4.7.1 运行时属性反射确认原生法线噪声、粗糙度、clearcoat、三平面锐度和 mipmap 的准确属性名。
+  - 复核 `camera_rig.gd` 和现有契约测试，确定优化只作用于私有腔镜相机，并同步升级测试锚点。
+  - 在不改变渲染参数的前提下加入 300 帧一次性 `[ScopePerf]` 采样，准备记录旧渲染平均 FPS、平均帧时和 P95 帧时。
+  - 关闭旧客户端并通过已验证的 Godot console 前台命令重启；后端保持运行，客户端重新进入真实 LIVE。
+- Test Results:
+  - 基线前端契约：`cathsim-dev/python -m pytest tests/test_frontend_contract.py -q` → `3 passed in 0.10s`。
+  - 基线运行日志：未发现 `SCRIPT ERROR`/`ERROR:`；后端健康检查通过，Newton 状态流在线。
+  - 基线视觉证据：保留 `scope-final-before-motion.png`、`scope-final-after-motion.png`、`scope-final-advanced.png`，三张 SHA-256 不同，可用于入口/推进/深入位置 A/B。
+  - 基线性能采样脚本校验：`scripts/validate_godot.ps1` → `Godot validation passed`，真实 GLB 加载成功。
+  - 300 帧性能基线：`[ScopePerf] profile=baseline quality=legacy frames=300 avg_fps=698.5 avg_ms=1.43 p95_ms=1.39`。
+- Errors:
+  - 首次调用 `C:\Users\Xu Bingxuan\.conda\envs\cathsim-dev\python.exe` 时未使用 PowerShell `&`，路径在空格处被截断；将使用调用运算符重跑。
+  - 修复后使用 `& '完整路径'` 重跑成功，未再采用失败写法。
+  - Godot 校验结束时因沙箱权限无法保存用户级 `editor_settings-4.7.tres`；项目校验已在该错误前明确通过，未修改或申请写入用户配置目录。
+  - 使用 `Start-Process` 数组参数重启基线客户端后，45 秒内未生成指定日志；下一步检查进程/参数，不继续相同轮询。
+  - 检查确认 `Start-Process` 新进程已退出且没有目标日志；改用与此前实机验证相同的 Godot console 前台保持方式后采样成功。
+
+### Stage 1: 低风险材质升级
+- **Status:** complete
+- Actions taken:
+  - 按 baseline/enhanced profile 和 performance/balanced/high 质量档设计独立材质工厂。
+  - 新增 `scripts/rendering/endoscope_material_factory.gd`，生成无 UV 的世界三平面宏观颜色、粗糙度和微法线纹理。
+  - 为 enhanced profile 加入 mipmap、各向异性过滤、低强度 clearcoat 和更低自发光；baseline 完整保留旧材质参数。
+  - 主控制器改为通过 profile/quality 构建材质，并让亮度滑杆调用统一材质增益。
+  - 升级前端契约测试，使其检查独立材质工厂与关键通道，而不是要求噪声实现留在主控制器。
+- Test Results:
+  - `cathsim-dev/python -m pytest tests/test_frontend_contract.py -q` → `3 passed in 0.12s`。
+  - `scripts/validate_godot.ps1` → `Godot validation passed`；Godot 注册材质全局类并加载真实血管 GLB。
+- Errors:
+  - 阶段完成时跨三文件的复合进度补丁锚点匹配失败；读取磁盘尾部后拆分为三个小补丁完成同步。
+- Files created/modified:
+  - `godot_client/scripts/rendering/endoscope_material_factory.gd`
+  - `godot_client/scripts/main_controller.gd`
+  - `tests/test_frontend_contract.py`
+
+### Stage 2: 照明与深度
+- **Status:** complete
+- Actions taken:
+  - 设计相机同轴主灯、3 mm 偏轴补光以及局部半径低通/安全默认值。
+  - 新增 `scripts/rendering/endoscope_lighting_rig.gd`，在私有相机下创建主灯和 3.5 mm 偏轴补光，保持固定质量档能量比例。
+  - 从每个 `state_batch.path.vessel_radius` 保存有效半径，并以低通后的半径驱动灯光范围、衰减和能量。
+  - 保存私有 `Environment` 引用，使增强模式动态调整 far 与指数雾；baseline 保持旧光学参数。
+  - 亮度滑杆改为统一传给灯光组件，不再单独破坏主灯/补光比例。
+  - 扩展契约测试，覆盖双灯、半径低通、range 公式与动态雾入口。
+- Test Results:
+  - `cathsim-dev/python -m pytest tests/test_frontend_contract.py -q` → `3 passed in 0.10s`。
+  - `scripts/validate_godot.ps1` → `Godot validation passed`；Godot 注册照明全局类并加载真实血管 GLB。
+- Files created/modified:
+  - `godot_client/scripts/rendering/endoscope_lighting_rig.gd`
+  - `godot_client/scripts/main_controller.gd`
+  - `tests/test_frontend_contract.py`
+
+### Stage 3: 相机稳定与质量档
+- **Status:** complete
+- Actions taken:
+  - 设计位置临界阻尼、旋转独立平滑、投影 up 向量 roll 限幅以及 profile/quality 视口配置。
+  - 用 Godot 4.7.1 运行时反射确认 `SubViewport.msaa_3d`、`use_taa` 以及 2×/4× MSAA 枚举可用。
+  - 新增 `scripts/rendering/endoscope_camera_filter.gd`，实现位置临界阻尼、旋转独立响应和光轴 roll 速率限制。
+  - 将断连、模型 teardown、手动重置统一接入滤镜 reset，防止跨会话沿旧姿态插值。
+  - 增加三档私有视口配置：performance 无 MSAA、balanced 2×、high 4×；三档均关闭 TAA，并分别设置 FOV/glow。
+  - 扩展契约测试，覆盖临界阻尼、roll 限制、2×/4× MSAA 与 TAA 关闭。
+- Test Results:
+  - `cathsim-dev/python -m pytest tests/test_frontend_contract.py -q` → `3 passed in 0.10s`。
+  - `scripts/validate_godot.ps1` → `Godot validation passed`；Godot 注册相机滤镜类并加载真实血管 GLB。
+- Errors:
+  - 临时 Viewport 属性探针创建节点后未释放，退出时报告 RID/ObjectDB 泄漏；该探针不属于项目运行代码，已定位为临时节点生命周期问题。
+- Files created/modified:
+  - `godot_client/scripts/rendering/endoscope_camera_filter.gd`
+  - `godot_client/scripts/main_controller.gd`
+  - `tests/test_frontend_contract.py`
+
+### Final validation: 真实运行、视觉与性能
+- **Status:** complete
+- Actions taken:
+  - 准备以 enhanced/balanced、localhost 和真实 NewtonEngine 重新启动实际客户端。
+  - 实际 Godot Forward+ 使用 RTX 4060 Laptop GPU 启动，重新建立 session `a1a85a5d-548f-482c-a0ee-7826bb1318ca` 并收到 NewtonEngine 首个真实 `state_batch`。
+  - 经批准在交互权限下启动非 console 客户端，并把 `GODOT_USER_HOME` 定向到工作区 `.tmp/godot-user`；新 session `dcfd51c5-6f7e-49b9-baf2-eb397d39c26f` 正常进入 LIVE。
+  - 因当前工具会话无法枚举 Godot 顶层窗口，选择复用 SubViewport 原生截图路径，增加显式命令行验证开关，而不捕获可能包含其他内容的整个桌面。
+- Test Results:
+  - enhanced/balanced 300 帧：`avg_fps=681.4`、`avg_ms=1.47`、`p95_ms=1.39`；相同启动方式下较 baseline 平均帧时增加 0.04 ms（约 2.8%），远低于 16.7 ms 预算。
+  - 运行日志未出现 `SCRIPT ERROR`、解析错误或无效属性；真实 GLB、WebSocket、session 和 Newton 状态流均正常。
+  - 工作区用户目录复测的 300 帧结果：`avg_fps=716.7`、`avg_ms=1.40`、`p95_ms=1.67`；未再出现 shader cache 保存错误。
+  - 自动 SubViewport 截图功能正常：保存 `scope_validation_enhanced_balanced.png`，日志无脚本错误。
+  - 首次增强视觉验收：失败；画面大面积暗红，真实腔口和褶皱只集中在中央小区域，需调光/材质回归后重测。
+  - 增加命令行 profile/quality 覆盖，准备在完全相同的自动 SubViewport 截图流程下生成 baseline 对照。
+  - baseline 自动 SubViewport 对照已生成：画面全域可见真实壁面纹理，确认 enhanced 初版暗化是材质/光程调参问题而非相机进入不同位置。
+  - 第一轮提高灯光 range/energy、far、自发光并降低 normal/clearcoat 后重新截图；画面仍大面积暗红，视觉验收继续失败，转入法线通道隔离诊断。
+  - 临时关闭 enhanced normal map 后截图仍过暗，排除法线通道为主因；转而修正三平面颜色的空间尺度和亮度覆盖。
+  - 恢复更细的颜色周期和 scale=70 后，增强画面全域壁面纹理与纵深恢复，第二轮视觉调优通过基础可读性门槛；准备重新启用低强度 normal 做最终对照。
+  - 重新启用 balanced 微法线后截图视觉保持稳定，未复现暗化；300 帧为 `avg_ms=1.54`、`p95_ms=1.52`，下一步量化亮度并做真实运动对照。
+  - 直方图确认 enhanced 中位亮度仅 15.31/255、p95 19.56 且无过曝；决定使用私有环境 tonemap exposure 提亮，而不是继续用自发光压平表面。
+  - balanced exposure=2.0 后中位亮度提高到 26.01、暗像素降至 0.07%、仍无过曝；视觉可读性通过，最后微调红橙色平衡。
+  - 自动真实运动模式完成：60 个 `push=0.28, rot=0.18` 控制帧，前后截图 98.74% 像素不同且哈希不同；相机/纹理随 Newton 状态连续变化。
+  - 差分统计发现绿色通道近乎为 0，画面仍偏纯红；需完成 RGB 通道诊断后再冻结最终色彩参数。
+- Errors:
+  - GPU 启动时出现一次 `_save_to_cache` 的 `Condition "f.is_null()"`，但后续渲染和性能采样正常；将用工作区 Godot 用户目录复测，区分沙箱缓存写权限与项目 shader 错误。
+  - 首次窗口截图仅匹配非 console Godot 进程名，未找到 GUI；将先枚举实际窗口句柄再捕获。
+  - 枚举 PID 53152/53040 的所有顶层窗口仍为空，确认 console 前台工具单元可渲染但没有交互桌面窗口；改用参数整体引用的非 console `Start-Process`。
+  - 修正参数引用并设置工作区 `GODOT_USER_HOME` 后，沙箱内非 console 进程仍立即退出且没有日志；判定为 GUI 交互桌面权限边界，下一次改为申请提升权限启动。
+  - baseline console 自动截图反复返回保存错误码 12：`user://` 仍指向不可写 AppData；终止该进程并改为显式工作区输出参数。
+  - Environment 临时属性探针误对 RefCounted 调用 `free()`，导致探针脚本超时；属性已取得，已移除错误释放，不涉及项目运行脚本。
+  - 把 NoiseTexture 配置顺序改为 ramp→noise 后，首次 enhanced RGB 捕获 35 秒内未完成；先查日志，不重复等待相同条件。
+  - 日志和健康检查确认根因是原 uvicorn 保持进程达到 1 小时时限，非材质或脚本错误；将重启后端并复用当前客户端自动重连。
+  - 截图格式诊断确认 viewport=RGB8、albedo=RGBA8，转换 PNG 不是绿色通道丢失原因；继续采样实际 albedo 像素。
+  - albedo 像素确认含 RGB；临时 unshaded 输出也恢复橙色，定位为真实网格外向法线在腔内背面没有进入正常光照，而不是纹理、PNG 或色调映射问题。
+  - 原生 `CULL_FRONT` 隔离仍为纯红，正式触发方案中的小型 spatial shader 路线；baseline StandardMaterial 保持不变。
+  - 新增 `endoscope_wall.gdshader`，显式内向法线、三平面颜色/粗糙度/微法线和湿润高光；首次 custom light 编译发现 `CLEARCOAT` 作用域限制。
+  - 记录该错误的首次跨文件补丁锚点不匹配，已读取实际文件尾部并改用小补丁。
+  - 修复策略：light 函数直接读取 `clearcoat_strength` uniform，不读取 fragment 输出。
+  - 引擎 custom light 仍未恢复 RGB，改为 shader 内基于真实内向法线、相机位置和偏轴方向计算光照；截图首次恢复橙红色，meanRGB≈`(219.4, 52.9, 23.7)`。
+  - 手动光首版高光偏亮并有红通道裁剪，继续降低 exposure/光照系数后再冻结。
+  - 最终 balanced exposure=0.62 并降低光照系数后，meanRGB≈`(187.1, 32.1, 15.0)`、红通道 0% 裁剪；亮橙高光和暗红阴影同时保留。
+  - 最终静态 300 帧性能：`avg_ms=1.83`、`p95_ms=1.56`，满足性能预算。
+  - 最终真实运动回归完成：60 个 `push=0.28, rot=0.18` 控制帧，前后截图 99.95% 像素不同，mean abs RGB≈`(32.1, 28.8, 9.1)`。
+  - 运动期间性能：`avg_ms=2.27`、`p95_ms=4.17`；运动后仍保持橙红内壁、褶皱、高光和纵深。
+  - 最终契约首次回归为 `1 failed, 2 passed`：测试仍匹配修改前的 `render_mode cull_front` 连续字符串；实现中的 `unshaded, cull_front` 合法，更新契约为独立语义断言后重跑。
+  - 第二次契约回归仍为 `1 failed, 2 passed`：遗留 `CLEARCOAT` 断言未随手动湿润高光实现更新；Godot 校验同时通过，测试改查 `clearcoat_strength` 与 `wet_highlight` 后重跑。
+  - 修复契约后 `tests/test_frontend_contract.py` → `3 passed in 0.10s`。
+  - performance/balanced/high 三档及 baseline 回退 profile 均完成 Godot headless 启动：退出码 0、profile 日志匹配、0 个 shader/script/parse/invalid 错误。
+  - `git diff --check` 通过，仅有 Windows LF→CRLF 提示；未执行 reset/checkout，用户既有未提交修改保持不变。
+  - 最终实际客户端 PID 23664 已启动并保持运行；profile=`enhanced`、quality=`balanced`，session `636d51ef-4bc5-4db8-8ce7-bc686c849dbc` 收到 NewtonEngine 首个 `state_batch`。
+- Files created/modified:
+  - `godot_client/scripts/rendering/endoscope_material_factory.gd`
+  - `godot_client/scripts/rendering/endoscope_lighting_rig.gd`
+  - `godot_client/scripts/rendering/endoscope_camera_filter.gd`
+  - `godot_client/scripts/rendering/endoscope_wall.gdshader`
+  - `godot_client/scripts/main_controller.gd`
+  - `tests/test_frontend_contract.py`
+  - `doc/4.前端层/腔镜血管内壁渲染优化方案_2026-07-24.md`
+  - `task_plan.md`、`findings.md`、`progress.md`
+
+## 2026-07-24 中断恢复校验
+- 按 `planning-with-files` 重新读取 `task_plan.md`、`findings.md` 与 `progress.md`；阶段 0～3 及交付阶段均已完成，没有遗留代码实施项。
+- 当前 Godot 客户端 PID `23664` 仍在响应，运行配置为 `enhanced/balanced`。
+- 后端 `/api/v1/health` 返回 `status=ok`、`vpp_ready=true`、`case_001`。
+- 最终运行日志仍包含 `session_started`、`engine=NewtonEngine` 与首个真实 `state_batch`；人工测试环境保持可用。
+- 恢复后重跑 `tests/test_frontend_contract.py -q`：`3 passed in 0.05s`。
+- `git diff --check` 通过，仅报告既有的 Windows LF→CRLF 提示。
+- 测试后再次确认客户端 PID `23664` 正常响应，后端健康状态仍为 `ok`；当前可继续人工测试。
+- Errors:
+  - 首次追加恢复记录时使用了文件中不存在的末尾锚点，`apply_patch` 校验失败；读取实际文件尾部后改用现有文件清单作为锚点完成追加。
+
+## 2026-07-24 再次中断恢复
+- **Status:** complete
+- Actions taken:
+  - 完整读取 `planning-with-files` 技能以及三份持久化任务文件。
+  - 运行 `session-catchup.py`，确认未同步上下文只涉及此前已完成的恢复与交付消息。
+  - 运行 `git diff --stat` 并复核工作区；阶段 0～3 的实现仍在，未执行 reset/checkout。
+  - 后端 `/api/v1/health` 返回 `status=ok`、`vpp_ready=true`、`case_001`。
+  - 发现此前人工测试客户端 PID `23664` 已退出；本轮从重新启动实际客户端继续。
+  - 重新启动实际 Godot GUI，PID `50972`，profile=`enhanced`、quality=`balanced`。
+  - 新 session `40185414-efcd-4b8f-a1d4-b6b806d73f50` 已收到 `engine=NewtonEngine` 的首个真实 `state_batch`。
+- Test Results:
+  - `pytest tests/test_frontend_contract.py -q` → `3 passed in 0.04s`。
+  - 新运行日志扫描 → 未发现 shader、script、parse 或 invalid 错误。
+  - 恢复后端健康复核 → `status=ok`、`vpp_ready=true`。
+  - `git diff --check` → 通过，仅有 Windows LF→CRLF 提示。
+- Errors:
+  - 首次同步完成状态时 `findings.md` 锚点与实际末尾不一致，复合补丁未应用；读取三个文件实际尾部后拆分并使用现有段落锚点。
+
+## 2026-07-28 MuJoCo 分割兼容与旧测试迁移
+- **Status:** complete
+- Actions taken:
+  - 在 `src/cathsim/dm/observables.py` 增加受限兼容解码：白色/非法分割 ID 映射为背景，其他类型的 `IndexError` 不被吞掉。
+  - 迁移 `test_data.py`、`test_dm_env.py`、`test_guidewire.py`、`test_gym_env.py`、`test_phantom.py`、`test_sb3_train.py`、`test_scene.py`、`test_utils.py` 到当前包路径、Gymnasium 与 RL API。
+  - 更新 `test_task.py` 使用 `get_camera_matrix()` 的返回值，并释放测试相机场景。
+  - 修复 `Scene.add_light()` 显式传入 `castshadow` 时的重复关键字问题。
+  - 在 pytest 配置加入仓库根目录，确保顶层 `services/` 与 `tools/` 可从直接 pytest 入口收集。
+- Test Results:
+  - 8 个迁移文件：`37 tests collected`，0 collection error。
+  - 完整测试收集：`298 tests collected in 11.30s`，0 collection error。
+  - 迁移文件 + 原 `test_task.py`：`44 passed`。
+  - 收窄异常兼容路径后，分割/Task/Scene：`12 passed in 21.49s`。
+  - 最终全量：`297 passed, 1 skipped, 6 warnings in 130.92s`。
+- Errors:
+  - 第一轮针对性测试发现 7 个额外旧契约断言；按当前实现分别更新，并修复 `add_light` 的真实兼容缺陷。
+  - 直接 `pytest.exe` 首次完整收集有 15 个顶层包导入错误；配置 `pythonpath = ["."]` 后完整收集通过。
+- Scope protection:
+  - 未改动 RL 训练算法、数据采集/回放业务、DSA 面板或 Godot 前端；现有用户前端/腔镜未提交变更保持原样。

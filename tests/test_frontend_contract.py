@@ -223,6 +223,18 @@ def test_endoscope_pane_uses_live_vessel_world_and_real_controls():
     icons = (ROOT / "godot_client/scripts/ui/pane_tool_icon.gd").read_text(
         encoding="utf-8"
     )
+    material_factory = (
+        ROOT / "godot_client/scripts/rendering/endoscope_material_factory.gd"
+    ).read_text(encoding="utf-8")
+    lighting_rig = (
+        ROOT / "godot_client/scripts/rendering/endoscope_lighting_rig.gd"
+    ).read_text(encoding="utf-8")
+    camera_filter = (
+        ROOT / "godot_client/scripts/rendering/endoscope_camera_filter.gd"
+    ).read_text(encoding="utf-8")
+    wall_shader = (
+        ROOT / "godot_client/scripts/rendering/endoscope_wall.gdshader"
+    ).read_text(encoding="utf-8")
 
     # The scope owns an isolated 3D world and renders the real vessel copy from
     # the guidewire's live front pose instead of a decorative 2D tunnel.
@@ -238,16 +250,53 @@ def test_endoscope_pane_uses_live_vessel_world_and_real_controls():
 
     # Illumination and wall appearance are part of the render path, while the
     # bottom controls change real frontend state or produce an output file.
-    assert "FastNoiseLite.new()" in main
+    assert "scope_render_profile" in main
+    assert "scope_render_quality" in main
+    assert "EndoscopeMaterialFactoryScript.create_material" in main
     assert "_scope_vessel_mat" in main
     assert "func _on_scope_record_toggled" in main
     assert "func _on_scope_brightness_changed" in main
     assert "func _capture_scope_frame" in main
+    assert "--scope-validation-capture" in main
+    assert "--scope-render-profile=" in main
+    assert "--scope-render-quality=" in main
+    assert "--scope-validation-output=" in main
+    assert "--scope-validation-motion" in main
+    assert "real motion controls complete" in main
+    assert "func _save_scope_frame" in main
     assert "func _toggle_scope_fullscreen" in main
 
     assert "等待腔镜数据" in fallback
     assert "range(28)" not in fallback
     assert "draw_colored_polygon" not in fallback
     assert "class_name EndoscopeOverlay" in overlay
+    assert "class_name EndoscopeMaterialFactory" in material_factory
+    for feature in (
+        "roughness_texture",
+        "normal_texture",
+        "uv1_world_triplanar",
+        "generate_mipmaps",
+    ):
+        assert feature in material_factory
+    assert "render_mode unshaded" in wall_shader
+    assert "cull_front" in wall_shader
+    assert "inward_world = -normalize(world_normal)" in wall_shader
+    assert "sample_triplanar" in wall_shader
+    assert "clearcoat_strength" in wall_shader
+    assert "wet_highlight" in wall_shader
+    assert "class_name EndoscopeLightingRig" in lighting_rig
+    assert "ScopeKeyLight" in lighting_rig
+    assert "ScopeFillLight" in lighting_rig
+    assert "_smoothed_radius" in lighting_rig
+    assert "_smoothed_radius * 14.0" in lighting_rig
+    assert "_scope_radius_target" in main
+    assert "_scope_environment.fog_density" in main
+    assert "class_name EndoscopeCameraFilter" in camera_filter
+    assert "_critical_damped_position" in camera_filter
+    assert "_max_roll_degrees_per_second" in camera_filter
+    assert "Basis.looking_at" in camera_filter
+    assert "_scope_viewport.msaa_3d = Viewport.MSAA_2X" in main
+    assert "_scope_viewport.msaa_3d = Viewport.MSAA_4X" in main
+    assert "_scope_viewport.use_taa = false" in main
     for kind in ("refresh", "record", "brightness", "capture", "fullscreen"):
         assert f'"{kind}"' in icons
