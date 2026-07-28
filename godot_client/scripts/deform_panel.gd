@@ -15,7 +15,7 @@ const SPECS := [
 	{"name": "tip_bend", "min": 0.5, "max": 20.0, "def": 2.0, "rebuild": false, "label": "软头刚度 Tip"},
 	{"name": "jtip_deg", "min": 0.0, "max": 60.0, "def": 35.0, "rebuild": true, "label": "J尖角度 J-tip°"},
 	{"name": "push_speed", "min": 0.01, "max": 0.15, "def": 0.05, "rebuild": false, "label": "推进速度 Push"},
-	{"name": "rotate_speed", "min": 0.5, "max": 8.0, "def": 3.0, "rebuild": false, "label": "扭转速度 Rotate"},
+	{"name": "rotate_speed", "min": 0.5, "max": 8.0, "def": 5.0, "rebuild": false, "label": "扭转速度 Rotate"},
 ]
 
 var _value_labels := {}

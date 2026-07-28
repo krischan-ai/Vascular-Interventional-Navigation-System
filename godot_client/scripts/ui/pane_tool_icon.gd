@@ -8,6 +8,11 @@ extends Control
 ##   zoom_in   放大镜 +
 ##   zoom_out  放大镜 −
 ##   frame     复位取景 (四角标 + 中心点)
+##   refresh   重置腔镜姿态
+##   record    录制状态圆点
+##   brightness 亮度太阳
+##   capture   截取当前帧
+##   fullscreen 扩大/恢复腔镜窗格
 
 var kind := "select"
 var color := Color(0.847, 0.902, 0.953):
@@ -78,6 +83,32 @@ func _draw() -> void:
 					draw_line(corner, corner + Vector2(-arm * sx, 0), color, W, true)
 					draw_line(corner, corner + Vector2(0, -arm * sy), color, W, true)
 			draw_circle(c, 2.0, color)
+		"refresh":
+			draw_arc(c, r * 0.72, -PI * 0.15, PI * 1.55, 26, color, W, true)
+			_arrow_head(c + Vector2(r * 0.72, 0).rotated(-PI * 0.15), PI * 0.35)
+		"record":
+			draw_arc(c, r * 0.76, 0.0, TAU, 28, color, W, true)
+			draw_circle(c, r * 0.39, color)
+		"brightness":
+			draw_circle(c, r * 0.33, color)
+			for i in 8:
+				var a := TAU * float(i) / 8.0
+				var d := Vector2.RIGHT.rotated(a)
+				draw_line(c + d * r * 0.56, c + d * r * 0.92, color, W, true)
+		"capture":
+			var body := Rect2(c - Vector2(r * 0.86, r * 0.56), Vector2(r * 1.72, r * 1.12))
+			draw_rect(body, color, false, W, true)
+			draw_rect(Rect2(body.position + Vector2(r * 0.22, -r * 0.18),
+				Vector2(r * 0.52, r * 0.24)), color, false, W, true)
+			draw_arc(c, r * 0.34, 0.0, TAU, 24, color, W, true)
+		"fullscreen":
+			var half := r * 0.92
+			var arm := half * 0.55
+			for sx in [-1.0, 1.0]:
+				for sy in [-1.0, 1.0]:
+					var corner := c + Vector2(half * sx, half * sy)
+					draw_line(corner, corner + Vector2(-arm * sx, 0), color, W, true)
+					draw_line(corner, corner + Vector2(0, -arm * sy), color, W, true)
 		_:
 			draw_arc(c, r, 0.0, TAU, 24, color, W, true)
 

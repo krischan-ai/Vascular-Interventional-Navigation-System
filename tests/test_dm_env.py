@@ -1,36 +1,26 @@
-import pytest
-from cathsim.dm import make_dm_env
+from types import SimpleNamespace
 
-env = make_dm_env(
-    phantom="phantom3",
-    use_pixels=True,
-    use_segment=True,
-    target="bca",
-    image_size=80,
-    visualize_sites=False,
-    visualize_target=True,
-    sample_target=True,
-    target_from_sites=False,
-)
+import numpy as np
 
-env._task.get_guidewire_geom_pos(env.physics)
-print(env._task.get_camera_matrix(camera_name="top_camera", image_size=80))
+from cathsim.dm.observables import _decode_segmentation_buffer
 
 
-def random_policy(time_step):
-    del time_step  # Unused
-    return [0, 0]
+def test_segmentation_decoder_treats_white_as_background():
+    scene = SimpleNamespace(
+        ngeom=1,
+        geoms=[SimpleNamespace(segid=0, objid=7, objtype=5)],
+    )
+    rgb_buffer = np.array(
+        [
+            [[0, 0, 0], [255, 255, 255]],
+            [[1, 0, 0], [255, 255, 255]],
+        ],
+        dtype=np.uint8,
+    )
 
+    decoded = _decode_segmentation_buffer(rgb_buffer, scene)
 
-# loop 2 episodes of 2 steps
-for episode in range(2):
-    time_step = env.reset()
-    for step in range(2):
-        action = random_policy(time_step)
-        time_step = env.step(action)
-        img = env.physics.render(height=480, width=480, camera_id=0)
-        contact_forces = env._task.get_contact_forces(env.physics, threshold=0.01)
-        print(contact_forces)
-        print(env._task.get_head_pos(env._physics))
-        print(env._task.target_pos)
-        print("Reward", time_step.reward)
+    assert decoded.shape == (2, 2, 2)
+    assert tuple(decoded[0, 0]) == (7, 5)
+    assert tuple(decoded[0, 1]) == (-1, -1)
+    assert tuple(decoded[1, 0]) == (-1, -1)

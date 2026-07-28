@@ -35,6 +35,10 @@ def engine(monkeypatch) -> NewtonEngine:
     monkeypatch.setenv("CATHSIM_NEWTON_FREE_LEN", "0.03")
     monkeypatch.delenv("CATHSIM_NEWTON_SHEATH_BODIES", raising=False)
     monkeypatch.delenv("CATHSIM_NEWTON_MAX_SLACK", raising=False)
+    monkeypatch.delenv("CATHSIM_NEWTON_SUBSTEPS", raising=False)
+    monkeypatch.delenv("CATHSIM_NEWTON_ITERS", raising=False)
+    monkeypatch.delenv("CATHSIM_NEWTON_SETTLE_STEPS", raising=False)
+    monkeypatch.delenv("CATHSIM_NEWTON_RETURN_SETTLE_STEPS", raising=False)
     return NewtonEngine(path=_straight_path())
 
 
@@ -81,6 +85,14 @@ class TestSheathAutoMode:
         alpha = engine._glue_alpha(20)
         assert alpha[0] == 1.0
         assert (alpha[1:] == 0.0).all()
+
+    def test_stable_force_drive_defaults(self, engine):
+        assert engine._substeps == 8
+        assert engine._iterations == 4
+        assert engine._settle_steps == 480
+        assert engine._settle_min_steps == 480
+        assert engine._return_settle_steps == 120
+        assert engine._rotate_speed == pytest.approx(5.0)
 
     def test_sheath_count_clamped_to_at_least_one(self, engine):
         engine._free_len = 10.0  # absurdly long free span

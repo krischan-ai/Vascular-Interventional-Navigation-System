@@ -44,13 +44,22 @@ extends Node3D
 #     start/end endpoints (LPS millimeters) documented in godot_client/README.md.
 const MODELS: Array = [
 	{
-		"name": "项目初始模型 Low-Tort",
+		"name": "主动脉树 Aorta-Tree (Newton)",
+		"phantom": "aorta_tree",
+		"target": "root",
+		"case_id": "case_001",
+		"start": [],
+		"end": [],
+		"physics_engine": "newton_demo",
+	},
+	{
+		"name": "项目初始模型 Low-Tort (MuJoCo)",
 		"phantom": "low_tort",
 		"target": "bca",
 		"case_id": "case_001",
 		"start": [],
 		"end": [],
-		"physics_engine": "auto",
+		"physics_engine": "mujoco",
 	},
 	{
 		"name": "主动脉干 Aorta-Trunk",
@@ -62,7 +71,7 @@ const MODELS: Array = [
 		"physics_engine": "mujoco",
 	},
 	{
-		"name": "主动脉树 Aorta-Tree",
+		"name": "主动脉树 Aorta-Tree (MuJoCo)",
 		"phantom": "aorta_tree",
 		"target": "root",
 		"case_id": "case_001",
@@ -117,6 +126,13 @@ const CAM_MODE_NAMES := {
 }
 const _SCOPE_LAYER_MASK := 1 << 17
 const EndoscopeFallbackScript := preload("res://scripts/ui/endoscope_fallback.gd")
+const EndoscopeOverlayScript := preload("res://scripts/ui/endoscope_overlay.gd")
+const EndoscopeMaterialFactoryScript := preload(
+	"res://scripts/rendering/endoscope_material_factory.gd")
+const EndoscopeLightingRigScript := preload(
+	"res://scripts/rendering/endoscope_lighting_rig.gd")
+const EndoscopeCameraFilterScript := preload(
+	"res://scripts/rendering/endoscope_camera_filter.gd")
 # UI contract labels: "手动", "自动".
 
 const ORBIT_PRESET_NAMES := {
@@ -146,6 +162,38 @@ var _scope_pane: PanelContainer
 var _scope_viewport: SubViewport
 var _scope_camera: Camera3D
 var _scope_fallback: Control
+var _scope_view_container: SubViewportContainer
+var _scope_overlay: Control
+var _scope_live_label: Label
+var _scope_time_label: Label
+var _scope_rec_button: Button
+var _scope_capture_button: Button
+var _scope_brightness_slider: HSlider
+var _scope_headlight: OmniLight3D
+var _scope_lighting
+var _scope_camera_filter
+var _scope_environment: Environment
+var _scope_radius_target: float = 0.003
+var _scope_target_fov: float = 79.0
+var _scope_has_tip: bool = false
+var _scope_pose_initialized: bool = false
+var _scope_recording: bool = false
+var _scope_record_started_msec: int = 0
+var _scope_record_elapsed_msec: int = 0
+var _scope_fullscreen: bool = false
+@export var scope_camera_smooth: float = 18.0
+@export_enum("baseline", "enhanced") var scope_render_profile: String = "enhanced"
+@export_enum("performance", "balanced", "high") var scope_render_quality: String = "balanced"
+const _SCOPE_PERF_SAMPLE_COUNT := 300
+var _scope_frame_times_ms: Array[float] = []
+var _scope_perf_reported: bool = false
+var _scope_validation_capture_pending: bool = false
+var _scope_validation_capture_frames: int = 0
+var _scope_validation_output: String = ""
+var _scope_validation_motion: bool = false
+var _scope_validation_motion_stage: int = 0
+var _scope_validation_motion_accum: float = 0.0
+var _scope_validation_motion_steps: int = 0
 var _panes_swapped: bool = false
 # Overview orbit camera (参考图视角): the external camera is a pivot-orbit rig —
 # spherical (yaw/pitch/dist) around a pan-able pivot. Left-drag orbits, middle-drag
@@ -194,6 +242,7 @@ var _cam_mode: int = CamMode.OVERVIEW
 var _vessel_meshes: Array = []  # MeshInstance3D nodes of the vessel
 var _vessel_mat_overlay: ShaderMaterial  # cyan fresnel-glow whole-tree (overview/demo)
 var _vessel_mat_interior: StandardMaterial3D  # opaque inner wall (endoscope)
+var _scope_vessel_mat: Material  # profile-driven warm inner wall for private scope world
 var _vessel_mat_surgical: ShaderMaterial  # cyan fresnel + tip-proximity fade (follow/surgical)
 var _env: Environment  # world environment; endoscope toggles its depth fog
 var _vessel: Node3D  # current vessel scene root (freed/rebuilt on model switch)
@@ -220,6 +269,8 @@ var _autopilot_wp_text: String = ""
 # Last clicked navigation goal (backend meter frame), so the 恢复导航 button can
 # re-engage the autopilot toward it after a 人工接管 / 急停.
 var _last_click_target: Array = []
+var _connection_ready: bool = false
+var _controls_blocked: bool = true
 
 # On-screen diagnostics.
 var _session_id: String = "none"
@@ -236,6 +287,13 @@ func _update_debug() -> void:
 
 func _ready() -> void:
 	print("[Main] _ready: building scene")
+	_apply_scope_launch_overrides()
+	_scope_validation_capture_pending = (
+		"--scope-validation-capture" in OS.get_cmdline_user_args())
+	_scope_validation_motion = (
+		"--scope-validation-motion" in OS.get_cmdline_user_args())
+	_scope_validation_capture_pending = (
+		_scope_validation_capture_pending or _scope_validation_motion)
 	# Pick the launch model from the exported phantom name and pull its full
 	# config from MODELS so the table stays the single source of truth.
 	_model_index = _resolve_model_index(phantom)
@@ -248,6 +306,23 @@ func _ready() -> void:
 	_setup_network_and_input()
 	_hud.set_model(str(MODELS[_model_index].name))
 	print("[Main] camera pos=%s current=%s" % [_camera.position, _camera.current])
+
+
+func _apply_scope_launch_overrides() -> void:
+	for argument in OS.get_cmdline_user_args():
+		if argument.begins_with("--scope-render-profile="):
+			var profile_value := argument.trim_prefix("--scope-render-profile=")
+			if profile_value in ["baseline", "enhanced"]:
+				scope_render_profile = profile_value
+		elif argument.begins_with("--scope-render-quality="):
+			var quality_value := argument.trim_prefix("--scope-render-quality=")
+			if quality_value in ["performance", "balanced", "high"]:
+				scope_render_quality = quality_value
+		elif argument.begins_with("--scope-validation-output="):
+			_scope_validation_output = argument.trim_prefix(
+				"--scope-validation-output=")
+	print("[Scope] render profile=%s quality=%s" % [
+		scope_render_profile, scope_render_quality])
 
 
 func _resolve_model_index(phantom_name: String) -> int:
@@ -319,6 +394,9 @@ func _teardown_model_scene() -> void:
 	_entry_marker = null
 	_rig = null
 	_scope_vessel = null
+	_scope_has_tip = false
+	_scope_pose_initialized = false
+	_update_scope_state()
 	if _vessel != null and is_instance_valid(_vessel):
 		_vessel.queue_free()
 	_vessel = null
@@ -461,9 +539,10 @@ func _build_dsa_pane(rootc: Control) -> void:
 	ov.add_child(strip)
 
 
-# Endoscope/reference pane (middle top in the provided UI). Phase 1 keeps this as
-# a procedural live-looking image layer so the workstation layout can be judged
-# independently from the true second 3D camera pipeline.
+# Endoscope pane (middle top): a private World3D renders a second copy of the real
+# vessel GLB from the streamed guidewire-front pose. Keeping it independent from
+# the navigation pane prevents its warm fog/light/material from leaking into the
+# external 3D view and removes the old transparent procedural-tunnel fallback.
 func _build_scope_pane(rootc: Control) -> void:
 	var scope := PanelContainer.new()
 	scope.add_theme_stylebox_override("panel", UiStyle.panel_box(0.95, 8))
@@ -476,9 +555,9 @@ func _build_scope_pane(rootc: Control) -> void:
 	view_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	view_box.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	view_box.offset_left = 10
-	view_box.offset_top = 42
+	view_box.offset_top = 44
 	view_box.offset_right = -10
-	view_box.offset_bottom = -44
+	view_box.offset_bottom = -52
 	scope.add_child(view_box)
 
 	_scope_fallback = EndoscopeFallbackScript.new()
@@ -490,51 +569,321 @@ func _build_scope_pane(rootc: Control) -> void:
 	vpc.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	vpc.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	view_box.add_child(vpc)
+	_scope_view_container = vpc
 
 	_scope_viewport = SubViewport.new()
-	_scope_viewport.transparent_bg = true
+	_scope_viewport.own_world_3d = true
+	_scope_viewport.transparent_bg = false
 	_scope_viewport.render_target_clear_mode = SubViewport.CLEAR_MODE_ALWAYS
 	_scope_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
-	if _world != null:
-		_scope_viewport.world_3d = _world.world_3d
 	vpc.add_child(_scope_viewport)
+	_setup_scope_environment()
 
 	_scope_camera = Camera3D.new()
-	_scope_camera.near = 0.001
-	_scope_camera.far = 8.0
-	_scope_camera.fov = 92.0
+	_scope_camera.near = 0.0005
+	_scope_camera.far = 2.0
+	_scope_camera.fov = 88.0
 	_scope_camera.cull_mask = _SCOPE_LAYER_MASK
 	_scope_viewport.add_child(_scope_camera)
 	_scope_camera.make_current()
+	_scope_camera_filter = EndoscopeCameraFilterScript.new()
+	_scope_camera_filter.configure(scope_render_quality)
+	_scope_lighting = EndoscopeLightingRigScript.new()
+	_scope_lighting.configure(
+		_SCOPE_LAYER_MASK, scope_render_profile, scope_render_quality)
+	_scope_camera.add_child(_scope_lighting)
+	# Compatibility handle used by older UI code/tests; brightness is now applied
+	# through the full key/fill rig so their energy ratio stays stable.
+	_scope_headlight = _scope_lighting.key_light
+	_apply_scope_render_quality()
+
+	_scope_overlay = EndoscopeOverlayScript.new()
+	_scope_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_scope_overlay.visible = false
+	view_box.add_child(_scope_overlay)
 
 	var ov := Control.new()
 	ov.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	ov.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	scope.add_child(ov)
-	_corner_label(ov, "②  腔镜实时视图", UiStyle.TEXT, Vector2(14, 10), 16)
-	_corner_label(ov, "● LIVE", UiStyle.GREEN, Vector2(390, 12), 12)
+	var badge := PanelContainer.new()
+	badge.position = Vector2(12, 7)
+	badge.custom_minimum_size = Vector2(28, 28)
+	badge.add_theme_stylebox_override("panel",
+		UiStyle.bordered_box(Color(0.035, 0.12, 0.20, 0.9), UiStyle.BLUE, 6, 1))
+	var badge_label := UiStyle.label("2", UiStyle.BLUE, 16)
+	badge_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	badge_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	badge.add_child(badge_label)
+	ov.add_child(badge)
+	_corner_label(ov, "腔镜实时视图", UiStyle.TEXT, Vector2(48, 10), 16)
+	_scope_live_label = UiStyle.label("○ WAIT", UiStyle.TEXT2, 12)
+	_scope_live_label.anchor_left = 1.0
+	_scope_live_label.anchor_right = 1.0
+	_scope_live_label.offset_left = -92
+	_scope_live_label.offset_top = 12
+	_scope_live_label.offset_right = -14
+	_scope_live_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	ov.add_child(_scope_live_label)
 
 	var controls := HBoxContainer.new()
-	controls.add_theme_constant_override("separation", 8)
+	controls.add_theme_constant_override("separation", 7)
 	controls.anchor_top = 1.0
 	controls.anchor_bottom = 1.0
-	controls.offset_left = 14
-	controls.offset_top = -36
-	controls.offset_right = -14
-	controls.offset_bottom = -8
+	controls.offset_left = 12
+	controls.offset_top = -42
+	controls.offset_right = -12
+	controls.offset_bottom = -7
 	controls.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	ov.add_child(controls)
-	controls.add_child(_pane_tool("相机", Vector2(44, 28)))
-	controls.add_child(_pane_tool("REC", Vector2(42, 28)))
-	controls.add_child(UiStyle.label("00:12:36", UiStyle.TEXT_MID, 13))
+	var reset_btn := _scope_icon_button("refresh", "重置腔镜姿态")
+	reset_btn.pressed.connect(_reset_scope_view)
+	controls.add_child(reset_btn)
+	_scope_rec_button = _scope_icon_button("record", "开始/停止本地录制计时", UiStyle.RED)
+	_scope_rec_button.toggle_mode = true
+	_scope_rec_button.toggled.connect(_on_scope_record_toggled)
+	controls.add_child(_scope_rec_button)
+	_scope_time_label = UiStyle.label("00:00:00", UiStyle.TEXT_MID, 13)
+	_scope_time_label.custom_minimum_size = Vector2(66, 28)
+	_scope_time_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	controls.add_child(_scope_time_label)
+	controls.add_child(PaneToolIcon.new("brightness", UiStyle.TEXT_MID))
 	var slider := HSlider.new()
-	slider.min_value = 0.0
-	slider.max_value = 1.0
-	slider.value = 0.55
-	slider.custom_minimum_size = Vector2(150, 24)
-	slider.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	slider.min_value = 0.55
+	slider.max_value = 1.35
+	slider.step = 0.01
+	slider.value = 0.92
+	slider.custom_minimum_size = Vector2(92, 28)
+	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	slider.tooltip_text = "腔镜亮度"
+	slider.value_changed.connect(_on_scope_brightness_changed)
 	controls.add_child(slider)
-	controls.add_child(_pane_tool("全屏", Vector2(48, 28)))
+	_scope_brightness_slider = slider
+	_scope_capture_button = _scope_icon_button("capture", "保存当前腔镜帧")
+	_scope_capture_button.pressed.connect(_capture_scope_frame)
+	controls.add_child(_scope_capture_button)
+	var fullscreen_btn := _scope_icon_button("fullscreen", "扩大/恢复腔镜窗格")
+	fullscreen_btn.pressed.connect(_toggle_scope_fullscreen)
+	controls.add_child(fullscreen_btn)
+	_update_scope_state()
+
+
+func _setup_scope_environment() -> void:
+	if _scope_viewport == null:
+		return
+	var world_env := WorldEnvironment.new()
+	var env := Environment.new()
+	env.background_mode = Environment.BG_COLOR
+	env.background_color = Color(0.055, 0.006, 0.004)
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	env.ambient_light_color = Color(0.52, 0.10, 0.045)
+	env.ambient_light_energy = 0.64
+	env.tonemap_mode = Environment.TONE_MAPPER_ACES
+	env.glow_enabled = true
+	env.glow_intensity = 0.34
+	env.glow_bloom = 0.06
+	env.glow_hdr_threshold = 1.15
+	env.fog_enabled = true
+	env.fog_mode = Environment.FOG_MODE_EXPONENTIAL
+	env.fog_light_color = Color(0.055, 0.006, 0.004)
+	# World units are metres. A high density makes a 5–10 cm lumen collapse into
+	# one flat red field; this light haze preserves branch depth without hiding it.
+	env.fog_density = 1.0
+	_scope_environment = env
+	world_env.environment = env
+	_scope_viewport.add_child(world_env)
+
+
+func _apply_scope_render_quality() -> void:
+	if _scope_viewport == null:
+		return
+	# TAA is intentionally disabled for a fast-moving near-wall camera; quality
+	# presets use private-viewport MSAA and never alter the main navigation view.
+	_scope_viewport.use_taa = false
+	if scope_render_profile == "baseline":
+		_scope_viewport.msaa_3d = Viewport.MSAA_DISABLED
+		_scope_target_fov = 85.0
+		if _scope_environment != null:
+			_scope_environment.glow_intensity = 0.34
+			_scope_environment.glow_bloom = 0.06
+			_scope_environment.tonemap_exposure = 1.0
+			_scope_environment.ambient_light_color = Color(0.52, 0.10, 0.045)
+		return
+	if _scope_environment != null:
+		_scope_environment.ambient_light_color = Color(0.58, 0.15, 0.065)
+	match scope_render_quality:
+		"performance":
+			_scope_viewport.msaa_3d = Viewport.MSAA_DISABLED
+			_scope_target_fov = 78.0
+			if _scope_environment != null:
+				_scope_environment.glow_intensity = 0.18
+				_scope_environment.glow_bloom = 0.035
+				_scope_environment.tonemap_exposure = 0.58
+		"high":
+			_scope_viewport.msaa_3d = Viewport.MSAA_4X
+			_scope_target_fov = 80.0
+			if _scope_environment != null:
+				_scope_environment.glow_intensity = 0.28
+				_scope_environment.glow_bloom = 0.05
+				_scope_environment.tonemap_exposure = 0.68
+		_:
+			_scope_viewport.msaa_3d = Viewport.MSAA_2X
+			_scope_target_fov = 79.0
+			if _scope_environment != null:
+				_scope_environment.glow_intensity = 0.24
+				_scope_environment.glow_bloom = 0.04
+				_scope_environment.tonemap_exposure = 0.62
+
+
+func _scope_frame_ready() -> bool:
+	return _connection_ready and _scope_has_tip \
+		and _scope_vessel != null and is_instance_valid(_scope_vessel)
+
+
+func _update_scope_state() -> void:
+	var ready := _scope_frame_ready()
+	if _scope_view_container != null:
+		_scope_view_container.visible = ready
+	if _scope_overlay != null:
+		_scope_overlay.visible = ready
+	if _scope_fallback != null:
+		_scope_fallback.visible = not ready
+	if _scope_live_label != null:
+		_scope_live_label.text = "● LIVE" if ready else "○ WAIT"
+		_scope_live_label.add_theme_color_override(
+			"font_color", UiStyle.GREEN if ready else UiStyle.TEXT2)
+	for button in [_scope_rec_button, _scope_capture_button]:
+		if button != null:
+			button.disabled = not ready
+	if _scope_brightness_slider != null:
+		_scope_brightness_slider.editable = ready
+		_scope_brightness_slider.mouse_filter = (
+			Control.MOUSE_FILTER_STOP if ready else Control.MOUSE_FILTER_IGNORE)
+	if ready:
+		return
+	_scope_pose_initialized = false
+	if _scope_camera_filter != null:
+		_scope_camera_filter.reset()
+	if _scope_recording:
+		_scope_recording = false
+		_scope_record_elapsed_msec = 0
+		if _scope_rec_button != null:
+			_scope_rec_button.set_pressed_no_signal(false)
+		_update_scope_timer()
+	if _scope_fallback == null:
+		return
+	if not _connection_ready:
+		_scope_fallback.call("set_status", "等待仿真连接",
+			"会话就绪后显示真实血管腔内画面", UiStyle.TEXT2)
+	elif _scope_vessel == null or not is_instance_valid(_scope_vessel):
+		_scope_fallback.call("set_status", "血管模型不可用",
+			"请检查当前模型 GLB 的 Godot 导入状态", UiStyle.YELLOW)
+	else:
+		_scope_fallback.call("set_status", "等待导丝尖端位姿",
+			"收到首个 state_batch 后自动切换为 LIVE", UiStyle.BLUE)
+
+
+func _reset_scope_view() -> void:
+	if not _scope_frame_ready():
+		return
+	_scope_pose_initialized = false
+	if _scope_camera_filter != null:
+		_scope_camera_filter.reset()
+	print("[Scope] camera smoothing reset at current guidewire pose")
+
+
+func _on_scope_record_toggled(active: bool) -> void:
+	if active and not _scope_frame_ready():
+		_scope_rec_button.set_pressed_no_signal(false)
+		return
+	if active:
+		_scope_recording = true
+		_scope_record_elapsed_msec = 0
+		_scope_record_started_msec = Time.get_ticks_msec()
+		_scope_time_label.add_theme_color_override("font_color", UiStyle.RED)
+	else:
+		if _scope_recording:
+			_scope_record_elapsed_msec += Time.get_ticks_msec() - _scope_record_started_msec
+		_scope_recording = false
+		_scope_time_label.add_theme_color_override("font_color", UiStyle.TEXT_MID)
+	_update_scope_timer()
+
+
+func _update_scope_timer() -> void:
+	if _scope_time_label == null:
+		return
+	var elapsed := _scope_record_elapsed_msec
+	if _scope_recording:
+		elapsed += Time.get_ticks_msec() - _scope_record_started_msec
+	var total_seconds: int = maxi(0, int(elapsed / 1000))
+	var hours: int = total_seconds / 3600
+	var minutes: int = (total_seconds % 3600) / 60
+	var seconds: int = total_seconds % 60
+	_scope_time_label.text = "%02d:%02d:%02d" % [hours, minutes, seconds]
+
+
+func _on_scope_brightness_changed(value: float) -> void:
+	var gain := clampf(value, 0.55, 1.35)
+	if _scope_vessel_mat != null:
+		EndoscopeMaterialFactoryScript.apply_brightness(_scope_vessel_mat, gain)
+	if _scope_lighting != null and is_instance_valid(_scope_lighting):
+		_scope_lighting.set_brightness(gain)
+
+
+func _capture_scope_frame() -> void:
+	if not _scope_frame_ready() or _scope_viewport == null:
+		return
+	var stamp := Time.get_datetime_string_from_system().replace(":", "-")
+	_save_scope_frame("user://endoscope_capture_%s.png" % stamp)
+
+
+func _save_scope_frame(path: String) -> bool:
+	var image := _scope_viewport.get_texture().get_image()
+	if image == null or image.is_empty():
+		push_warning("[Scope] capture skipped: SubViewport returned no image")
+		return false
+	if path.contains("scope-validation") or path.contains("scope_validation"):
+		var albedo_format := -1
+		var albedo_texture: Texture2D
+		if _scope_vessel_mat is StandardMaterial3D:
+			albedo_texture = (
+				_scope_vessel_mat as StandardMaterial3D).albedo_texture
+		elif _scope_vessel_mat is ShaderMaterial:
+			albedo_texture = (
+				_scope_vessel_mat as ShaderMaterial).get_shader_parameter(
+					"albedo_texture") as Texture2D
+		if albedo_texture != null:
+			var albedo_image := albedo_texture.get_image()
+			if albedo_image != null and not albedo_image.is_empty():
+				albedo_format = albedo_image.get_format()
+				print("[ScopeValidation] albedo_samples=%s,%s" % [
+					albedo_image.get_pixel(0, 0),
+					albedo_image.get_pixel(
+						int(albedo_image.get_width() / 2),
+						int(albedo_image.get_height() / 2)),
+				])
+		print("[ScopeValidation] image_format=%d albedo_format=%d" % [
+			image.get_format(), albedo_format])
+	if image.get_format() not in [Image.FORMAT_RGB8, Image.FORMAT_RGBA8]:
+		image.convert(Image.FORMAT_RGBA8)
+	var err := image.save_png(path)
+	if err == OK:
+		print("[Scope] frame saved: %s" % ProjectSettings.globalize_path(path))
+		return true
+	else:
+		push_warning("[Scope] failed to save frame (%d): %s" % [err, path])
+		return false
+
+
+func _toggle_scope_fullscreen() -> void:
+	if _scope_pane == null:
+		return
+	_scope_fullscreen = not _scope_fullscreen
+	_scope_pane.z_index = 40 if _scope_fullscreen else 0
+	if _scope_fullscreen:
+		UiStyle.place(_scope_pane, Rect2(8, 112, 1252, 688))
+	else:
+		UiStyle.place(_scope_pane, UiStyle.scope_rect())
 
 # 3D navigation assistant pane (VPP §2.3, right-top). A framed SubViewport with its own
 # World3D, plus reference overlays: title, a left tool strip and a direction-cube stub.
@@ -779,7 +1128,10 @@ func _apply_pane_layout() -> void:
 	if _dsa_pane != null:
 		UiStyle.place(_dsa_pane, UiStyle.dsa_rect())
 	if _scope_pane != null:
-		UiStyle.place(_scope_pane, UiStyle.scope_rect())
+		if _scope_fullscreen:
+			UiStyle.place(_scope_pane, Rect2(8, 112, 1252, 688))
+		else:
+			UiStyle.place(_scope_pane, UiStyle.scope_rect())
 	if _pane_3d_container != null:
 		UiStyle.place(_pane_3d_container, UiStyle.pane3d_rect())
 
@@ -826,6 +1178,26 @@ func _pane_tool(text: String, btn_size: Vector2) -> Button:
 	b.add_theme_stylebox_override("normal", UiStyle.card_box(0.8, 8))
 	b.add_theme_stylebox_override("hover", UiStyle.flat(Color(0.102, 0.165, 0.227), 8))
 	b.add_theme_stylebox_override("pressed", UiStyle.flat(UiStyle.BLUE, 8))
+	return b
+
+
+func _scope_icon_button(kind: String, tooltip: String,
+		icon_color: Color = UiStyle.TEXT_MID) -> Button:
+	var b := Button.new()
+	b.custom_minimum_size = Vector2(32, 28)
+	b.tooltip_text = tooltip
+	b.focus_mode = Control.FOCUS_NONE
+	b.add_theme_stylebox_override("normal", UiStyle.card_box(0.78, 6))
+	b.add_theme_stylebox_override("hover", UiStyle.flat(Color(0.10, 0.17, 0.24), 6))
+	b.add_theme_stylebox_override("pressed", UiStyle.flat(Color(0.07, 0.22, 0.39), 6))
+	b.add_theme_stylebox_override("disabled", UiStyle.flat(Color(0.05, 0.07, 0.09, 0.55), 6))
+	var icon := PaneToolIcon.new(kind, icon_color)
+	icon.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	icon.offset_left = 5
+	icon.offset_top = 3
+	icon.offset_right = -5
+	icon.offset_bottom = -3
+	b.add_child(icon)
 	return b
 
 
@@ -941,8 +1313,12 @@ func _setup_vessel() -> Node3D:
 	print("[Main] vessel loaded from %s, MeshInstance3D count=%d" % [glb, mesh_count])
 	_apply_vessel_material(vessel)
 	_scope_vessel = packed.instantiate()
-	_world.add_child(_scope_vessel)
+	if _scope_viewport != null:
+		_scope_viewport.add_child(_scope_vessel)
+	else:
+		_world.add_child(_scope_vessel)
 	_prepare_scope_vessel(_scope_vessel)
+	_update_scope_state()
 	return vessel
 
 
@@ -952,7 +1328,7 @@ func _prepare_scope_vessel(node: Node) -> void:
 	node.name = "EndoscopeVesselLayer"
 	for mi in node.find_children("*", "MeshInstance3D", true, false):
 		mi.layers = _SCOPE_LAYER_MASK
-		mi.material_override = _vessel_mat_interior
+		mi.material_override = _scope_vessel_mat
 		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 
@@ -992,6 +1368,17 @@ func _apply_vessel_material(node: Node) -> void:
 	_vessel_mat_interior.emission_enabled = true
 	_vessel_mat_interior.emission = Color(0.36, 0.13, 0.12)
 	_vessel_mat_interior.emission_energy_multiplier = 0.3
+
+	# The private scope material is profile-driven and never displaces the real
+	# vessel mesh. Baseline preserves the previous look; enhanced adds independent
+	# macro colour, mesoscopic roughness and micro-normal triplanar fields.
+	_scope_vessel_mat = EndoscopeMaterialFactoryScript.create_material(
+		scope_render_profile, scope_render_quality)
+	var initial_brightness := 0.92
+	if _scope_brightness_slider != null:
+		initial_brightness = float(_scope_brightness_slider.value)
+	EndoscopeMaterialFactoryScript.apply_brightness(
+		_scope_vessel_mat, initial_brightness)
 
 	# Surgical (follow) material: the same Fresnel glow, additionally faded by
 	# distance from the guidewire tip. Fragments within `fade_near` of the tip keep
@@ -1249,11 +1636,16 @@ func _setup_network_and_input() -> void:
 
 	_ws.connected.connect(_on_connected)
 	_ws.disconnected.connect(_on_disconnected)
+	_ws.connection_state_changed.connect(_on_connection_state_changed)
 	_ws.error_received.connect(_on_server_error)
 	_ws.session_started.connect(_on_session_started)
 	_ws.routes_received.connect(_on_routes)
 	_ws.batch_received.connect(_on_batch)
 	_ws.state_received.connect(_on_state)
+	_ws.emergency_stop_confirmed.connect(_on_emergency_stop_confirmed)
+	_ws.resume_confirmed.connect(_on_resume_confirmed)
+	_ws.control_rejected.connect(_on_control_rejected)
+	_ws.control_config_received.connect(_on_control_config_received)
 
 	# Interactive deformation panel: live-tune the Newton force-drive params. It's a
 	# developer tool (not part of the VPP §2 operator dashboard), so it starts hidden
@@ -1264,11 +1656,9 @@ func _setup_network_and_input() -> void:
 	_deform.param_changed.connect(_ws.send_engine_params)
 	_ws.engine_params_received.connect(_deform.sync_effective)
 
-	_input.control.connect(_ws.send_control)
-	# Grabbing manual control (any W/S/A/D tick) cancels click autopilot.
-	_input.control.connect(_on_manual_control)
+	_input.control.connect(_on_keyboard_control)
 	_input.input_state.connect(_hud.update_input)
-	_input.reset_requested.connect(_ws.send_reset)
+	_input.reset_requested.connect(_on_reset_button)
 	_input.view_cycle.connect(_cycle_camera_mode)
 	_input.model_cycle.connect(_cycle_model)
 	_input.branch_cycle.connect(_cycle_branch)
@@ -1288,6 +1678,8 @@ func _setup_network_and_input() -> void:
 	_hud.manual_takeover.connect(_disengage_autopilot)
 	_hud.resume_nav.connect(_on_resume_nav)
 	_hud.motion_command.connect(_on_motion)
+	_hud.control_profile_changed.connect(_input.set_control_profile)
+	_hud.protection_changed.connect(_on_protection_changed)
 	_hud.view_cycle_requested.connect(_cycle_camera_mode)
 	_hud.model_cycle_requested.connect(_cycle_model)
 	_hud.branch_cycle_requested.connect(_cycle_branch)
@@ -1297,16 +1689,27 @@ func _setup_network_and_input() -> void:
 
 func _on_connected() -> void:
 	print("[Main] WebSocket connected")
-	_hud.set_connection(true)
 	_last_msg = "connected"
+	_update_scope_state()
 	_update_debug()
 
 
 func _on_disconnected() -> void:
 	print("[Main] WebSocket disconnected")
-	_hud.set_connection(false)
+	_connection_ready = false
+	_controls_blocked = true
+	_input.set_control_enabled(false)
 	_last_msg = "DISCONNECTED"
+	_update_scope_state()
 	_update_debug()
+
+
+func _on_connection_state_changed(state: String, details: Dictionary) -> void:
+	_connection_ready = state == "ready"
+	_controls_blocked = not _connection_ready or _ws.controls_blocked()
+	_input.set_control_enabled(not _controls_blocked)
+	_hud.set_connection_state(state, details)
+	_update_scope_state()
 
 
 func _on_server_error(err: Dictionary) -> void:
@@ -1317,10 +1720,13 @@ func _on_server_error(err: Dictionary) -> void:
 	_update_debug()
 
 
-func _on_session_started(sid: String, state: Dictionary) -> void:
+func _on_session_started(sid: String, state: Dictionary, metadata: Dictionary) -> void:
 	print("[Main] session started: %s" % sid)
 	_session_id = sid.substr(0, 8) if sid.length() >= 8 else sid
 	_last_msg = "session_started"
+	_hud.apply_control_state(metadata.get("control_state", {}) as Dictionary)
+	_controls_blocked = not _connection_ready or _ws.controls_blocked()
+	_input.set_control_enabled(not _controls_blocked)
 	_update_debug()
 	if not state.is_empty():
 		_on_state(state)
@@ -1342,7 +1748,7 @@ func _on_routes(routes: Dictionary) -> void:
 
 # Cycle to the next target branch (B key) and ask the backend to re-route there.
 func _cycle_branch() -> void:
-	if _branch_targets.size() < 2:
+	if _controls_blocked or _branch_targets.size() < 2:
 		return
 	_branch_index = (_branch_index + 1) % _branch_targets.size()
 	var target := str(_branch_targets[_branch_index])
@@ -1361,6 +1767,7 @@ func _cycle_branch() -> void:
 
 
 func _on_batch(batch: Dictionary) -> void:
+	_sync_control_state(batch.get("control_state", {}) as Dictionary)
 	if not _logged_first_batch:
 		_logged_first_batch = true
 		var path: Dictionary = batch.get("path", {})
@@ -1376,12 +1783,15 @@ func _on_batch(batch: Dictionary) -> void:
 	# they arrive only on the first batch / after a reset or route switch.
 	var path_info: Dictionary = batch.get("path", {})
 	var path_wps: Array = path_info.get("waypoints", [])
+	var radius_value: Variant = path_info.get("vessel_radius", null)
+	if (typeof(radius_value) == TYPE_FLOAT or typeof(radius_value) == TYPE_INT) \
+			and float(radius_value) > 0.0005:
+		_scope_radius_target = clampf(float(radius_value), 0.0015, 0.008)
 	if not path_wps.is_empty():
 		_path_waypoints = path_wps
 		if _rig != null and is_instance_valid(_rig):
 			_rig.set_navigation_route(path_wps)
 		var route_radius := -1.0
-		var radius_value: Variant = path_info.get("vessel_radius", null)
 		if typeof(radius_value) == TYPE_FLOAT or typeof(radius_value) == TYPE_INT:
 			route_radius = float(radius_value)
 		_update_vessel_route_visibility(path_wps, true, route_radius)
@@ -1392,7 +1802,6 @@ func _on_batch(batch: Dictionary) -> void:
 	_sync_entry_marker_visibility()
 	_feed_rig(_guidewire_front_pose_from_batch(batch))
 	var safety: Dictionary = batch.get("safety", {})
-	var episode: Dictionary = batch.get("episode", {})
 	var diagnostics: Dictionary = batch.get("diagnostics", {}) as Dictionary
 	_hud.set_backend(
 		str(batch.get("engine", "")),
@@ -1412,32 +1821,24 @@ func _on_batch(batch: Dictionary) -> void:
 		batch.get("procedure", {}) as Dictionary
 	)
 	var status := str(safety.get("status", "STANDBY"))
-	_hud.update_safety(status)
 	# Fixed control-mode display (VPP §2.1/§2.4): SAFE HOLD on a collision stop,
 	# SUPERVISED AUTO while click-autopilot drives, otherwise MANUAL.
 	var mode := "手动"
-	if status == "COLLISION_STOP":
+	if _ws.controls_blocked():
+		mode = "急停 STOP"
+	elif status == "COLLISION_STOP":
 		mode = "安全保持"
 	elif _autopilot_active:
 		mode = "自动"
 	_hud.set_control_mode(mode)
-	var progress := float(path_info.get("progress", 0.0))
-	var remaining := float(path_info.get("remaining_distance", -1.0))
-	if remaining < 0.0 or (remaining == 0.0 and progress > 0.0 and progress < 0.999):
-		remaining = _remaining_from_waypoints(progress)
-	_hud.update_metrics({
-		"episode_length": episode.get("length", 0),
-		"velocity": safety.get("speed", 0.0),
-		"wall_distance": safety.get("wall_distance", 0.0),
-		"curvature": safety.get("curvature", 0.0),
-		"path_progress": progress,
-		"path_deviation": path_info.get("deviation", 0.0),
-		"remaining_distance": remaining,
-		"vessel_radius": path_info.get("vessel_radius", null),
-		"eta_seconds": path_info.get("eta_seconds", null),
-		"latency_ms": _ws.last_latency_ms,
-		"risk_score": safety.get("risk_score", 0.0),
-	})
+	# v3 canonical fields live at data.<field> for both state message types.
+	# Keep render-only path/safety blocks separate and never infer missing force or
+	# risk values in the UI layer.
+	var metrics := batch.duplicate(true)
+	if _ws.last_latency_ms >= 0.0:
+		metrics["latency_ms"] = _ws.last_latency_ms
+	_hud.update_metrics(metrics)
+	_hud.update_safety_contract(safety)
 	# While click autopilot is engaged, keep the nav line live with progress so the
 	# slow tip advance is legible as motion, not a hang.
 	if _autopilot_active:
@@ -1449,18 +1850,26 @@ func _on_batch(batch: Dictionary) -> void:
 
 
 func _on_state(state: Dictionary) -> void:
+	_sync_control_state(state.get("control_state", {}) as Dictionary)
 	_guidewire.update_from_state(state)
-	_hud.update_safety(str(state.get("safety_status", "STANDBY")))
-	_hud.set_control_mode("手动")
-	var progress := float(state.get("path_progress", 0.0))
-	var remaining := float(state.get("remaining_distance", -1.0))
-	if remaining < 0.0 or (remaining == 0.0 and progress > 0.0 and progress < 0.999):
-		state["remaining_distance"] = _remaining_from_waypoints(progress)
-	state["latency_ms"] = _ws.last_latency_ms
+	var safety: Dictionary = state.get("safety", {}) as Dictionary
+	_hud.set_control_mode("急停 STOP" if _ws.controls_blocked() else "手动")
+	if _ws.last_latency_ms >= 0.0:
+		state["latency_ms"] = _ws.last_latency_ms
 	_hud.update_metrics(state)
+	_hud.update_safety_contract(safety)
 	_msg_count += 1
 	_last_msg = "state_update"
 	_update_debug()
+
+
+func _sync_control_state(control_state: Dictionary) -> void:
+	if control_state.is_empty():
+		return
+	_hud.apply_control_state(control_state)
+	if bool(control_state.get("emergency_stop_latched", false)):
+		_controls_blocked = true
+		_input.set_control_enabled(false)
 
 
 func _fidelity_label(mode: String) -> String:
@@ -1500,8 +1909,11 @@ func _vec3_from_backend_point(p) -> Vector3:
 # tip keeps advancing toward the clicked waypoint without keyboard input).
 func _process(delta: float) -> void:
 	_sync_direction_cube()
-	_sync_scope_endoscope_camera()
-	if not _autopilot_active:
+	_sync_scope_endoscope_camera(delta)
+	_update_scope_timer()
+	_sample_scope_performance(delta)
+	_tick_scope_validation_capture(delta)
+	if _controls_blocked or not _autopilot_active:
 		return
 	_autopilot_accum += delta
 	if _autopilot_accum < _AUTOPILOT_TICK:
@@ -1510,18 +1922,122 @@ func _process(delta: float) -> void:
 	_ws.send_control(0.0, 0.0)
 
 
-
-func _sync_scope_endoscope_camera() -> void:
-	if _scope_viewport == null or _scope_camera == null or _world == null:
+func _tick_scope_validation_capture(delta: float) -> void:
+	if not _scope_validation_capture_pending or not _scope_frame_ready():
 		return
-	if _scope_viewport.world_3d == null:
-		_scope_viewport.world_3d = _world.world_3d
+	if _scope_validation_motion_stage == 1:
+		_scope_validation_motion_accum += delta
+		if _scope_validation_motion_accum < 0.05:
+			return
+		_scope_validation_motion_accum = 0.0
+		if _ws != null and is_instance_valid(_ws) and not _controls_blocked:
+			_ws.send_control(0.28, 0.18)
+			_scope_validation_motion_steps += 1
+		if _scope_validation_motion_steps < 60:
+			return
+		_ws.send_control(0.0, 0.0)
+		_scope_validation_motion_stage = 2
+		_scope_validation_capture_frames = 0
+		print("[ScopeValidation] real motion controls complete: %d" %
+			_scope_validation_motion_steps)
+		return
+	_scope_validation_capture_frames += 1
+	if _scope_validation_capture_frames < 180:
+		return
+	var suffix := ""
+	if _scope_validation_motion:
+		suffix = "before" if _scope_validation_motion_stage == 0 else "after"
+	var path := _scope_validation_capture_path(suffix)
+	if not _save_scope_frame(path):
+		return
+	if _scope_validation_motion and _scope_validation_motion_stage == 0:
+		_scope_validation_motion_stage = 1
+		_scope_validation_capture_frames = 0
+		print("[ScopeValidation] before-motion capture complete")
+	else:
+		_scope_validation_capture_pending = false
+		print("[ScopeValidation] capture complete")
+
+
+func _scope_validation_capture_path(suffix: String) -> String:
+	var path := _scope_validation_output
+	if path.is_empty():
+		path = "user://scope_validation_%s_%s.png" % [
+			scope_render_profile, scope_render_quality]
+	if suffix.is_empty():
+		return path
+	return "%s_%s.%s" % [
+		path.get_basename(), suffix, path.get_extension()]
+
+
+func _sample_scope_performance(delta: float) -> void:
+	if _scope_perf_reported or not _scope_frame_ready():
+		return
+	_scope_frame_times_ms.append(delta * 1000.0)
+	if _scope_frame_times_ms.size() < _SCOPE_PERF_SAMPLE_COUNT:
+		return
+	var sorted_samples := _scope_frame_times_ms.duplicate()
+	sorted_samples.sort()
+	var total_ms := 0.0
+	for sample in _scope_frame_times_ms:
+		total_ms += sample
+	var average_ms := total_ms / float(_scope_frame_times_ms.size())
+	var p95_index := clampi(
+		int(ceil(float(sorted_samples.size()) * 0.95)) - 1,
+		0,
+		sorted_samples.size() - 1)
+	var average_fps := 1000.0 / maxf(average_ms, 0.001)
+	print("[ScopePerf] profile=%s quality=%s frames=%d avg_fps=%.1f avg_ms=%.2f p95_ms=%.2f" % [
+		scope_render_profile,
+		scope_render_quality,
+		_scope_frame_times_ms.size(),
+		average_fps,
+		average_ms,
+		sorted_samples[p95_index],
+	])
+	_scope_perf_reported = true
+
+
+
+func _sync_scope_endoscope_camera(delta: float) -> void:
+	if _scope_viewport == null or _scope_camera == null:
+		return
 	if _rig == null or not is_instance_valid(_rig) or _rig.endoscope_cam == null:
 		return
-	_scope_camera.global_transform = _rig.endoscope_cam.global_transform
-	_scope_camera.fov = _rig.endoscope_cam.fov
+	var target_transform: Transform3D = _rig.endoscope_cam.global_transform
+	if not _scope_pose_initialized:
+		_scope_camera.global_transform = target_transform
+		_scope_pose_initialized = true
+		if _scope_camera_filter != null:
+			_scope_camera_filter.reset()
+	else:
+		if scope_render_profile == "baseline":
+			var blend := clampf(scope_camera_smooth * delta, 0.0, 1.0)
+			_scope_camera.global_transform = _scope_camera.global_transform.interpolate_with(
+				target_transform, blend)
+		elif _scope_camera_filter != null:
+			_scope_camera.global_transform = _scope_camera_filter.update(
+				target_transform, delta)
+	_scope_camera.fov = (
+		_rig.endoscope_cam.fov
+		if scope_render_profile == "baseline"
+		else _scope_target_fov)
 	_scope_camera.near = _rig.endoscope_cam.near
-	_scope_camera.far = _rig.endoscope_cam.far
+	if _scope_lighting != null and is_instance_valid(_scope_lighting):
+		_scope_lighting.update_radius(_scope_radius_target, delta)
+		var radius_m: float = _scope_lighting.get_smoothed_radius()
+		if scope_render_profile == "baseline":
+			_scope_camera.far = minf(2.0, _rig.endoscope_cam.far)
+			if _scope_environment != null:
+				_scope_environment.fog_density = 1.0
+		else:
+			_scope_camera.far = minf(
+				clampf(radius_m * 45.0, 0.30, 0.90),
+				_rig.endoscope_cam.far)
+			if _scope_environment != null:
+				var radius_t := clampf(
+					inverse_lerp(0.0015, 0.006, radius_m), 0.0, 1.0)
+				_scope_environment.fog_density = lerpf(0.35, 0.85, radius_t)
 # Left click -> pick the route waypoint whose ON-SCREEN position is nearest the
 # click, and drive the tip there via the backend autopilot. Robust to coordinate
 # frames: the waypoints are in the backend meter frame and rendered under the path
@@ -1533,7 +2049,7 @@ func _sync_scope_endoscope_camera() -> void:
 # tiny perpendicular distance for any ray, so in the close-up follow view (camera
 # sitting on the tip ≈ waypoint 0) every click degenerated to selecting waypoint 0.
 func _on_navigate_click(screen_pos: Vector2) -> void:
-	if _path_waypoints.is_empty() or _path == null or not is_instance_valid(_path):
+	if _controls_blocked or _path_waypoints.is_empty() or _path == null or not is_instance_valid(_path):
 		return
 	# Clicks that land on a UI button (pane tools / 互换 / dashboard) are button
 	# presses, not navigation intents — the input handler emits before GUI
@@ -1606,33 +2122,69 @@ func _on_manual_control(_push: float, _rotate: float) -> void:
 	_disengage_autopilot()
 
 
-# 急停 button: halt immediately — drop autopilot and send a neutral control frame so
-# the backend stops advancing the tip.
+func _on_keyboard_control(push: float, rotate: float) -> void:
+	if _controls_blocked:
+		return
+	_on_manual_control(push, rotate)
+	_ws.send_control(push, rotate)
+
+
+# 急停 button: gate every local control source immediately, then wait for the
+# backend latch confirmation before the HUD says the stop succeeded.
 func _on_emergency_stop() -> void:
+	_controls_blocked = true
+	_input.set_control_enabled(false)
 	_disengage_autopilot()
 	if _ws != null and is_instance_valid(_ws):
-		_ws.send_control(0.0, 0.0)
-	_hud.set_nav("急停 STOP", false)
-	print("[Main] EMERGENCY STOP")
+		_ws.send_emergency_stop("operator_hud")
+	print("[Main] emergency stop requested")
 
 
-# 恢复导航 button: re-engage the autopilot toward the last clicked goal (if any),
-# after a 人工接管 / 急停 handed control back.
+# 恢复 only releases the backend latch. Automatic navigation is intentionally not
+# re-engaged; the operator must issue a fresh click/command after confirmation.
 func _on_resume_nav() -> void:
-	if _last_click_target.size() < 3 or _autopilot_active:
-		return
-	_autopilot_active = true
-	_autopilot_accum = _AUTOPILOT_TICK
-	_ws.send_shape_intent(true, _last_click_target)
-	if _entry_marker != null and is_instance_valid(_entry_marker):
-		_entry_marker.set_goal(Vector3(
-			float(_last_click_target[0]), float(_last_click_target[1]), float(_last_click_target[2])))
-	_hud.set_nav("自动 Auto → %s" % _autopilot_wp_text, true)
-	print("[Main] resume nav -> %s" % str(_last_click_target))
+	if _ws != null and is_instance_valid(_ws):
+		_ws.send_resume()
+	print("[Main] resume requested")
+
+
+func _on_emergency_stop_confirmed(control_state: Dictionary) -> void:
+	_controls_blocked = true
+	_input.set_control_enabled(false)
+	_hud.confirm_emergency_stop(control_state)
+	print("[Main] emergency stop confirmed by backend")
+
+
+func _on_resume_confirmed(control_state: Dictionary) -> void:
+	_controls_blocked = not _connection_ready or bool(
+		control_state.get("emergency_stop_latched", false)
+	)
+	_input.set_control_enabled(not _controls_blocked)
+	_hud.confirm_resume(control_state)
+	print("[Main] resume confirmed by backend")
+
+
+func _on_control_rejected(rejection: Dictionary) -> void:
+	var control_state: Dictionary = rejection.get("control_state", {}) as Dictionary
+	_sync_control_state(control_state)
+	_hud.add_log_line("控制被后端拒绝：%s" % str(rejection.get("reason", "unknown")))
+
+
+func _on_control_config_received(control_state: Dictionary) -> void:
+	_hud.apply_control_state(control_state)
+
+
+func _on_protection_changed(name: String, enabled: bool) -> void:
+	if _ws != null and is_instance_valid(_ws):
+		var config := {}
+		config[name] = enabled
+		_ws.send_control_config(config)
 
 
 # 重置 button: cancel autopilot and reset the episode.
 func _on_reset_button() -> void:
+	if _controls_blocked:
+		return
 	_disengage_autopilot()
 	if _ws != null and is_instance_valid(_ws):
 		_ws.send_reset()
@@ -1647,6 +2199,8 @@ func _on_deform_toggle() -> void:
 
 # 运动控制 buttons (推进/旋转): grab manual control and send one control tick.
 func _on_motion(push: float, rotate: float) -> void:
+	if _controls_blocked:
+		return
 	_disengage_autopilot()
 	if _ws != null and is_instance_valid(_ws):
 		_ws.send_control(push, rotate)
@@ -1663,6 +2217,8 @@ func _feed_rig(tip: Dictionary) -> void:
 	var dir := _to_vec3(tip.get("direction", []))
 	var quat := _to_quat(tip.get("quaternion", []))
 	_rig.update_tip(pos, dir, quat)
+	_scope_has_tip = true
+	_update_scope_state()
 	# Refresh the surgical-view fade origin: the tip in world space (the path node
 	# shares the vessel frame, so its transform maps the frame-local tip to world,
 	# matching how click-nav projects waypoints).
@@ -1716,6 +2272,8 @@ func _cycle_camera_mode() -> void:
 # Cycle to the next phantom model (M key): reapply its config, rebuild the
 # vessel scene, and re-handshake the WebSocket session with the new phantom.
 func _cycle_model() -> void:
+	if _controls_blocked:
+		return
 	_model_index = (_model_index + 1) % MODELS.size()
 	var cfg: Dictionary = MODELS[_model_index]
 	_apply_model_config(cfg)
@@ -1736,7 +2294,7 @@ func _cycle_model() -> void:
 	_last_msg = "model switch"
 	_hud.set_model(str(cfg.name))
 	_hud.set_view_mode(_view_mode_label())
-	_hud.update_safety("STANDBY")
+	_hud.mark_navigation_stale("等待新模型数据")
 	_update_debug()
 
 

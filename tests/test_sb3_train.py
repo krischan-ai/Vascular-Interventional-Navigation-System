@@ -1,31 +1,40 @@
+from types import SimpleNamespace
+
 import gymnasium as gym
-from cathsim.gym.envs import CathSim, make_gym_env
+import numpy as np
 
-from stable_baselines3 import SAC
-from stable_baselines3.common.vec_env import SubprocVecEnv
-from stable_baselines3.common.env_util import make_vec_env
-
-from cathsim.rl.utils import Config
-import os
+from cathsim.rl import make_gym_env
 
 
-if __name__ == "__main__":
-    config = Config("full")
-    env = make_gym_env(config, n_envs=os.cpu_count() // 2, monitor_wrapper=True)
+class DummyEnv(gym.Env):
+    observation_space = gym.spaces.Box(-1.0, 1.0, shape=(2,), dtype=np.float32)
+    action_space = gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32)
 
-    for k, v in env.observation_space.spaces.items():
-        print(k, v)
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
+        return np.zeros(2, dtype=np.float32), {}
 
-    model = SAC("MultiInputPolicy", env, verbose=1)
-    model.learn(total_timesteps=10_000, progress_bar=True)
+    def step(self, action):
+        return np.zeros(2, dtype=np.float32), 0.0, False, False, {}
 
-    vec_env = model.get_env()
-    obs = vec_env.reset()
-    for i in range(10):
-        action, _state = model.predict(obs, deterministic=True)
-        obs, reward, done, info = vec_env.step(action)
-        print(reward)
-        # vec_env.render("human")
-        # VecEnv resets automatically
-        # if done:
-        #   obs = vec_env.reset()
+
+def test_make_gym_env_uses_current_rl_entrypoint(monkeypatch):
+    captured = {}
+
+    def fake_make(env_id, **kwargs):
+        captured.update(env_id=env_id, kwargs=kwargs)
+        return DummyEnv()
+
+    monkeypatch.setattr("cathsim.rl.env_utils.gym.make", fake_make)
+    config = SimpleNamespace(
+        task_kwargs={"phantom": "phantom3", "use_pixels": False},
+        wrapper_kwargs={},
+    )
+
+    env = make_gym_env(config, monitor_wrapper=False)
+
+    assert isinstance(env, DummyEnv)
+    assert captured == {
+        "env_id": "cathsim/CathSim-v0",
+        "kwargs": config.task_kwargs,
+    }

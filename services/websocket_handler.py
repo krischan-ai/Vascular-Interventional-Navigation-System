@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field, ValidationError
 from services.devices import default_guidewire_design, default_procedure_design, default_support_system
 from services.navigation_engine import NavigationEngine, NavigationState
 from services.path_planner import PathPlanner
-from services.session_manager import SessionManager
+from services.session_manager import ControlRejectedError, SessionManager
 from services.vpp_assets import require_vpp_graph_path
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +31,13 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # unless an explicit engine override is active.
 _PHYSICS_CAPABLE_BUILTIN: frozenset[str] = frozenset({"aorta_trunk", "aorta_tree"})
 PhysicsEngineMode = Literal["auto", "guided", "mujoco", "physics", "newton", "newton_demo"]
+
+# WebSocket navigation-visual contract.  v3 keeps the existing render-oriented
+# ``tip/path/safety/episode/bodies`` blocks, but also exposes the complete
+# NavigationState at ``data.<field>`` for both state_update and state_batch.
+# Clients therefore no longer need message-type-specific paths for values such
+# as contact_force, wall_distance, path_progress, or risk_score.
+NAVIGATION_VISUAL_SCHEMA_VERSION = "navigation_visual_v3"
 
 _TIP_SHAPE_LABELS = {
     "j_tip": "J尖",
@@ -151,6 +158,9 @@ class MessageType(str, Enum):
     SELECT_ROUTE = "select_route"
     ENGINE_PARAMS = "engine_params"
     SHAPE_INTENT = "shape_intent"
+    EMERGENCY_STOP = "emergency_stop"
+    RESUME = "resume"
+    CONTROL_CONFIG = "control_config"
     RESET = "reset"
     PONG = "pong"
 
@@ -162,6 +172,9 @@ class MessageType(str, Enum):
     PING = "ping"
     SESSION_STARTED = "session_started"
     SESSION_STOPPED = "session_stopped"
+    EMERGENCY_STOP_CONFIRMED = "emergency_stop_confirmed"
+    RESUME_CONFIRMED = "resume_confirmed"
+    CONTROL_REJECTED = "control_rejected"
 
 
 class ControlData(BaseModel):
@@ -184,6 +197,21 @@ class ShapeIntentData(BaseModel):
     target_waypoint: list[float] | None = Field(default=None, min_length=3, max_length=3)
     target_direction: list[float] | None = Field(default=None, min_length=3, max_length=3)
     intensity: float = Field(default=1.0, ge=0.0, le=1.0)
+
+
+class EmergencyStopData(BaseModel):
+    """Operator emergency-stop request."""
+
+    reason: str = Field(default="operator", min_length=1, max_length=120)
+
+
+class ControlConfigData(BaseModel):
+    """Operator-selectable control protection settings."""
+
+    jtip_assist_enabled: bool | None = None
+    torque_limit_enabled: bool | None = None
+    withdrawal_protection_enabled: bool | None = None
+    auto_stop_push_enabled: bool | None = None
 
 
 class SessionStartData(BaseModel):
@@ -423,6 +451,15 @@ class WebSocketHandler:
         elif msg_type == MessageType.SHAPE_INTENT:
             await self._handle_shape_intent(conn_state, message.data)
 
+        elif msg_type == MessageType.EMERGENCY_STOP:
+            await self._handle_emergency_stop(conn_state, message.data)
+
+        elif msg_type == MessageType.RESUME:
+            await self._handle_resume(conn_state)
+
+        elif msg_type == MessageType.CONTROL_CONFIG:
+            await self._handle_control_config(conn_state, message.data)
+
         elif msg_type == MessageType.RESET:
             await self._handle_reset(conn_state, message.data)
 
@@ -475,6 +512,12 @@ class WebSocketHandler:
                 route_target=params.route_target,
             )
             conn_state.session_id = session_id
+            # Session creation can spend longer than PONG_TIMEOUT compiling the
+            # first Newton/Warp kernels.  The ping loop intentionally suspends
+            # timeout checks while session_id is None; restart its clock when the
+            # session becomes active so it does not immediately reject a healthy
+            # client using the stale pre-compilation timestamp.
+            conn_state.last_pong_time = time.time()
             conn_state.batch_mode = params.batch_mode
 
             # Multi-branch phantoms expose their selectable branch tips so the
@@ -486,7 +529,11 @@ class WebSocketHandler:
                 else None
             )
             if initial_batch is not None:
+                initial_batch["control_state"] = self._session_manager.get_control_state(
+                    session_id
+                )
                 conn_state.path_sent = True
+            control_state = self._session_manager.get_control_state(session_id)
             await self._send_message(
                 conn_state,
                 MessageType.SESSION_STARTED,
@@ -498,9 +545,13 @@ class WebSocketHandler:
                     "physics_engine": physics_engine,
                     "engine": type(engine._engine).__name__,
                     "fidelity_mode": state.fidelity_mode,
-                    "state": self._state_to_dict(state),
+                    "state": {
+                        **self._state_to_dict(state),
+                        "control_state": control_state,
+                    },
                     "initial_batch": initial_batch,
                     "routes": engine.available_routes,
+                    "control_state": control_state,
                 },
             )
 
@@ -599,19 +650,27 @@ class WebSocketHandler:
             if conn_state.batch_mode:
                 engine = self._session_manager.get_session(conn_state.session_id)
                 include_path = not conn_state.path_sent
+                payload = self._state_to_batch(state, engine, include_path=include_path)
+                payload["control_state"] = self._session_manager.get_control_state(
+                    conn_state.session_id
+                )
                 await self._send_message(
                     conn_state,
                     MessageType.STATE_BATCH,
                     session_id=conn_state.session_id,
-                    data=self._state_to_batch(state, engine, include_path=include_path),
+                    data=payload,
                 )
                 conn_state.path_sent = True
             else:
+                payload = self._state_to_dict(state)
+                payload["control_state"] = self._session_manager.get_control_state(
+                    conn_state.session_id
+                )
                 await self._send_message(
                     conn_state,
                     MessageType.STATE_UPDATE,
                     session_id=conn_state.session_id,
-                    data=self._state_to_dict(state),
+                    data=payload,
                 )
 
         except KeyError:
@@ -619,8 +678,120 @@ class WebSocketHandler:
             await self._send_error(
                 conn_state, "SESSION_EXPIRED", "Session no longer exists"
             )
+        except ControlRejectedError as e:
+            await self._send_message(
+                conn_state,
+                MessageType.CONTROL_REJECTED,
+                session_id=conn_state.session_id,
+                data={
+                    "reason": "EMERGENCY_STOP_LATCHED",
+                    "message": str(e),
+                    "control_state": self._session_manager.get_control_state(
+                        conn_state.session_id
+                    ),
+                },
+            )
         except RuntimeError as e:
             await self._send_error(conn_state, "STEP_ERROR", str(e))
+
+    async def _handle_emergency_stop(
+        self, conn_state: ConnectionState, data: dict
+    ) -> None:
+        """Latch the active session stop and confirm only after server commit."""
+        if not conn_state.session_id:
+            await self._send_error(
+                conn_state, "NO_SESSION", "No active session for emergency stop"
+            )
+            return
+        try:
+            request = EmergencyStopData(**data)
+        except ValidationError as e:
+            await self._send_error(conn_state, "INVALID_PARAMS", str(e))
+            return
+
+        try:
+            control_state = await self._run_blocking(
+                self._session_manager.emergency_stop,
+                conn_state.session_id,
+                request.reason,
+            )
+        except KeyError:
+            conn_state.session_id = None
+            await self._send_error(
+                conn_state, "SESSION_EXPIRED", "Session no longer exists"
+            )
+            return
+
+        # Any in-flight control response may still arrive, but its session is now
+        # latched. The confirmation is the authority the frontend renders.
+        await self._send_message(
+            conn_state,
+            MessageType.EMERGENCY_STOP_CONFIRMED,
+            session_id=conn_state.session_id,
+            data={"status": "latched", "control_state": control_state},
+        )
+
+    async def _handle_resume(self, conn_state: ConnectionState) -> None:
+        """Release the session latch without restoring ShapeIntent automatically."""
+        if not conn_state.session_id:
+            await self._send_error(
+                conn_state, "NO_SESSION", "No active session to resume"
+            )
+            return
+        try:
+            control_state = await self._run_blocking(
+                self._session_manager.resume, conn_state.session_id
+            )
+        except KeyError:
+            conn_state.session_id = None
+            await self._send_error(
+                conn_state, "SESSION_EXPIRED", "Session no longer exists"
+            )
+            return
+        await self._send_message(
+            conn_state,
+            MessageType.RESUME_CONFIRMED,
+            session_id=conn_state.session_id,
+            data={"status": "resumed", "control_state": control_state},
+        )
+
+    async def _handle_control_config(
+        self, conn_state: ConnectionState, data: dict
+    ) -> None:
+        """Apply protection toggles and echo their backend-effective values."""
+        if not conn_state.session_id:
+            await self._send_error(
+                conn_state, "NO_SESSION", "No active session for control config"
+            )
+            return
+        try:
+            request = ControlConfigData(**data)
+        except ValidationError as e:
+            await self._send_error(conn_state, "INVALID_PARAMS", str(e))
+            return
+        try:
+            control_state = await self._run_blocking(
+                self._session_manager.update_control_config,
+                conn_state.session_id,
+                **request.model_dump(),
+            )
+        except KeyError:
+            conn_state.session_id = None
+            await self._send_error(
+                conn_state, "SESSION_EXPIRED", "Session no longer exists"
+            )
+            return
+        except Exception as e:  # noqa: BLE001 - backend may reject live rebuilds
+            await self._send_error(
+                conn_state, "CONTROL_CONFIG_ERROR", f"{type(e).__name__}: {e}"
+            )
+            return
+        await self._send_message(
+            conn_state,
+            MessageType.CONTROL_CONFIG,
+            session_id=conn_state.session_id,
+            data={"control_state": control_state},
+        )
 
     async def _handle_path_request(
         self, conn_state: ConnectionState, data: dict
@@ -676,6 +847,30 @@ class WebSocketHandler:
             await self._send_error(conn_state, "NO_SESSION", "No active session")
             return
         try:
+            emergency_stopped = self._session_manager.is_emergency_stopped(
+                conn_state.session_id
+            )
+        except KeyError:
+            conn_state.session_id = None
+            await self._send_error(
+                conn_state, "SESSION_EXPIRED", "Session no longer exists"
+            )
+            return
+        if emergency_stopped:
+            await self._send_message(
+                conn_state,
+                MessageType.CONTROL_REJECTED,
+                session_id=conn_state.session_id,
+                data={
+                    "reason": "EMERGENCY_STOP_LATCHED",
+                    "message": "Route switching is disabled during emergency stop",
+                    "control_state": self._session_manager.get_control_state(
+                        conn_state.session_id
+                    ),
+                },
+            )
+            return
+        try:
             req = SelectRouteData(**data)
         except ValidationError as e:
             await self._send_error(conn_state, "INVALID_PARAMS", str(e))
@@ -707,6 +902,9 @@ class WebSocketHandler:
         else:
             payload = self._state_to_dict(state)
             msg_type = MessageType.STATE_UPDATE
+        payload["control_state"] = self._session_manager.get_control_state(
+            conn_state.session_id
+        )
 
         await self._send_message(
             conn_state, msg_type, session_id=conn_state.session_id, data=payload
@@ -765,6 +963,31 @@ class WebSocketHandler:
             return
 
         try:
+            emergency_stopped = self._session_manager.is_emergency_stopped(
+                conn_state.session_id
+            )
+        except KeyError:
+            conn_state.session_id = None
+            await self._send_error(
+                conn_state, "SESSION_EXPIRED", "Session no longer exists"
+            )
+            return
+        if req.active and emergency_stopped:
+            await self._send_message(
+                conn_state,
+                MessageType.CONTROL_REJECTED,
+                session_id=conn_state.session_id,
+                data={
+                    "reason": "EMERGENCY_STOP_LATCHED",
+                    "message": "ShapeIntent is disabled during emergency stop",
+                    "control_state": self._session_manager.get_control_state(
+                        conn_state.session_id
+                    ),
+                },
+            )
+            return
+
+        try:
             engine = self._session_manager.get_session(conn_state.session_id)
         except KeyError:
             conn_state.session_id = None
@@ -798,6 +1021,30 @@ class WebSocketHandler:
                 conn_state, "NO_SESSION", "No active session to reset"
             )
             return
+        try:
+            emergency_stopped = self._session_manager.is_emergency_stopped(
+                conn_state.session_id
+            )
+        except KeyError:
+            conn_state.session_id = None
+            await self._send_error(
+                conn_state, "SESSION_EXPIRED", "Session no longer exists"
+            )
+            return
+        if emergency_stopped:
+            await self._send_message(
+                conn_state,
+                MessageType.CONTROL_REJECTED,
+                session_id=conn_state.session_id,
+                data={
+                    "reason": "EMERGENCY_STOP_LATCHED",
+                    "message": "Reset is disabled during emergency stop",
+                    "control_state": self._session_manager.get_control_state(
+                        conn_state.session_id
+                    ),
+                },
+            )
+            return
 
         try:
             state = await self._run_blocking(
@@ -819,6 +1066,9 @@ class WebSocketHandler:
                     "episode_count": info.episode_count,
                 }
                 msg_type = MessageType.STATE_UPDATE
+            payload["control_state"] = self._session_manager.get_control_state(
+                conn_state.session_id
+            )
 
             await self._send_message(
                 conn_state,
@@ -921,14 +1171,47 @@ class WebSocketHandler:
             ],
         }
 
-    def _state_to_dict(self, state: NavigationState) -> dict:
+    def _safety_contract(
+        self, state: NavigationState, timestamp_ms: int
+    ) -> dict[str, Any]:
+        """Build the authoritative, source-labelled safety view for all clients."""
+        mechanics = self._guidewire_mechanics(state, timestamp_ms)
+        return {
+            "status": state.safety_status,
+            "safety_level": mechanics["safety_level"],
+            "risk_score": state.risk_score,
+            "reason_codes": mechanics["reason_codes"],
+            "source": mechanics["source"],
+            "timestamp_ms": timestamp_ms,
+            "data_status": "fresh",
+            "stop_required": mechanics["stop_required"],
+            "contact_force": state.contact_force,
+            "wall_distance": state.wall_distance,
+            "curvature": state.curvature,
+            "speed": state.velocity,
+            "risk_regions": state.risk_regions,
+            "guidewire_mechanics": mechanics,
+        }
+
+    def _state_to_dict(
+        self, state: NavigationState, timestamp_ms: int | None = None
+    ) -> dict:
         """Convert NavigationState to dictionary for WebSocket transmission.
 
-        Emits the full state (including wall_distance, curvature, path_progress,
-        path_deviation, safety_status and tip_quaternion) per the state_update
-        schema in doc/03-API与通信协议.md §1.4.
+        v3 emits the same canonical fields at ``data.<field>`` for both
+        state_update and state_batch. Optional unavailable values remain JSON
+        null (for example vessel_radius / eta_seconds / latency_ms); they are
+        never replaced with a fabricated numeric default at this boundary.
         """
-        return state.as_dict()
+        emitted_at = int(time.time() * 1000) if timestamp_ms is None else timestamp_ms
+        return {
+            "schema_version": NAVIGATION_VISUAL_SCHEMA_VERSION,
+            "timestamp_ms": emitted_at,
+            "data_status": "fresh",
+            "source": "navigation_engine",
+            **state.as_dict(),
+            "safety": self._safety_contract(state, emitted_at),
+        }
 
     def _guidewire_state_from_diagnostics(self, diagnostics: dict[str, Any]) -> dict[str, Any]:
         diag = diagnostics if isinstance(diagnostics, dict) else {}
@@ -1116,6 +1399,7 @@ class WebSocketHandler:
         empty.
         """
         timestamp_ms = int(time.time() * 1000)
+        canonical_state = self._state_to_dict(state, timestamp_ms)
         backend = getattr(engine, "_engine", None)
         diagnostics = {}
         if backend is not None and hasattr(backend, "diagnostics"):
@@ -1127,8 +1411,8 @@ class WebSocketHandler:
         procedure = self._procedure_state_from_diagnostics(diagnostics, guidewire)
         risk = self._segmented_risk_state(state, diagnostics)
         return {
-            "schema_version": "navigation_visual_v2",
-            "timestamp_ms": timestamp_ms,
+            # Canonical navigation state: identical field paths to state_update.
+            **canonical_state,
             "engine": type(backend).__name__ if backend is not None else "",
             "fidelity_mode": state.fidelity_mode,
             "diagnostics": diagnostics,
@@ -1147,6 +1431,8 @@ class WebSocketHandler:
                 "progress": state.path_progress,
                 "deviation": state.path_deviation,
                 "remaining_distance": state.remaining_distance,
+                "total_distance": state.path_total_distance,
+                "travelled_distance": state.path_travelled_distance,
                 "vessel_radius": state.vessel_radius,
                 "eta_seconds": state.eta_seconds,
             },
@@ -1156,15 +1442,9 @@ class WebSocketHandler:
             # sent every frame.
             "entry": engine.entry_pose if include_path else {},
             "target": state.target_position,
-            "safety": {
-                "status": state.safety_status,
-                "wall_distance": state.wall_distance,
-                "curvature": state.curvature,
-                "speed": state.velocity,
-                "risk_score": state.risk_score,
-                "risk_regions": state.risk_regions,
-                "guidewire_mechanics": self._guidewire_mechanics(state, timestamp_ms),
-            },
+            # Retained as a render/dashboard block, now using the same
+            # authoritative v3 safety contract as state_update.
+            "safety": canonical_state["safety"],
             "episode": {
                 "length": state.episode_length,
                 "reward": state.reward,
