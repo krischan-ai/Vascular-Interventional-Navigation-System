@@ -8,6 +8,7 @@ readonly LOCK_FILE="/run/lock/cathsim-deploy.lock"
 readonly CANDIDATE_PORT="${CATHSIM_CANDIDATE_PORT:-19001}"
 readonly PRODUCTION_PORT="${CATHSIM_PRODUCTION_PORT:-9000}"
 readonly HEALTH_TIMEOUT="${CATHSIM_HEALTH_TIMEOUT:-120}"
+readonly ENABLE_FIRST_CUTOVER="${CATHSIM_ENABLE_FIRST_CUTOVER:-false}"
 
 log() {
   printf '%s %s\n' "$(date --iso-8601=seconds)" "$*"
@@ -34,6 +35,8 @@ validate_inputs() {
     die "image is outside the approved repository or is not an immutable SHA tag"
   [[ "$CATHSIM_IMAGE" == *"@${CATHSIM_IMAGE_DIGEST}" ]] ||
     die "image reference digest does not match CATHSIM_IMAGE_DIGEST"
+  [[ "$ENABLE_FIRST_CUTOVER" == "true" || "$ENABLE_FIRST_CUTOVER" == "false" ]] ||
+    die "CATHSIM_ENABLE_FIRST_CUTOVER must be true or false"
 }
 
 wait_for_health() {
@@ -98,6 +101,79 @@ rollback() {
   log "rollback completed"
 }
 
+capture_and_stop_legacy() {
+  local pid
+  pid="$(ss -H -ltnp "sport = :${PRODUCTION_PORT}" |
+    sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | head -1)"
+  [[ "$pid" =~ ^[0-9]+$ ]] ||
+    die "cannot identify the legacy process listening on port $PRODUCTION_PORT"
+  python3 - "$pid" "$STATE_DIR/legacy-process.json" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+pid, output = sys.argv[1:]
+proc = pathlib.Path("/proc") / pid
+argv = [part.decode("utf-8", "surrogateescape") for part in
+        (proc / "cmdline").read_bytes().split(b"\0") if part]
+if not argv or not any("uvicorn" in part for part in argv):
+    raise SystemExit("refusing to stop an unrecognized listener")
+env = {}
+for part in (proc / "environ").read_bytes().split(b"\0"):
+    if b"=" in part:
+        key, value = part.split(b"=", 1)
+        env[key.decode("utf-8", "surrogateescape")] = value.decode(
+            "utf-8", "surrogateescape"
+        )
+payload = {
+    "argv": argv,
+    "cwd": os.readlink(proc / "cwd"),
+    "env": env,
+}
+path = pathlib.Path(output)
+path.write_text(json.dumps(payload), encoding="utf-8")
+path.chmod(0o600)
+PY
+  log "captured legacy process recovery metadata"
+  kill -TERM "$pid"
+  local deadline=$((SECONDS + 30))
+  while kill -0 "$pid" 2>/dev/null && ((SECONDS < deadline)); do
+    sleep 1
+  done
+  kill -0 "$pid" 2>/dev/null &&
+    die "legacy process did not stop after SIGTERM"
+  log "legacy service stopped for first cutover"
+}
+
+restart_legacy() {
+  local metadata="$STATE_DIR/legacy-process.json"
+  [[ -f "$metadata" ]] || die "legacy recovery metadata is missing"
+  compose_production "$CATHSIM_IMAGE" down --remove-orphans || true
+  python3 - "$metadata" "$STATE_DIR/legacy-recovery.log" <<'PY'
+import json
+import pathlib
+import subprocess
+import sys
+
+metadata, log_path = map(pathlib.Path, sys.argv[1:])
+payload = json.loads(metadata.read_text(encoding="utf-8"))
+log = log_path.open("ab", buffering=0)
+subprocess.Popen(
+    payload["argv"],
+    cwd=payload["cwd"],
+    env=payload["env"],
+    stdin=subprocess.DEVNULL,
+    stdout=log,
+    stderr=subprocess.STDOUT,
+    start_new_session=True,
+)
+PY
+  wait_for_health "$PRODUCTION_PORT" ||
+    die "legacy process restart failed health verification"
+  log "legacy service restored"
+}
+
 main() {
   require_root
   validate_inputs
@@ -114,6 +190,7 @@ main() {
   flock --nonblock 9 || die "another deployment is in progress"
 
   local previous_image=""
+  local first_cutover="false"
   if [[ -f "$STATE_DIR/current-image" ]]; then
     previous_image="$(<"$STATE_DIR/current-image")"
   fi
@@ -138,7 +215,11 @@ main() {
   log "candidate verified"
 
   if [[ ! -f "$STATE_DIR/container-production-enabled" ]]; then
-    die "production container cutover is not bootstrapped; run cathsim-deploy-bootstrap once"
+    [[ "$ENABLE_FIRST_CUTOVER" == "true" ]] ||
+      die "first production cutover awaits GitHub workflow_dispatch confirmation"
+    capture_and_stop_legacy
+    first_cutover="true"
+    log "first production cutover authorized by workflow_dispatch"
   fi
 
   if [[ -n "$previous_image" ]]; then
@@ -146,19 +227,35 @@ main() {
   fi
 
   if ! compose_production "$CATHSIM_IMAGE" up -d --remove-orphans; then
-    rollback "$previous_image"
+    if [[ "$first_cutover" == "true" ]]; then
+      restart_legacy
+    else
+      rollback "$previous_image"
+    fi
     die "production compose update failed"
   fi
   if ! wait_for_health "$PRODUCTION_PORT"; then
     compose_production "$CATHSIM_IMAGE" logs --tail 200 >&2 || true
-    rollback "$previous_image"
+    if [[ "$first_cutover" == "true" ]]; then
+      restart_legacy
+    else
+      rollback "$previous_image"
+    fi
     die "production failed health verification"
   fi
   if ! verify_container cathsim-production; then
-    rollback "$previous_image"
+    if [[ "$first_cutover" == "true" ]]; then
+      restart_legacy
+    else
+      rollback "$previous_image"
+    fi
     die "production failed simulation verification"
   fi
 
+  if [[ "$first_cutover" == "true" ]]; then
+    install -o root -g root -m 0644 /dev/null \
+      "$STATE_DIR/container-production-enabled"
+  fi
   printf '%s\n' "$CATHSIM_IMAGE" >"$STATE_DIR/current-image"
   printf '%s\n' "${CATHSIM_RUN_ID:-unknown}" >"$STATE_DIR/last-run-id"
   printf '%s\n' "$CATHSIM_EXPECTED_SHA" >"$STATE_DIR/current-commit"

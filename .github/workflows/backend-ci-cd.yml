@@ -30,6 +30,11 @@ on:
         required: true
         type: boolean
         default: false
+      confirm_first_cutover:
+        description: "Confirm the one-time replacement of the service on port 9000"
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -209,9 +214,10 @@ jobs:
           CATHSIM_IMAGE_DIGEST: ${{ needs.build.outputs.digest }}
           CATHSIM_EXPECTED_SHA: ${{ github.sha }}
           CATHSIM_RUN_ID: ${{ github.run_id }}
+          CATHSIM_ENABLE_FIRST_CUTOVER: ${{ github.event_name == 'workflow_dispatch' && inputs.confirm_first_cutover }}
         run: >-
           sudo --non-interactive
-          --preserve-env=CATHSIM_IMAGE,CATHSIM_IMAGE_DIGEST,CATHSIM_EXPECTED_SHA,CATHSIM_RUN_ID
+          --preserve-env=CATHSIM_IMAGE,CATHSIM_IMAGE_DIGEST,CATHSIM_EXPECTED_SHA,CATHSIM_RUN_ID,CATHSIM_ENABLE_FIRST_CUTOVER
           /usr/local/sbin/cathsim-deploy
 
       - name: Publish diagnostics on failure

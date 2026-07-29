@@ -31,8 +31,9 @@ root-owned `/usr/local/sbin/cathsim-deploy` entrypoint.
   `/var/lib/cathsim-deploy`.
 - A failed production health or simulation check restores the previous image.
 - The first migration from the legacy root/Conda process is deliberately not
-  automatic. `cathsim-deploy-bootstrap` must be performed once after candidate
-  verification.
+  automatic. In GitHub Actions, manually run `Backend CI/CD` with `deploy` and
+  `confirm_first_cutover` checked. Only that explicit workflow dispatch may
+  create the one-time production marker after candidate verification.
 
 ## One-time host setup
 
