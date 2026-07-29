@@ -99,6 +99,16 @@ class TestDerivedStateWithFakeEngine:
         assert state.path_progress == pytest.approx(0.5)
         assert state.path_deviation == pytest.approx(0.0)
 
+    def test_arclen_progress_retains_physical_tip_deviation(self):
+        nav, _ = _nav_with_fake([
+            RawPose(tip_position=[1.5, 0.5, 0.0], arclen=1.5),
+        ])
+
+        state = nav.reset()
+
+        assert state.path_progress == pytest.approx(0.5)
+        assert state.path_deviation == pytest.approx(0.5)
+
     def test_deviation_off_path(self):
         nav, _ = _nav_with_fake([RawPose(tip_position=[2.0, 0.5, 0.0])])
         state = nav.reset()

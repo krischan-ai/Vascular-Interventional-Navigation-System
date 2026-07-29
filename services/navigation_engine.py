@@ -76,6 +76,9 @@ class NavigationState:
     tip_quaternion: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0, 1.0])
     velocity: float = 0.0
     contact_force: float = 0.0
+    wall_contact_count: int = 0
+    max_penetration: float = 0.0
+    contact_impulse: float = 0.0
     wall_distance: float = 0.0
     curvature: float = 0.0
     episode_length: int = 0
@@ -105,6 +108,9 @@ class NavigationState:
             "tip_quaternion": self.tip_quaternion,
             "velocity": self.velocity,
             "contact_force": self.contact_force,
+            "wall_contact_count": self.wall_contact_count,
+            "max_penetration": self.max_penetration,
+            "contact_impulse": self.contact_impulse,
             "wall_distance": self.wall_distance,
             "curvature": self.curvature,
             "episode_length": self.episode_length,
@@ -801,7 +807,10 @@ class NavigationEngine:
 
         if raw.arclen is not None and self._path is not None and self._path.total_len > 0.0:
             path_progress = float(raw.arclen / self._path.total_len)
-            path_deviation = 0.0
+            path_point = self._path.point_at_arclen(float(raw.arclen))
+            path_deviation = float(
+                np.linalg.norm(np.asarray(tip_pos, dtype=np.float64) - path_point)
+            )
         else:
             path_progress, path_deviation = self._compute_path_progress(tip_pos)
         path_progress = float(np.clip(path_progress, 0.0, 1.0))
@@ -834,6 +843,9 @@ class NavigationEngine:
             tip_quaternion=raw.tip_quaternion,
             velocity=float(velocity),
             contact_force=float(raw.contact_force),
+            wall_contact_count=int(getattr(raw, "wall_contact_count", 0)),
+            max_penetration=float(getattr(raw, "max_penetration", 0.0)),
+            contact_impulse=float(getattr(raw, "contact_impulse", 0.0)),
             wall_distance=float(raw.wall_distance),
             curvature=float(curvature),
             episode_length=self._episode_length,

@@ -1,5 +1,6 @@
 import sys
 import types
+import json
 from pathlib import Path
 
 
@@ -122,6 +123,7 @@ def test_train_navigation_ppo_builds_pipeline(monkeypatch, tmp_path):
     assert made[0][1]["phantom"] == "aorta_tree"
     assert made[0][1]["route_target"] == "endpoint_0"
     assert made[0][1]["physics_engine"] == "newton"
+    assert made[0][1]["domain_randomization"] is False
     assert len(DummyPPO.instances) == 1
     model = DummyPPO.instances[0]
     assert model.policy == "MultiInputPolicy"
@@ -167,7 +169,38 @@ def test_train_navigation_sac_saves_replay_and_metadata(monkeypatch, tmp_path):
     assert model.kwargs["learning_starts"] == 1_000
     assert model.saved_replay_buffer == str(config.model_dir / "final_replay_buffer.pkl")
     assert (config.run_dir / "run_config.json").exists()
+    run_config = json.loads(
+        (config.run_dir / "run_config.json").read_text(encoding="utf-8")
+    )
+    assert run_config["schema_version"] == "navigation_training_run_v2"
+    assert run_config["protocol"]["reward_version"] == "navigation_reward_v2"
+    assert run_config["protocol"]["physics"]["requested_engine"] == "newton"
     assert '"status": "completed"' in (config.run_dir / "run_status.json").read_text(encoding="utf-8")
+
+
+def test_make_navigation_env_enables_domain_randomization(monkeypatch, tmp_path):
+    import gymnasium as gym
+    from cathsim.rl.navigation_train import NavigationTrainConfig, make_navigation_env
+
+    install_fake_sb3(monkeypatch)
+    made = []
+    monkeypatch.setattr(
+        gym,
+        "make",
+        lambda *args, **kwargs: made.append((args, kwargs)) or DummyEnv(),
+    )
+    config = NavigationTrainConfig(
+        output_dir=tmp_path,
+        domain_randomization=True,
+        domain_randomization_ranges={"bend": (16.0, 24.0)},
+    )
+
+    make_navigation_env(config, monitor=False)
+
+    assert made[0][1]["domain_randomization"] is True
+    assert made[0][1]["domain_randomization_ranges"] == {
+        "bend": (16.0, 24.0)
+    }
 
 
 def test_train_navigation_resume_keeps_timestep_counter(monkeypatch, tmp_path):
@@ -188,3 +221,46 @@ def test_train_navigation_resume_keeps_timestep_counter(monkeypatch, tmp_path):
     model = DummyPPO.instances[-1]
     assert model.loaded_path == str(resume)
     assert model.learn_args["reset_num_timesteps"] is False
+
+
+def test_train_navigation_sweep_uses_independent_run_names_and_manifest(
+    monkeypatch, tmp_path
+):
+    from cathsim.rl import navigation_train
+
+    calls = []
+
+    def fake_train(config):
+        calls.append(config)
+        return config.model_dir / "final_model.zip"
+
+    monkeypatch.setattr(navigation_train, "train_navigation", fake_train)
+    config = navigation_train.NavigationTrainConfig(
+        output_dir=tmp_path,
+        run_name="stage0_dr",
+        domain_randomization=True,
+        progress_bar=False,
+    )
+
+    manifest = navigation_train.train_navigation_sweep(
+        config,
+        [0, 1, 1, 2],
+    )
+
+    assert manifest["status"] == "completed"
+    assert manifest["seeds"] == [0, 1, 2]
+    assert [item.run_name for item in calls] == [
+        "stage0_dr_seed0",
+        "stage0_dr_seed1",
+        "stage0_dr_seed2",
+    ]
+    assert all(item.domain_randomization for item in calls)
+    saved = json.loads(
+        (
+            tmp_path
+            / "stage0_dr_sweep"
+            / "sweep_manifest.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert saved["completed_runs"] == 3
+    assert saved["failed_runs"] == 0

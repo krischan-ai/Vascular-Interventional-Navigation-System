@@ -125,6 +125,55 @@ def _nearest_arclen(points: np.ndarray, cum: np.ndarray, xyz: np.ndarray) -> flo
     return float(cum[i] + t[i] * (cum[i + 1] - cum[i]))
 
 
+def _project_points_to_centerline(
+    xyz: np.ndarray,
+    centerline: np.ndarray,
+    radii: np.ndarray,
+    cum: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Project points onto centerline segments and interpolate local radii.
+
+    Returning the nearest vertex is not sufficient: rod nodes commonly lie
+    between resampled centerline nodes, which would turn axial spacing into a
+    false radial offset and overstate wall penetration.
+    """
+    query = np.asarray(xyz, dtype=np.float64)
+    points = np.asarray(centerline, dtype=np.float64)
+    radius_nodes = np.asarray(radii, dtype=np.float64)
+    if query.ndim != 2 or query.shape[1] != 3:
+        raise ValueError("xyz must have shape (n, 3)")
+    if len(points) < 2 or len(radius_nodes) != len(points):
+        raise ValueError("centerline requires at least two points and one radius per point")
+
+    a = points[:-1]
+    ab = points[1:] - a
+    denom = np.einsum("ij,ij->i", ab, ab) + 1e-18
+    ap = query[:, None, :] - a[None, :, :]
+    t = np.clip(
+        np.einsum("nsi,si->ns", ap, ab) / denom[None, :],
+        0.0,
+        1.0,
+    )
+    projections = a[None, :, :] + t[:, :, None] * ab[None, :, :]
+    distance_sq = np.sum((query[:, None, :] - projections) ** 2, axis=2)
+    segment_index = np.argmin(distance_sq, axis=1)
+    row = np.arange(len(query))
+    best_t = t[row, segment_index]
+    nearest_points = projections[row, segment_index]
+    distances = np.sqrt(distance_sq[row, segment_index])
+    local_radii = (
+        radius_nodes[segment_index]
+        + best_t * (radius_nodes[segment_index + 1] - radius_nodes[segment_index])
+    )
+    if cum is None:
+        segment_lengths = np.linalg.norm(ab, axis=1)
+        cum = np.concatenate([[0.0], np.cumsum(segment_lengths)])
+    arclens = cum[segment_index] + best_t * (
+        cum[segment_index + 1] - cum[segment_index]
+    )
+    return nearest_points, distances, local_radii, arclens, segment_index
+
+
 def _feed_budget(requested: float, slack: float, max_slack: float) -> float:
     """Forward-feed advance allowed under the prolapse guard (force mode).
 
@@ -148,6 +197,53 @@ def _insertion_complete(insert_s: float, max_insert_s: float, eps: float = 1e-9)
     responsible for declaring success in that case.
     """
     return max_insert_s > eps and insert_s >= max_insert_s - eps
+
+
+def _count_static_dynamic_contacts(
+    shape0: np.ndarray,
+    shape1: np.ndarray,
+    shape_body: np.ndarray,
+) -> int:
+    """Count contacts between the static vessel and dynamic guidewire bodies."""
+    if len(shape0) == 0:
+        return 0
+    body0 = shape_body[np.asarray(shape0, dtype=np.int64)]
+    body1 = shape_body[np.asarray(shape1, dtype=np.int64)]
+    return int(np.count_nonzero((body0 < 0) != (body1 < 0)))
+
+
+def _static_dynamic_force_stats(
+    body0: np.ndarray,
+    body1: np.ndarray,
+    force_on_body1: np.ndarray,
+) -> tuple[int, float, float, float]:
+    """Aggregate VBD forces for static-vessel/dynamic-guidewire contacts.
+
+    Returns contact count, peak per-contact magnitude, sum of magnitudes, and
+    magnitude of the resultant force on dynamic bodies.
+    """
+    b0 = np.asarray(body0, dtype=np.int64)
+    b1 = np.asarray(body1, dtype=np.int64)
+    forces = np.asarray(force_on_body1, dtype=np.float64)
+    if len(b0) == 0:
+        return 0, 0.0, 0.0, 0.0
+    if len(b0) != len(b1) or forces.shape != (len(b0), 3):
+        raise ValueError("body indices and force vectors must have matching lengths")
+    mask = (b0 < 0) != (b1 < 0)
+    if not np.any(mask):
+        return 0, 0.0, 0.0, 0.0
+    wall_forces = forces[mask]
+    magnitudes = np.linalg.norm(wall_forces, axis=1)
+    # VBD reports force on body1. Flip contacts where body0 is dynamic so every
+    # vector consistently represents force applied to the guidewire.
+    signs = np.where(b1[mask] >= 0, 1.0, -1.0)
+    resultant = np.sum(wall_forces * signs[:, None], axis=0)
+    return (
+        int(np.count_nonzero(mask)),
+        float(np.max(magnitudes)),
+        float(np.sum(magnitudes)),
+        float(np.linalg.norm(resultant)),
+    )
 
 
 def _quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -328,9 +424,14 @@ class NewtonEngine:
         self._control = None
         self._contacts = None
         self._rod_bodies: list[int] = []
+        self._shape_body_np = np.empty(0, dtype=np.int32)
         self._alpha = None
         self._base_arc = None
         self._max_s_ins = 0.0
+        self._last_wall_contact_count = 0
+        self._last_max_penetration = 0.0
+        self._last_contact_force = 0.0
+        self._last_contact_impulse = 0.0
 
     def _update_insert_limit(self) -> None:
         if self._base_arc is None:
@@ -591,6 +692,28 @@ class NewtonEngine:
             "bend_profile": self._bend_profile(max(0, int(round(self._rod_length / self._rod_seg_len)))).tolist(),
         }
 
+    @property
+    def protocol_parameters(self) -> dict:
+        """Return the effective, JSON-safe physics contract for run metadata."""
+        return {
+            **self.deform_params,
+            "drive": self._drive,
+            "control_timestep": self._control_dt,
+            "substeps": self._substeps,
+            "solver_iterations": self._iterations,
+            "rod_length": self._rod_length,
+            "rod_segment_length": self._rod_seg_len,
+            "rod_radius": self._rod_radius,
+            "fallback_lumen_radius": self._lumen_radius,
+            "minimum_lumen_radius": self._min_radius,
+            "wall_thickness": self._wall_thickness,
+            "sdf_voxel_size": self._sdf_voxel,
+            "sdf_lumen_band": self._lumen_band,
+            "settle_steps": self._settle_steps,
+            "anchor_free_span": self._free_span,
+            "anchor_tip_alpha": self._tip_alpha,
+        }
+
     def _ensure_initialized(self) -> None:
         if self._initialized:
             return
@@ -640,6 +763,7 @@ class NewtonEngine:
         self._s1 = self._model.state()
         self._control = self._model.control()
         self._contacts = self._model.contacts()
+        self._shape_body_np = self._model.shape_body.numpy()
 
         nb = len(self._rod_bodies)
         self._base_arc = np.arange(nb) * self._rod_seg_len
@@ -660,6 +784,7 @@ class NewtonEngine:
         self._insert_s = 0.0
         self._twist = 0.0
         self._ensure_initialized()
+        self._reset_contact_metrics()
         return self._raw_pose()
 
     def _tangent_at_s(self, s: float) -> np.ndarray:
@@ -738,14 +863,46 @@ class NewtonEngine:
 
     def _breach_stats(self, xyz: np.ndarray) -> tuple[float, float, float]:
         """Worst lumen breach plus wall-distance/contact-force for rod bodies."""
-        d2 = np.sum((xyz[:, None, :] - self._centerline[None, :, :]) ** 2, axis=2)
-        nearest = np.argmin(d2, axis=1)
-        dist = np.sqrt(d2[np.arange(len(xyz)), nearest])
-        breach = dist + self._rod_radius - self._radii[nearest]  # >0 => outside lumen
+        _, dist, local_radii, _, _ = _project_points_to_centerline(
+            xyz,
+            self._centerline,
+            self._radii,
+            self._cl_cum,
+        )
+        breach = dist + self._rod_radius - local_radii  # >0 => outside lumen
         worst = float(breach.max())
         wall_distance = max(0.0, -worst)
         contact_force = max(0.0, worst) * self._contact_ke
         return worst, wall_distance, contact_force
+
+    def _reset_contact_metrics(self) -> None:
+        self._last_wall_contact_count = 0
+        self._last_max_penetration = 0.0
+        self._last_contact_force = 0.0
+        self._last_contact_impulse = 0.0
+
+    def _record_substep_contacts(self) -> None:
+        """Preserve contacts before VBD resolves their end-of-substep overlap."""
+        if self._contacts is None or self._model is None:
+            return
+        count = int(self._contacts.rigid_contact_count.numpy()[0])
+        if count <= 0:
+            return
+        shape0 = self._contacts.rigid_contact_shape0.numpy()[:count]
+        shape1 = self._contacts.rigid_contact_shape1.numpy()[:count]
+        wall_count = _count_static_dynamic_contacts(
+            shape0, shape1, self._shape_body_np,
+        )
+        if wall_count <= 0:
+            return
+
+        self._last_wall_contact_count = max(self._last_wall_contact_count, wall_count)
+        xyz = self._s0.body_q.numpy()[self._rod_bodies, :3]
+        worst, _, contact_force = self._breach_stats(xyz)
+        penetration = max(0.0, worst)
+        self._last_max_penetration = max(self._last_max_penetration, penetration)
+        self._last_contact_force = max(self._last_contact_force, contact_force)
+        self._last_contact_impulse += contact_force * self._sim_dt
 
     def _wall_slide_metrics(self, xyz: np.ndarray) -> dict:
         """Classify near-wall motion as tangential slide vs. normal poking.
@@ -765,12 +922,15 @@ class NewtonEngine:
                 "wall_tangent_alignment": None,
             }
 
-        d2 = np.sum((xyz[:, None, :] - self._centerline[None, :, :]) ** 2, axis=2)
-        nearest = np.argmin(d2, axis=1)
-        dist = np.sqrt(d2[np.arange(len(xyz)), nearest])
-        breach = dist + self._rod_radius - self._radii[nearest]
+        centers, dist, local_radii, arclens, _ = _project_points_to_centerline(
+            xyz,
+            self._centerline,
+            self._radii,
+            self._cl_cum,
+        )
+        breach = dist + self._rod_radius - local_radii
         contact_index = int(np.argmax(breach))
-        center = self._centerline[int(nearest[contact_index])]
+        center = centers[contact_index]
         radial = xyz[contact_index] - center
         radial_norm = float(np.linalg.norm(radial))
         normal = radial / radial_norm if radial_norm > 1e-9 else np.zeros(3, dtype=np.float64)
@@ -796,9 +956,7 @@ class NewtonEngine:
             tangential_slide = 0.0
             tangent_alignment = None
 
-        seg = np.linalg.norm(np.diff(self._centerline, axis=0), axis=1)
-        cl_cum = np.concatenate([[0.0], np.cumsum(seg)])
-        arclen = float(cl_cum[int(nearest[contact_index])])
+        arclen = float(arclens[contact_index])
         near_wall = bool(float(breach[contact_index]) >= -0.0015)
         return {
             "normal_poking_score": float(normal_poking) if near_wall else 0.0,
@@ -890,6 +1048,10 @@ class NewtonEngine:
             "insertion_margin_m": self._insertion_margin,
             "sheath_bodies": self._sheath_bodies,
             "contact_ke": self._contact_ke,
+            "wall_contact_count": int(self._last_wall_contact_count),
+            "max_penetration_m": float(self._last_max_penetration),
+            "contact_force": float(self._last_contact_force),
+            "contact_impulse": float(self._last_contact_impulse),
             "guidewire": self._guidewire_diagnostics(),
             "support": self._support_diagnostics(self._rod_length * 1000.0),
             "procedure": self._procedure_diagnostics(),
@@ -903,7 +1065,9 @@ class NewtonEngine:
         tip_arclen = self._tip_arclen()
         fed_arclen = self._insert_s + float(self._base_arc[-1])
         slack = fed_arclen - tip_arclen
-        worst, wall_distance, contact_force = self._breach_stats(xyz)
+        worst, wall_distance, post_contact_force = self._breach_stats(xyz)
+        max_penetration = max(self._last_max_penetration, max(0.0, worst))
+        contact_force = max(self._last_contact_force, post_contact_force)
         wall_metrics = self._tip_wall_metrics(xyz, tip_arclen)
         torsion_lag_deg = self._torsion_lag_deg(xyz, tip_arclen)
         out.update({
@@ -915,9 +1079,12 @@ class NewtonEngine:
                 if self._drive == "force" and self._max_slack > 0.0
                 else float("inf")
             ),
-            "max_breach_m": worst,
+            "max_breach_m": max(0.0, worst, max_penetration),
+            "max_penetration_m": max_penetration,
             "wall_distance_m": min(wall_distance, MAX_WALL_DISTANCE),
             "contact_force": contact_force,
+            "wall_contact_count": int(self._last_wall_contact_count),
+            "contact_impulse": float(self._last_contact_impulse),
             "normal_poking_score": wall_metrics["normal_poking_score"],
             "tangential_slide_score": wall_metrics["tangential_slide_score"],
             "wall_slide_state": wall_metrics["wall_slide_state"],
@@ -998,7 +1165,10 @@ class NewtonEngine:
             "slack_m": None,
             "feed_budget_m": None,
             "max_breach_m": None,
+            "max_penetration_m": None,
             "contact_force": None,
+            "wall_contact_count": 0,
+            "contact_impulse": 0.0,
             "wall_distance_m": None,
             "normal_poking_score": None,
             "tangential_slide_score": None,
@@ -1016,17 +1186,24 @@ class NewtonEngine:
             tip_arclen = self._tip_arclen()
             fed_arclen = self._insert_s + float(self._base_arc[-1])
             slack = fed_arclen - tip_arclen
-            worst, wall_distance, contact_force = self._breach_stats(xyz)
+            worst, wall_distance, post_contact_force = self._breach_stats(xyz)
+            max_penetration = max(self._last_max_penetration, max(0.0, worst))
+            contact_force = max(self._last_contact_force, post_contact_force)
+            wall_contact_count = int(self._last_wall_contact_count)
             wall_metrics = self._wall_slide_metrics(xyz)
             normal_poking = float(wall_metrics.get("normal_poking_score") or 0.0)
             tangential_slide = float(wall_metrics.get("tangential_slide_score") or 0.0)
-            near_wall = contact_force > 0.0 or wall_distance < 0.0015
+            near_wall = (
+                wall_contact_count > 0
+                or contact_force > 0.0
+                or wall_distance < 0.0015
+            )
             budget = (
                 max(0.0, self._max_slack - slack)
                 if self._drive == "force" and self._max_slack > 0.0
                 else float("inf")
             )
-            if worst >= 0.0003:
+            if max_penetration >= 0.0003:
                 wall_slide_state = "BREACH_STOP"
             elif near_wall and normal_poking >= 0.7:
                 wall_slide_state = "TIP_POKING_WARNING"
@@ -1049,8 +1226,11 @@ class NewtonEngine:
             risk.update({
                 "slack_m": float(slack),
                 "feed_budget_m": float(budget),
-                "max_breach_m": float(worst),
+                "max_breach_m": float(max(0.0, worst, max_penetration)),
+                "max_penetration_m": float(max_penetration),
                 "contact_force": float(contact_force),
+                "wall_contact_count": wall_contact_count,
+                "contact_impulse": float(self._last_contact_impulse),
                 "wall_distance_m": float(min(wall_distance, MAX_WALL_DISTANCE)),
                 **wall_metrics,
                 "wall_slide_state": wall_slide_state,
@@ -1072,6 +1252,9 @@ class NewtonEngine:
                 "insert_s",
                 "rod_bodies",
                 "contact_force",
+                "wall_contact_count",
+                "max_penetration",
+                "contact_impulse",
                 "wall_distance",
                 "tip_tangent",
                 "wall_normal",
@@ -1200,6 +1383,7 @@ class NewtonEngine:
 
     def step(self, push: float, rotate: float) -> RawPose:
         self._ensure_initialized()
+        self._reset_contact_metrics()
 
         direction = 1.0 if push >= 0.0 else -1.0
         prev_insert_s = self._insert_s
@@ -1221,6 +1405,7 @@ class NewtonEngine:
             s_ins = prev_insert_s + (self._insert_s - prev_insert_s) * frac
             self._s0.clear_forces()
             self._model.collide(self._s0, self._contacts)
+            self._record_substep_contacts()
             self._solver.step(self._s0, self._s1, self._control, self._contacts, self._sim_dt)
             self._s0, self._s1 = self._s1, self._s0
             self._apply_glue(s_ins)
@@ -1239,7 +1424,9 @@ class NewtonEngine:
         else:
             direction = direction / norm
 
-        worst, wall_distance, contact_force = self._breach_stats(xyz)
+        worst, wall_distance, post_contact_force = self._breach_stats(xyz)
+        max_penetration = max(self._last_max_penetration, max(0.0, worst))
+        contact_force = max(self._last_contact_force, post_contact_force)
         target = self._path.points[-1].tolist()
         # Anchor mode rides the route so inserted arc is exact; force mode lets the
         # tip physically lag, so report its actual projected arc along the route.
@@ -1253,6 +1440,9 @@ class NewtonEngine:
             tip_direction=[float(v) for v in direction],
             tip_quaternion=quat_from_direction(direction),
             contact_force=float(contact_force),
+            wall_contact_count=int(self._last_wall_contact_count),
+            max_penetration=float(max_penetration),
+            contact_impulse=float(self._last_contact_impulse),
             wall_distance=float(min(wall_distance, MAX_WALL_DISTANCE)),
             target_position=[float(v) for v in target],
             joint_positions=[],

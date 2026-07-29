@@ -51,6 +51,12 @@ def main(argv: list[str] | None = None) -> int:
         _, info = env.reset()
         max_progress = float(info["progress"])
         min_remaining = float(getattr(env._last_state, "remaining_distance", 0.0))
+        max_path_deviation = float(getattr(env._last_state, "path_deviation", 0.0))
+        contact_event_steps = 0
+        wall_contact_pair_samples = 0
+        max_wall_contact_count = 0
+        max_penetration = 0.0
+        contact_impulse = 0.0
         final_info: dict[str, Any] = dict(info)
         terminated = False
         truncated = False
@@ -63,6 +69,24 @@ def main(argv: list[str] | None = None) -> int:
             state = env._last_state
             max_progress = max(max_progress, float(info["progress"]))
             min_remaining = min(min_remaining, float(state.remaining_distance))
+            max_path_deviation = max(
+                max_path_deviation, float(getattr(state, "path_deviation", 0.0))
+            )
+            wall_contact_count = max(
+                0, int(getattr(state, "wall_contact_count", 0))
+            )
+            if wall_contact_count > 0 or float(state.contact_force) > 0.0:
+                contact_event_steps += 1
+            wall_contact_pair_samples += wall_contact_count
+            max_wall_contact_count = max(
+                max_wall_contact_count, wall_contact_count
+            )
+            max_penetration = max(
+                max_penetration, float(getattr(state, "max_penetration", 0.0))
+            )
+            contact_impulse += max(
+                0.0, float(getattr(state, "contact_impulse", 0.0))
+            )
             final_info = dict(info)
             if terminated or truncated:
                 break
@@ -84,7 +108,13 @@ def main(argv: list[str] | None = None) -> int:
             "max_progress": max_progress,
             "final_remaining_m": float(state.remaining_distance),
             "min_remaining_m": min_remaining,
+            "max_path_deviation_m": max_path_deviation,
             "contact_force": float(state.contact_force),
+            "contact_event_steps": contact_event_steps,
+            "wall_contact_pair_samples": wall_contact_pair_samples,
+            "max_wall_contact_count": max_wall_contact_count,
+            "max_penetration_m": max_penetration,
+            "contact_impulse": contact_impulse,
             "safety_status": state.safety_status,
             "newton_params": newton_params,
             "diagnostics": diagnostics,

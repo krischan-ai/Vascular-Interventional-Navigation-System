@@ -91,7 +91,21 @@ class NavigationStateResponse(BaseModel):
         description="Tip orientation quaternion [x, y, z, w]",
     )
     velocity: float = Field(description="Tip velocity (m/s)")
-    contact_force: float = Field(description="Contact force magnitude (N)")
+    contact_force: float = Field(
+        description="Contact force magnitude; Newton reports a penetration-force proxy (N)"
+    )
+    wall_contact_count: int = Field(
+        default=0,
+        description="Maximum concurrent guidewire-vessel contact pairs in the latest control step",
+    )
+    max_penetration: float = Field(
+        default=0.0,
+        description="Maximum lumen-wall penetration in the latest control step (m)",
+    )
+    contact_impulse: float = Field(
+        default=0.0,
+        description="Penetration-force proxy integrated over the latest control step (N s)",
+    )
     wall_distance: float = Field(default=0.0, description="Min wall distance (m)")
     curvature: float = Field(default=0.0, description="Local tip curvature (m^-1)")
     episode_length: int = Field(description="Steps in current episode")

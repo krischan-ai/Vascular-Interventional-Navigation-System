@@ -132,6 +132,9 @@ class TestSchemas:
             fidelity_mode="guided",
             risk_score=0.4,
             risk_regions=[{"level": "warning"}],
+            wall_contact_count=3,
+            max_penetration=0.0002,
+            contact_impulse=0.015,
         )
         response = _state_to_response(state)
 
@@ -141,6 +144,9 @@ class TestSchemas:
         assert response.fidelity_mode == "guided"
         assert response.risk_score == 0.4
         assert response.risk_regions == [{"level": "warning"}]
+        assert response.wall_contact_count == 3
+        assert response.max_penetration == pytest.approx(0.0002)
+        assert response.contact_impulse == pytest.approx(0.015)
 
 
 class TestNavigationStateExtended:

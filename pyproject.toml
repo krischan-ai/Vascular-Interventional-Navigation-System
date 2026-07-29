@@ -63,6 +63,7 @@ docs = [
 ]
 dev = [
     "pytest",
+    "httpx2==2.0.0",
     "gymnasium[box2d]",
 ]
 

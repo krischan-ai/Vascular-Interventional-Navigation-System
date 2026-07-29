@@ -246,6 +246,9 @@ class TestWebSocketHandlerUnit:
                 }
             },
             contact_force=0.12,
+            wall_contact_count=4,
+            max_penetration=0.0002,
+            contact_impulse=0.015,
             wall_distance=0.0012,
             safety_status="DANGER_WARNING",
             fidelity_mode="physics",
@@ -289,6 +292,9 @@ class TestWebSocketHandlerUnit:
         mechanics = batch["safety"]["guidewire_mechanics"]
         assert mechanics["source"] == "navigation_engine.risk_assessor"
         assert mechanics["tip_force_n"] == 0.12
+        assert mechanics["contact_count"] == 4
+        assert mechanics["max_penetration_m"] == pytest.approx(0.0002)
+        assert mechanics["contact_impulse"] == pytest.approx(0.015)
         assert mechanics["wall_distance_m"] == 0.0012
         assert mechanics["lateral_force_n"] is None
         assert mechanics["torque_nm"] is None

@@ -46,15 +46,19 @@ class RawPose:
     tip_direction: list[float] = field(default_factory=lambda: [0.0, 0.0, 1.0])
     tip_quaternion: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0, 1.0])
     contact_force: float = 0.0
+    wall_contact_count: int = 0
+    max_penetration: float = 0.0
+    contact_impulse: float = 0.0
     wall_distance: float = MAX_WALL_DISTANCE
     target_position: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     joint_positions: list[float] = field(default_factory=list)
     joint_velocities: list[float] = field(default_factory=list)
     reward: float = 0.0
     done: bool = False
-    # Exact inserted arc length along the planned path (meters), or None when the
-    # engine does not track it. When set, NavigationEngine derives an exact
-    # continuous path_progress and zero deviation (the tip rides the path).
+    # Exact inserted/projected arc length along the planned path (meters), or
+    # None when the engine does not track it. NavigationEngine uses it for
+    # continuous progress while still projecting the physical tip separately to
+    # retain a real lateral path-deviation measurement.
     arclen: float | None = None
 
 

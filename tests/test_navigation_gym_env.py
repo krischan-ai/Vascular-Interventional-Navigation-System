@@ -9,6 +9,7 @@ class FakeNavigationEngine:
         self.progress = 0.0
         self.intent_calls = []
         self.step_calls = []
+        self.engine_param_calls = []
         self.closed = False
 
     def reset(self):
@@ -23,6 +24,10 @@ class FakeNavigationEngine:
     def set_shape_intent(self, intent, active=True):
         self.intent_calls.append((intent, active))
         return {"active": active, "mode": "direction"}
+
+    def set_engine_params(self, params):
+        self.engine_param_calls.append(dict(params))
+        return dict(params)
 
     def close(self):
         self.closed = True
@@ -75,7 +80,8 @@ def test_navigation_gym_shape_intent_step(monkeypatch):
     }
     assert info["termination_reason"] == "running"
     assert set(info["costs"]) == {
-        "contact", "penetration", "buckling", "wrong_branch", "shield_intervention"
+        "contact", "contact_impulse", "wall_contact_count", "max_penetration_m",
+        "penetration", "buckling", "wrong_branch", "shield_intervention"
     }
     env.close()
     assert env.engine.closed is True
@@ -193,3 +199,71 @@ def test_navigation_gym_observations_have_finite_bounds_and_reset_history(monkey
     assert obs["progress_velocity"][0] == 0.0
     assert obs["contact_duration"][0] == 0.0
     env.close()
+
+
+def test_navigation_gym_exposes_versioned_protocol(monkeypatch):
+    import services.navigation_engine as navigation_engine
+    from cathsim.gym.envs.navigation import NavigationGymEnv
+
+    monkeypatch.setattr(navigation_engine, "NavigationEngine", FakeNavigationEngine)
+    env = NavigationGymEnv(
+        action_mode="direct",
+        reward_weights={"contact": 0.75},
+        max_episode_steps=123,
+        physics_engine="newton",
+        newton_params={"rod_length": 0.012},
+    )
+
+    _, info = env.reset()
+    protocol = env.protocol_metadata()
+
+    assert info["protocol"] == {
+        "environment_version": "navigation_env_v3",
+        "reward_version": "navigation_reward_v2",
+        "safety_metrics_version": "navigation_safety_metrics_v2",
+        "domain_randomization_version": "navigation_domain_randomization_v1",
+    }
+    assert protocol["observation_version"] == "navigation_observation_v1"
+    assert protocol["task"]["max_episode_steps"] == 123
+    assert protocol["reward"]["weights"]["contact"] == 0.75
+    assert protocol["physics"]["requested_engine"] == "newton"
+    assert protocol["physics"]["requested_parameters"]["rod_length"] == 0.012
+    env.close()
+
+
+def test_navigation_gym_domain_randomization_is_seeded_and_reported(monkeypatch):
+    import services.navigation_engine as navigation_engine
+    from cathsim.gym.envs.navigation import NavigationGymEnv
+
+    monkeypatch.setattr(navigation_engine, "NavigationEngine", FakeNavigationEngine)
+    env = NavigationGymEnv(
+        action_mode="direct",
+        domain_randomization=True,
+        domain_randomization_ranges={
+            "bend": (10.0, 20.0),
+            "contact_ke": (2_000_000.0, 3_000_000.0),
+        },
+    )
+
+    _, first = env.reset(seed=17)
+    _, repeated = env.reset(seed=17)
+    _, different = env.reset(seed=18)
+
+    assert first["domain_randomization"]["applied"] is True
+    assert first["domain_randomization"]["requested"] == repeated["domain_randomization"]["requested"]
+    assert first["domain_randomization"]["effective"] == first["domain_randomization"]["requested"]
+    assert first["domain_randomization"]["requested"] != different["domain_randomization"]["requested"]
+    assert set(first["domain_randomization"]["requested"]) == {"bend", "contact_ke"}
+    env.close()
+
+
+def test_navigation_gym_rejects_unknown_domain_randomization_parameter(monkeypatch):
+    import services.navigation_engine as navigation_engine
+    from cathsim.gym.envs.navigation import NavigationGymEnv
+
+    monkeypatch.setattr(navigation_engine, "NavigationEngine", FakeNavigationEngine)
+    with pytest.raises(ValueError, match="Unsupported domain randomization"):
+        NavigationGymEnv(
+            domain_randomization=True,
+            domain_randomization_ranges={"unknown": (0.0, 1.0)},
+        )

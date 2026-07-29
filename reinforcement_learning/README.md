@@ -8,6 +8,16 @@ Independent training workspace for `/home/ps/cathsim-warp`, based on the reinfor
 - Baseline: PPO with SB3; outputs under `runs/`
 - Safety: existing backend Safety Shield remains active
 
+## Documentation
+
+- [Training design (Chinese)](../doc/5.训练层/11-强化学习训练设计方案.md)
+- [Beginner tutorial: environment checks to the first PPO experiment (Chinese)](../doc/5.训练层/12-强化学习训练教程-从环境检查到首次PPO实验.md)
+- [HCI data collection and high-quality RL dataset tutorial (Chinese)](../doc/5.训练层/13-人机交互与强化学习一体化平台高质量数据集制作教程.md)
+
+The YAML files under `configs/` are currently design snapshots. The active
+training entrypoint does not load them automatically; verify effective values in
+each run's `run_config.json`.
+
 ## Setup
 
 ```bash

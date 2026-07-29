@@ -104,6 +104,59 @@ CATHSIM_HOST_PORT=19002 \
   docker compose -f server/compose.runtime.yaml up -d
 ```
 
+## 生产环境部署
+
+生产环境使用 [`compose.production.yaml`](compose.production.yaml)，默认从华为云
+SWR 拉取固定版本 `cathsim-server:v1.0`，不会在生产服务器上执行镜像构建。
+部署机需要提前安装兼容的 NVIDIA 驱动、NVIDIA Container Toolkit、Docker
+Engine 和 Docker Compose v2。
+
+首次部署先登录镜像仓库。密码或访问令牌只通过交互式标准输入提供，不要写入
+Compose 或 Git：
+
+```bash
+docker login swr.cn-east-3.myhuaweicloud.com
+```
+
+生产 Compose 已固定使用 VPP 资产目录 `/app/data/vpp_assets`、Newton
+物理引擎以及宿主机端口 `19000`，不依赖 `.env` 文件。登录仓库后只需一条
+命令，Compose 会自动拉取镜像并启动容器：
+
+```bash
+docker compose \
+  -f server/compose.production.yaml \
+  up -d
+```
+
+如需在启动前检查展开后的配置，可单独执行
+`docker compose -f server/compose.production.yaml config`。
+
+默认对外地址为 `http://<服务器IP>:19000`，健康检查和接口文档地址为：
+
+```text
+http://<服务器IP>:19000/api/v1/health
+http://<服务器IP>:19000/docs
+ws://<服务器IP>:19000/ws/session
+```
+
+生产 Compose 使用只读根文件系统、非 root 镜像用户、Linux capability
+清理、健康检查、日志轮转和命名卷。缓存、训练日志、模型及运行记录不会随
+容器重建丢失。查看状态和日志：
+
+```bash
+docker compose \
+  -f server/compose.production.yaml \
+  ps
+
+docker compose \
+  -f server/compose.production.yaml \
+  logs --tail 100 cathsim-server
+```
+
+需要升级或回滚时，直接修改 `compose.production.yaml` 中的固定镜像版本，
+再执行 `pull` 和 `up -d`。`latest` 适合联调，不建议作为生产环境的长期
+固定版本。
+
 ## 纯后端仿真镜像
 
 不需要强化学习训练时，可构建仅包含 FastAPI、MuJoCo、Newton/Warp 的镜像：
