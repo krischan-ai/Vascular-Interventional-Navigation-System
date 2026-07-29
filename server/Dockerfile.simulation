@@ -72,10 +72,10 @@ RUN python -m pip install -r /tmp/requirements-simulation.txt \
 COPY LICENSE README.md ./
 COPY services ./services
 COPY src/cathsim/dm ./src/cathsim/dm
-COPY data ./data
 COPY server/verify_simulation.py ./server/verify_simulation.py
 
 RUN mkdir -p \
+        /app/data/vpp_assets \
         /home/cathsim/.cache/matplotlib \
         /home/cathsim/.cache/warp \
     && chown -R cathsim:cathsim /home/cathsim/.cache
