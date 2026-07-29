@@ -26,7 +26,8 @@ signal branch_cycle
 signal pane_swap
 ## Raw pointer stream (root-window coords). The main controller decides what a
 ## gesture means per pane: a short left press-release is click-to-navigate, a
-## left drag orbits the 3D camera, a middle drag pans it, the wheel zooms.
+## left drag uses the selected view tool (orbit/pan), a middle drag always pans,
+## and the wheel zooms.
 signal pointer_down(screen_pos: Vector2)
 signal pointer_drag(screen_pos: Vector2, relative: Vector2)
 signal pointer_up(screen_pos: Vector2)

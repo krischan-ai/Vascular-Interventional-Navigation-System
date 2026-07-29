@@ -83,9 +83,14 @@ def test_hud_uses_backend_dashboard_fields():
     assert "func _is_debug_low_poly_phantom" in main
     assert "debug low-poly phantom" in main
     assert "enum OrbitPreset { CLINICAL, TREE }" in main
+    assert "enum ViewToolMode { SELECT, ORBIT, PAN }" in main
     assert "Clinical Orbit" in main
     assert "Tree Overview" in main
     assert "func _apply_clinical_orbit" in main
+    assert 'var pan_btn := _icon_tool("pan", "平移：左键拖拽移动视图中心")' in main
+    assert "_view_tool_mode = ViewToolMode.PAN" in main
+    assert "func _pan_orbit(relative: Vector2)" in main
+    assert "_set_orbit_focus(_tip_world_last, false)" not in main
     assert "_set_orbit_preset(OrbitPreset.CLINICAL, true)" in main
     assert "_set_orbit_preset(OrbitPreset.TREE, true)" in main
     assert "navigation_camera_controller.gd" in rig
@@ -298,5 +303,5 @@ def test_endoscope_pane_uses_live_vessel_world_and_real_controls():
     assert "_scope_viewport.msaa_3d = Viewport.MSAA_2X" in main
     assert "_scope_viewport.msaa_3d = Viewport.MSAA_4X" in main
     assert "_scope_viewport.use_taa = false" in main
-    for kind in ("refresh", "record", "brightness", "capture", "fullscreen"):
+    for kind in ("pan", "refresh", "record", "brightness", "capture", "fullscreen"):
         assert f'"{kind}"' in icons

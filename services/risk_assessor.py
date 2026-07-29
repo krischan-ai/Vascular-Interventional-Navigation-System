@@ -85,7 +85,6 @@ class RiskAssessor:
         state: NavigationState,
         *,
         force_mode: bool = False,
-        contact_ke: float = 0.0,
     ) -> dict:
         """Assess the risk of a navigation state.
 
@@ -97,8 +96,8 @@ class RiskAssessor:
 
         In force-drive physics mode (``force_mode=True``) the wire legitimately
         rides against the wall, so the ``wall_distance`` clearance metric is
-        replaced by wall *penetration* (contact_force / contact_ke): hugging the
-        wall carries no risk, only a real breach does. This keeps risk_score
+        replaced by the independent ``wall_penetration`` metric: hugging the wall
+        carries no breach risk, only a real geometric penetration does. This keeps risk_score
         consistent with the mode-aware safety status (doc/09 §9.5).
         """
         if state.episode_length == 0:
@@ -110,11 +109,7 @@ class RiskAssessor:
             }
 
         wall_value = state.wall_distance
-        wall_penetration = (
-            state.contact_force / contact_ke
-            if force_mode and contact_ke > 0.0
-            else 0.0
-        )
+        wall_penetration = max(0.0, float(state.wall_penetration)) if force_mode else 0.0
 
         metric_values = {
             "wall_distance": wall_value,

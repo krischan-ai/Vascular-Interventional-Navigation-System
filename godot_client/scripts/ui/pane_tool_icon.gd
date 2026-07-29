@@ -4,6 +4,7 @@ extends Control
 ## §26 禁止 emoji). Same 2px-stroke idiom as StatusIcon. Kinds:
 ##   select    鼠标箭头 (单击路径点导航)
 ##   orbit     环绕旋转 (圆 + 双箭头)
+##   pan       平移视图中心 (四向箭头)
 ##   follow    视角跟随 (准星 + 追尾箭头)
 ##   zoom_in   放大镜 +
 ##   zoom_out  放大镜 −
@@ -55,6 +56,15 @@ func _draw() -> void:
 			draw_arc(c, r, PI * 0.85, PI * 1.75, 20, color, W, true)
 			_arrow_head(c + Vector2(r, 0).rotated(PI * 0.75), PI * 0.75 + PI * 0.5)
 			_arrow_head(c + Vector2(r, 0).rotated(PI * 1.75), PI * 1.75 + PI * 0.5)
+		"pan":
+			# Four screen-plane arrows: moving the orbit pivot without rotating it.
+			draw_circle(c, 2.0, color)
+			var directions: Array[Vector2] = [
+				Vector2.RIGHT, Vector2.DOWN, Vector2.LEFT, Vector2.UP]
+			for d: Vector2 in directions:
+				var tip: Vector2 = c + d * r * 0.95
+				draw_line(c + d * r * 0.18, tip, color, W, true)
+				_arrow_head(tip, d.angle())
 		"follow":
 			# Chase-cam: a reticle dot being trailed by two chevrons (视角跟随).
 			var cc := c + Vector2(r * 0.3, 0)

@@ -18,13 +18,98 @@ import numpy as np
 import pytest
 
 from services.physics.base import PlannedPath
-from services.physics.newton_engine import NewtonEngine, _feed_budget
+from services.physics.newton_engine import (
+    NewtonEngine,
+    _aggregate_rod_contact_forces,
+    _feed_budget,
+    _stabilize_contact_force,
+)
 
 
 def _straight_path(total_len: float = 0.3, n: int = 61) -> PlannedPath:
     pts = np.zeros((n, 3))
     pts[:, 2] = np.linspace(0.0, total_len, n)
     return PlannedPath(pts, radii=np.full(n, 0.003))
+
+
+class TestContactForceAggregation:
+    """Pure VBD contact-buffer aggregation without Newton/GPU imports."""
+
+    def test_tip_and_full_rod_resultants_are_vector_sums(self):
+        body0 = np.array([-1, 12, -1, 10, 50], dtype=np.int32)
+        body1 = np.array([12, -1, 11, 11, 51], dtype=np.int32)
+        force_on_body1 = np.array([
+            [1.0, 0.0, 0.0],   # vessel -> tip
+            [0.0, -2.0, 0.0],  # tip -> vessel; negate for force on tip
+            [0.0, 0.0, 3.0],   # vessel -> shaft
+            [9.0, 9.0, 9.0],   # rod self-contact: ignored
+            [8.0, 8.0, 8.0],   # no rod body: ignored
+        ])
+
+        tip_force, tip_count, rod_force, rod_count = _aggregate_rod_contact_forces(
+            body0, body1, force_on_body1, [10, 11, 12]
+        )
+
+        assert tip_force == pytest.approx(np.sqrt(5.0))
+        assert tip_count == 2
+        assert rod_force == pytest.approx(np.sqrt(14.0))
+        assert rod_count == 3
+
+    def test_opposing_tip_forces_keep_contact_count(self):
+        tip_force, tip_count, rod_force, rod_count = _aggregate_rod_contact_forces(
+            np.array([-1, -1]),
+            np.array([12, 12]),
+            np.array([[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]]),
+            [10, 11, 12],
+        )
+
+        assert tip_force == pytest.approx(0.0)
+        assert rod_force == pytest.approx(0.0)
+        assert tip_count == 2
+        assert rod_count == 2
+
+
+class TestContactForceStabilization:
+    """Public force remains finite and bounded while raw force stays diagnostic."""
+
+    def test_scales_limits_and_filters_solver_spike(self):
+        value, saturated = _stabilize_contact_force(
+            100.0,
+            2.0,
+            contact_count=1,
+            scale=0.5,
+            limit_n=24.0,
+            alpha=0.25,
+        )
+
+        assert value == pytest.approx(7.5)
+        assert saturated is True
+
+    def test_missing_contact_decays_previous_force(self):
+        value, saturated = _stabilize_contact_force(
+            float("nan"),
+            8.0,
+            contact_count=0,
+            scale=1.0,
+            limit_n=24.0,
+            alpha=0.5,
+        )
+
+        assert value == pytest.approx(4.0)
+        assert saturated is False
+
+    def test_nonpositive_limit_disables_saturation(self):
+        value, saturated = _stabilize_contact_force(
+            30.0,
+            0.0,
+            contact_count=2,
+            scale=1.0,
+            limit_n=0.0,
+            alpha=1.0,
+        )
+
+        assert value == pytest.approx(30.0)
+        assert saturated is False
 
 
 @pytest.fixture
@@ -39,6 +124,9 @@ def engine(monkeypatch) -> NewtonEngine:
     monkeypatch.delenv("CATHSIM_NEWTON_ITERS", raising=False)
     monkeypatch.delenv("CATHSIM_NEWTON_SETTLE_STEPS", raising=False)
     monkeypatch.delenv("CATHSIM_NEWTON_RETURN_SETTLE_STEPS", raising=False)
+    monkeypatch.delenv("CATHSIM_NEWTON_CONTACT_FORCE_SCALE", raising=False)
+    monkeypatch.delenv("CATHSIM_NEWTON_CONTACT_FORCE_LIMIT_N", raising=False)
+    monkeypatch.delenv("CATHSIM_NEWTON_CONTACT_FORCE_ALPHA", raising=False)
     return NewtonEngine(path=_straight_path())
 
 
@@ -136,6 +224,9 @@ class TestLiveTuning:
         assert diag["free_len_m"] == pytest.approx(0.03)
         assert diag["max_slack_m"] == pytest.approx(0.012)
         assert diag["sheath_bodies"] == -1
+        assert diag["contact_force_scale"] == pytest.approx(1.0)
+        assert diag["contact_force_limit_n"] == pytest.approx(24.0)
+        assert diag["contact_force_alpha"] == pytest.approx(0.35)
         assert "slack_m" not in diag
 
     def test_set_deform_params_updates_before_init(self, engine):

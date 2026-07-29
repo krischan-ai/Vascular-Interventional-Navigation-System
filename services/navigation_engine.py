@@ -76,7 +76,9 @@ class NavigationState:
     tip_quaternion: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0, 1.0])
     velocity: float = 0.0
     contact_force: float = 0.0
+    contact_count: int = 0
     wall_distance: float = 0.0
+    wall_penetration: float = 0.0
     curvature: float = 0.0
     episode_length: int = 0
     target_position: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
@@ -106,7 +108,9 @@ class NavigationState:
             "tip_quaternion": self.tip_quaternion,
             "velocity": self.velocity,
             "contact_force": self.contact_force,
+            "contact_count": self.contact_count,
             "wall_distance": self.wall_distance,
+            "wall_penetration": self.wall_penetration,
             "curvature": self.curvature,
             "episode_length": self.episode_length,
             "target_position": self.target_position,
@@ -166,8 +170,8 @@ class NavigationEngine:
     # wall, so proximity alone is not danger -- see BREACH_* below.
     WALL_DISTANCE_SAFE = 0.001
     WALL_DISTANCE_DANGER = 0.0005
-    # Force-drive safety thresholds on wall *penetration* (meters), derived from
-    # contact_force / contact_ke. Hugging the wall (penetration ~0) is normal;
+    # Force-drive safety thresholds on independent wall penetration (meters).
+    # Hugging the wall with real contact force but no penetration is normal;
     # only real breach counts. Sub-BREACH_WARN penetration is numerical noise.
     BREACH_WARN = 0.00005   # 0.05 mm: past here, warn
     BREACH_STOP = 0.0003    # 0.30 mm: sustained breach, collision stop
@@ -728,7 +732,7 @@ class NavigationEngine:
         """Whether the active backend is a real force-drive physics engine.
 
         Force-drive lets the wire physically ride against the lumen wall, so
-        safety/risk must key on penetration (contact_force), not clearance.
+        safety/risk must key on wall_penetration, not clearance or contact force.
         False for kinematic/MuJoCo/anchor backends (they keep the wire centered).
         """
         return bool(getattr(self._engine, "is_force_drive", False))
@@ -739,9 +743,10 @@ class NavigationEngine:
         Derived (engine-agnostic) quantities -- velocity, curvature, path
         progress/deviation, safety status, risk -- are computed here so they are
         identical regardless of which backend produced ``raw``. When the engine
-        reports an exact inserted arc length (``raw.arclen``, kinematic mode),
-        progress is derived continuously from it and deviation is zero; otherwise
-        progress/deviation come from projecting the tip onto the planned path.
+        reports an along-path arc length (``raw.arclen``), progress is derived
+        continuously from it while deviation is still measured from the real tip
+        to the planned polyline. Otherwise both values use the legacy tip
+        projection path.
         """
         tip_pos = raw.tip_position
         self._tip_history.append(tip_pos)
@@ -756,7 +761,7 @@ class NavigationEngine:
 
         if raw.arclen is not None and self._path is not None and self._path.total_len > 0.0:
             path_progress = float(raw.arclen / self._path.total_len)
-            path_deviation = 0.0
+            path_deviation = self._path.deviation(tip_pos)
         else:
             path_progress, path_deviation = self._compute_path_progress(tip_pos)
         path_progress = float(np.clip(path_progress, 0.0, 1.0))
@@ -777,7 +782,7 @@ class NavigationEngine:
 
         force_mode = self._is_force_physics()
         safety_status = self._compute_safety_status(
-            self._episode_length, raw.wall_distance, raw.contact_force
+            self._episode_length, raw.wall_distance, raw.wall_penetration
         )
 
         state = NavigationState(
@@ -786,7 +791,9 @@ class NavigationEngine:
             tip_quaternion=raw.tip_quaternion,
             velocity=float(velocity),
             contact_force=float(raw.contact_force),
+            contact_count=int(raw.contact_count),
             wall_distance=float(raw.wall_distance),
+            wall_penetration=float(raw.wall_penetration),
             curvature=float(curvature),
             episode_length=self._episode_length,
             target_position=raw.target_position,
@@ -805,10 +812,7 @@ class NavigationEngine:
             reward=float(raw.reward),
             done=raw.done,
         )
-        contact_ke = float(getattr(self._engine, "contact_ke", 0.0)) if force_mode else 0.0
-        risk_assessment = self._risk_assessor.assess(
-            state, force_mode=force_mode, contact_ke=contact_ke
-        )
+        risk_assessment = self._risk_assessor.assess(state, force_mode=force_mode)
         state.risk_score = risk_assessment["risk_score"]
         state.risk_assessment = risk_assessment
         return state
@@ -883,7 +887,7 @@ class NavigationEngine:
         self,
         episode_length: int,
         wall_distance: float,
-        contact_force: float = 0.0,
+        wall_penetration: float = 0.0,
     ) -> SafetyStatus:
         """Derive the safety status, mode-aware.
 
@@ -891,17 +895,15 @@ class NavigationEngine:
         the wall (``wall_distance``) is the risk -- the original mm bands apply.
 
         Force-drive physics: the wire legitimately hugs the wall, so a tiny
-        ``wall_distance`` is *normal*, not a collision. The real breach signal is
-        penetration = contact_force / contact_ke (>0 only when poking past the
-        wall). This is the fix for the D5/ShapeIntent smoke's COLLISION_STOP
-        false alarms (doc/09 §9.5) -- normal wall-hugging now reads SAFE_NAV.
+        ``wall_distance`` is *normal*, not a collision. ``wall_penetration`` is
+        the independent geometric breach signal (>0 only when poking past the
+        wall). Physical contact force is intentionally not used to infer breach.
         """
         if episode_length == 0:
             return "STANDBY"
 
         if self._is_force_physics():
-            ke = float(getattr(self._engine, "contact_ke", 0.0)) or 0.0
-            penetration = contact_force / ke if ke > 0.0 else 0.0
+            penetration = max(0.0, float(wall_penetration))
             if penetration < self.BREACH_WARN:
                 return "SAFE_NAV"
             if penetration < self.BREACH_STOP:

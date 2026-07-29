@@ -70,22 +70,26 @@ class TestRiskAssessorBands:
         assert result["metrics"]["wall_distance"]["level"] == "WARNING"
 
     def test_force_mode_wall_hug_no_risk(self, assessor):
-        # Force-drive: riding the wall (tiny clearance, NO contact force) must
-        # NOT register wall risk -- penetration, not clearance, is the danger.
+        # Force-drive: real wall contact with no penetration must stay safe.
         state = NavigationState(
-            episode_length=5, wall_distance=0.0001, contact_force=0.0
+            episode_length=5,
+            wall_distance=0.0001,
+            wall_penetration=0.0,
+            contact_force=4.5,
         )
-        result = assessor.assess(state, force_mode=True, contact_ke=3.0e6)
+        result = assessor.assess(state, force_mode=True)
         assert result["metrics"]["wall_distance"]["level"] == "SAFE"
         assert result["metrics"]["wall_distance"]["risk"] == 0.0
 
     def test_force_mode_breach_is_critical(self, assessor):
-        # 0.5mm penetration = contact_force / ke -> above the STOP band.
-        ke = 3.0e6
+        # 0.5mm independent penetration is above the STOP band regardless of force.
         state = NavigationState(
-            episode_length=5, wall_distance=0.0, contact_force=0.0005 * ke
+            episode_length=5,
+            wall_distance=0.0,
+            wall_penetration=0.0005,
+            contact_force=0.0,
         )
-        result = assessor.assess(state, force_mode=True, contact_ke=ke)
+        result = assessor.assess(state, force_mode=True)
         assert result["metrics"]["wall_distance"]["level"] == "CRITICAL"
 
     def test_metric_risk_is_clamped(self, assessor):

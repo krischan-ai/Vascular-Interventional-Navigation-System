@@ -119,6 +119,7 @@ const MODELS: Array = [
 
 enum CamMode { OVERVIEW, FOLLOW, ENDOSCOPE }
 enum OrbitPreset { CLINICAL, TREE }
+enum ViewToolMode { SELECT, ORBIT, PAN }
 const CAM_MODE_NAMES := {
 	CamMode.OVERVIEW: "外部 Orbit",
 	CamMode.FOLLOW: "跟随 Follow",
@@ -196,9 +197,9 @@ var _scope_validation_motion_accum: float = 0.0
 var _scope_validation_motion_steps: int = 0
 var _panes_swapped: bool = false
 # Overview orbit camera (参考图视角): the external camera is a pivot-orbit rig —
-# spherical (yaw/pitch/dist) around a pan-able pivot. Left-drag orbits, middle-drag
-# pans, wheel or the 放大/缩小 tools zoom, 复位 reframes the vessel AABB. Only the
-# OVERVIEW camera is orbit-driven; follow/endoscope stay rig-driven.
+# spherical (yaw/pitch/dist) around a pan-able pivot. The selected view tool makes
+# left-drag orbit or pan; middle-drag always pans, the wheel or 放大/缩小 tools zoom,
+# and 复位 reframes the vessel AABB. Only OVERVIEW is orbit-driven.
 var _orbit_pivot := Vector3.ZERO
 var _orbit_yaw: float = 0.0
 var _orbit_pitch: float = 0.0
@@ -217,9 +218,10 @@ const _VESSEL_ROUTE_SHADER_SAMPLES := 96
 var _press_in_pane: bool = false
 var _press_travel: float = 0.0
 const _CLICK_TRAVEL_MAX := 6.0  # px
-# Right tool strip mode: 旋转 (drag orbits, default) vs 选择 (drags inert, clicks
-# navigate — both modes keep short-click navigation).
-var _tool_orbit: bool = true
+# Right tool strip mode: 选择 (drag inert), 旋转 (default) or 平移. All three retain
+# the existing short-click path navigation; only a drag beyond the threshold uses
+# the selected camera operation.
+var _view_tool_mode: int = ViewToolMode.ORBIT
 # Direction cube (§11): wireframe cube in its own SubViewport, counter-rotated
 # against the active 3D camera every frame so it always shows world orientation.
 var _cube_root: Node3D
@@ -911,14 +913,14 @@ func _build_3d_pane(rootc: Control) -> void:
 
 	_corner_label(frame, "③  3D 解剖导航", UiStyle.TEXT, Vector2(12, 8), 16)
 
-	# 右侧竖向图标工具栏 (参考图): 选择/旋转 are a toggle pair gating what a left
-	# drag does; 放大/缩小 step the orbit zoom; 复位 reframes the vessel.
+	# 右侧竖向图标工具栏 (参考图): 选择/旋转/平移 are an exclusive group gating
+	# what a left drag does; 放大/缩小 step the orbit zoom; 复位 reframes the vessel.
 	var tools := VBoxContainer.new()
-	tools.add_theme_constant_override("separation", 6)
+	tools.add_theme_constant_override("separation", 2)
 	tools.anchor_left = 1.0
 	tools.anchor_right = 1.0
-	tools.offset_left = -50
-	tools.offset_top = 132
+	tools.offset_left = -44
+	tools.offset_top = 88
 	tools.offset_right = -14
 	tools.grow_horizontal = Control.GROW_DIRECTION_BEGIN
 	frame.add_child(tools)
@@ -927,11 +929,22 @@ func _build_3d_pane(rootc: Control) -> void:
 	var select_btn := _icon_tool("select", "选择：单击路径点导航")
 	select_btn.toggle_mode = true
 	select_btn.button_group = mode_group
+	select_btn.toggled.connect(func(on: bool) -> void:
+		if on:
+			_view_tool_mode = ViewToolMode.SELECT)
 	var orbit_btn := _icon_tool("orbit", "旋转：左键拖拽环绕视角")
 	orbit_btn.toggle_mode = true
 	orbit_btn.button_group = mode_group
 	orbit_btn.button_pressed = true
-	orbit_btn.toggled.connect(func(on: bool) -> void: _tool_orbit = on)
+	orbit_btn.toggled.connect(func(on: bool) -> void:
+		if on:
+			_view_tool_mode = ViewToolMode.ORBIT)
+	var pan_btn := _icon_tool("pan", "平移：左键拖拽移动视图中心")
+	pan_btn.toggle_mode = true
+	pan_btn.button_group = mode_group
+	pan_btn.toggled.connect(func(on: bool) -> void:
+		if on:
+			_view_tool_mode = ViewToolMode.PAN)
 	_follow_btn = _icon_tool("follow", "跟随：视角自动跟随导丝（点击其他区域退出）")
 	_follow_btn.toggle_mode = true
 	_follow_btn.toggled.connect(_on_follow_toggled)
@@ -941,7 +954,7 @@ func _build_3d_pane(rootc: Control) -> void:
 	zout_btn.pressed.connect(func() -> void: _zoom_by(-2.0))
 	var reset_btn := _icon_tool("frame", "复位视角")
 	reset_btn.pressed.connect(_reset_view)
-	for b in [select_btn, orbit_btn, _follow_btn, zin_btn, zout_btn, reset_btn]:
+	for b in [select_btn, orbit_btn, pan_btn, _follow_btn, zin_btn, zout_btn, reset_btn]:
 		tools.add_child(b)
 
 	# 方向立方体 (§11 / 参考图右上): a real wireframe cube in its own transparent
@@ -990,11 +1003,12 @@ func _build_3d_pane(rootc: Control) -> void:
 
 
 
-# A 36x36 icon tool button for the 3D pane's right strip (§10 sizes, hover
-# #1A2A3A, 选中/按下 #2F8CFF).
+# A compact 30x30 icon tool button for the 3D pane's right strip. Seven controls
+# fit between the direction cube and pane bottom while retaining the established
+# hover #1A2A3A and selected/pressed #2F8CFF states.
 func _icon_tool(kind: String, tip: String) -> Button:
 	var b := Button.new()
-	b.custom_minimum_size = Vector2(36, 36)
+	b.custom_minimum_size = Vector2(30, 30)
 	b.tooltip_text = tip
 	b.add_theme_stylebox_override("normal", UiStyle.card_box(0.8, 6))
 	b. add_theme_stylebox_override("hover", UiStyle.flat(Color(0.102, 0.165, 0.227), 6))
@@ -1002,10 +1016,10 @@ func _icon_tool(kind: String, tip: String) -> Button:
 	b.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
 	var ic: Control = preload("res://scripts/ui/pane_tool_icon.gd").new(kind, UiStyle.TEXT)
 	ic.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	ic.offset_left = 7
-	ic.offset_top = 7
-	ic.offset_right = -7
-	ic.offset_bottom = -7
+	ic.offset_left = 4
+	ic.offset_top = 4
+	ic.offset_right = -4
+	ic.offset_bottom = -4
 	b.add_child(ic)
 	return b
 
@@ -2472,8 +2486,8 @@ func _reset_view() -> void:
 
 # ── 3D-pane pointer gestures (from input_handler's raw pointer stream) ────────
 # A left press inside the pane starts a pending gesture; small total travel on
-# release = click-to-navigate, larger travel = orbit drag (旋转 mode). Presses on
-# UI buttons or outside the pane are ignored entirely.
+# release = click-to-navigate, larger travel = the selected 旋转/平移 operation.
+# Presses on UI buttons or outside the pane are ignored entirely.
 func _on_pointer_down(pos: Vector2) -> void:
 	_press_in_pane = false
 	_press_travel = 0.0
@@ -2492,17 +2506,22 @@ func _on_pointer_drag(_pos: Vector2, relative: Vector2) -> void:
 	if not _press_in_pane:
 		return
 	_press_travel += relative.length()
-	# Below the click threshold nothing moves yet, so a jittery click never
-	# nudges the camera; past it the gesture is committed as an orbit drag.
+	# Below the click threshold nothing moves yet, so a jittery click never nudges
+	# the camera; past it the gesture is committed to the selected view tool.
 	if _press_travel <= _CLICK_TRAVEL_MAX:
 		return
-	if _tool_orbit and _cam_mode == CamMode.OVERVIEW:
-		_camera_user_controlled = true
-		if _tip_world_known:
-			_set_orbit_focus(_tip_world_last, false)
-		_orbit_yaw -= relative.x * _ORBIT_SPEED
-		_orbit_pitch = clampf(_orbit_pitch + relative.y * _ORBIT_SPEED, -1.45, 1.45)
-		_update_orbit_camera()
+	if _cam_mode != CamMode.OVERVIEW:
+		return
+	match _view_tool_mode:
+		ViewToolMode.ORBIT:
+			_camera_user_controlled = true
+			# Rotate around the current pivot. Reset/follow/presets may explicitly
+			# choose the tip again, but a user-panned focus must survive this drag.
+			_orbit_yaw -= relative.x * _ORBIT_SPEED
+			_orbit_pitch = clampf(_orbit_pitch + relative.y * _ORBIT_SPEED, -1.45, 1.45)
+			_update_orbit_camera()
+		ViewToolMode.PAN:
+			_pan_orbit(relative)
 
 
 func _on_pointer_up(pos: Vector2) -> void:
@@ -2515,6 +2534,12 @@ func _on_pan_drag(pos: Vector2, relative: Vector2) -> void:
 	if _cam_mode != CamMode.OVERVIEW or _pane_3d_container == null:
 		return
 	if not _pane_3d_container.get_global_rect().has_point(pos):
+		return
+	_pan_orbit(relative)
+
+
+func _pan_orbit(relative: Vector2) -> void:
+	if _camera == null or not is_instance_valid(_camera):
 		return
 	_camera_user_controlled = true
 	var b := _camera.global_transform.basis
