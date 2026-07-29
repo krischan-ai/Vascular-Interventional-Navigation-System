@@ -13,6 +13,7 @@ from services.physics.newton_engine import (
     NewtonEngine,
     _count_static_dynamic_contacts,
     _point_at_s,
+    _recover_vbd_constraint_reactions,
     _static_dynamic_force_stats,
 )
 
@@ -117,11 +118,30 @@ def _run_case(
             )
         )
         active_force_count = int(force_count.numpy()[0])
+        raw_forces = forces.numpy()[:active_force_count]
+        recovered_forces, reaction_fallback_count = (
+            _recover_vbd_constraint_reactions(
+                raw_forces,
+                engine._solver.body_body_contact_lambda.numpy()[
+                    :active_force_count
+                ],
+                engine._contacts.rigid_contact_normal.numpy()[
+                    :active_force_count
+                ],
+            )
+        )
         solver_contact_count, peak_force, force_sum, resultant_force = (
             _static_dynamic_force_stats(
                 body0.numpy()[:active_force_count],
                 body1.numpy()[:active_force_count],
-                forces.numpy()[:active_force_count],
+                recovered_forces,
+            )
+        )
+        _, raw_peak_force, raw_force_sum, raw_resultant_force = (
+            _static_dynamic_force_stats(
+                body0.numpy()[:active_force_count],
+                body1.numpy()[:active_force_count],
+                raw_forces,
             )
         )
         post_xyz = engine._s1.body_q.numpy()[engine._rod_bodies, :3]
@@ -135,6 +155,10 @@ def _run_case(
             "post_solver_clearance_mm": post_clearance * 1000.0,
             "wall_contact_count": wall_contact_count,
             "solver_contact_count": solver_contact_count,
+            "solver_reconstructed_peak_force_n": raw_peak_force,
+            "solver_reconstructed_force_sum_n": raw_force_sum,
+            "solver_reconstructed_resultant_n": raw_resultant_force,
+            "constraint_reaction_fallback_count": reaction_fallback_count,
             "penetration_force_proxy_n": proxy_force,
             "solver_peak_contact_force_n": peak_force,
             "solver_contact_force_sum_n": force_sum,
@@ -281,11 +305,21 @@ def main(argv: list[str] | None = None) -> int:
         "metric_semantics": {
             "wall_contact_count": "Newton collision manifold pairs before VBD resolution",
             "penetration_force_proxy_n": "geometric penetration times contact_ke",
-            "solver_contact_force_sum_n": "sum of VBD per-contact force magnitudes",
-            "solver_contact_resultant_n": "resultant VBD force on dynamic guidewire bodies",
+            "solver_reconstructed_force_sum_n": (
+                "raw post-step force reconstructed by Newton's public collector"
+            ),
+            "solver_contact_force_sum_n": (
+                "sum of VBD per-contact force magnitudes after constrained "
+                "reaction-multiplier recovery"
+            ),
+            "solver_contact_resultant_n": (
+                "resultant recovered VBD force on dynamic guidewire bodies"
+            ),
         },
         "limitations": [
             "VBD contact force includes guidewire constraint response and is not a clinically calibrated wall force.",
+            "For hard contacts that separate during the solve, the post-step collector can return zero; "
+            "a positive normal augmented-Lagrangian multiplier is used as the solver-reaction fallback.",
             "VBD force is not required to be monotonic across teleported penetration cases.",
             "Once penetration exceeds the rod radius, the capsule can pass fully beyond the lumen surface and lose its collision manifold; geometric breach remains the safety fallback.",
         ],

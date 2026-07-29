@@ -76,8 +76,13 @@ class NavigationState:
     tip_quaternion: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0, 1.0])
     velocity: float = 0.0
     contact_force: float = 0.0
+    contact_count: int = 0
+    tip_contact_count: int = 0
+    rod_contact_force: float = 0.0
+    rod_contact_count: int = 0
     wall_contact_count: int = 0
     max_penetration: float = 0.0
+    wall_penetration: float = 0.0
     contact_impulse: float = 0.0
     wall_distance: float = 0.0
     curvature: float = 0.0
@@ -86,6 +91,8 @@ class NavigationState:
     path_progress: float = 0.0
     path_deviation: float = 0.0
     remaining_distance: float = 0.0
+    path_total_distance: float | None = None
+    path_travelled_distance: float | None = None
     vessel_radius: float | None = None
     eta_seconds: float | None = None
     latency_ms: float | None = None
@@ -108,8 +115,13 @@ class NavigationState:
             "tip_quaternion": self.tip_quaternion,
             "velocity": self.velocity,
             "contact_force": self.contact_force,
+            "contact_count": self.contact_count,
+            "tip_contact_count": self.tip_contact_count,
+            "rod_contact_force": self.rod_contact_force,
+            "rod_contact_count": self.rod_contact_count,
             "wall_contact_count": self.wall_contact_count,
             "max_penetration": self.max_penetration,
+            "wall_penetration": self.wall_penetration,
             "contact_impulse": self.contact_impulse,
             "wall_distance": self.wall_distance,
             "curvature": self.curvature,
@@ -118,6 +130,8 @@ class NavigationState:
             "path_progress": self.path_progress,
             "path_deviation": self.path_deviation,
             "remaining_distance": self.remaining_distance,
+            "path_total_distance": self.path_total_distance,
+            "path_travelled_distance": self.path_travelled_distance,
             "vessel_radius": self.vessel_radius,
             "eta_seconds": self.eta_seconds,
             "latency_ms": self.latency_ms,
@@ -170,8 +184,8 @@ class NavigationEngine:
     # wall, so proximity alone is not danger -- see BREACH_* below.
     WALL_DISTANCE_SAFE = 0.001
     WALL_DISTANCE_DANGER = 0.0005
-    # Force-drive safety thresholds on wall *penetration* (meters), derived from
-    # contact_force / contact_ke. Hugging the wall (penetration ~0) is normal;
+    # Force-drive safety thresholds on independent wall penetration (meters).
+    # Hugging the wall with non-zero physical force can still be normal;
     # only real breach counts. Sub-BREACH_WARN penetration is numerical noise.
     BREACH_WARN = 0.00005   # 0.05 mm: past here, warn
     BREACH_STOP = 0.0003    # 0.30 mm: sustained breach, collision stop
@@ -816,6 +830,16 @@ class NavigationEngine:
         path_progress = float(np.clip(path_progress, 0.0, 1.0))
 
         remaining_distance = self._compute_remaining_distance(path_progress)
+        path_total_distance = (
+            float(self._path.total_len)
+            if self._path is not None and self._path.total_len > 0.0
+            else None
+        )
+        path_travelled_distance = (
+            float(path_progress * path_total_distance)
+            if path_total_distance is not None
+            else None
+        )
         vessel_radius = self._compute_vessel_radius(path_progress)
         eta_seconds = self._compute_eta_seconds(remaining_distance, velocity)
         progress_delta = float(path_progress - self._last_path_progress)
@@ -833,8 +857,18 @@ class NavigationEngine:
         }
 
         force_mode = self._is_force_physics()
+        wall_penetration = float(
+            max(
+                0.0,
+                getattr(
+                    raw,
+                    "wall_penetration",
+                    getattr(raw, "max_penetration", 0.0),
+                ),
+            )
+        )
         safety_status = self._compute_safety_status(
-            self._episode_length, raw.wall_distance, raw.contact_force
+            self._episode_length, raw.wall_distance, wall_penetration
         )
 
         state = NavigationState(
@@ -843,8 +877,15 @@ class NavigationEngine:
             tip_quaternion=raw.tip_quaternion,
             velocity=float(velocity),
             contact_force=float(raw.contact_force),
+            contact_count=int(getattr(raw, "contact_count", 0)),
+            tip_contact_count=int(
+                getattr(raw, "tip_contact_count", getattr(raw, "contact_count", 0))
+            ),
+            rod_contact_force=float(getattr(raw, "rod_contact_force", 0.0)),
+            rod_contact_count=int(getattr(raw, "rod_contact_count", 0)),
             wall_contact_count=int(getattr(raw, "wall_contact_count", 0)),
             max_penetration=float(getattr(raw, "max_penetration", 0.0)),
+            wall_penetration=wall_penetration,
             contact_impulse=float(getattr(raw, "contact_impulse", 0.0)),
             wall_distance=float(raw.wall_distance),
             curvature=float(curvature),
@@ -853,6 +894,8 @@ class NavigationEngine:
             path_progress=float(path_progress),
             path_deviation=float(path_deviation),
             remaining_distance=float(remaining_distance),
+            path_total_distance=path_total_distance,
+            path_travelled_distance=path_travelled_distance,
             vessel_radius=vessel_radius,
             eta_seconds=eta_seconds,
             fidelity_mode=self.fidelity_mode,
@@ -863,10 +906,7 @@ class NavigationEngine:
             reward=float(raw.reward),
             done=raw.done,
         )
-        contact_ke = float(getattr(self._engine, "contact_ke", 0.0)) if force_mode else 0.0
-        risk_assessment = self._risk_assessor.assess(
-            state, force_mode=force_mode, contact_ke=contact_ke
-        )
+        risk_assessment = self._risk_assessor.assess(state, force_mode=force_mode)
         state.risk_score = risk_assessment["risk_score"]
         state.risk_assessment = risk_assessment
         state.flow_guidance = self._flow_guidance(state)
@@ -1541,25 +1581,21 @@ class NavigationEngine:
         self,
         episode_length: int,
         wall_distance: float,
-        contact_force: float = 0.0,
+        wall_penetration: float = 0.0,
     ) -> SafetyStatus:
         """Derive the safety status, mode-aware.
 
         Guided/kinematic (default): the wire rides the centerline, so clearance to
         the wall (``wall_distance``) is the risk -- the original mm bands apply.
 
-        Force-drive physics: the wire legitimately hugs the wall, so a tiny
-        ``wall_distance`` is *normal*, not a collision. The real breach signal is
-        penetration = contact_force / contact_ke (>0 only when poking past the
-        wall). This is the fix for the D5/ShapeIntent smoke's COLLISION_STOP
-        false alarms (doc/09 §9.5) -- normal wall-hugging now reads SAFE_NAV.
+        Force-drive physics uses the independent geometric penetration signal;
+        physical contact force is deliberately not converted back into breach.
         """
         if episode_length == 0:
             return "STANDBY"
 
         if self._is_force_physics():
-            ke = float(getattr(self._engine, "contact_ke", 0.0)) or 0.0
-            penetration = contact_force / ke if ke > 0.0 else 0.0
+            penetration = max(0.0, float(wall_penetration))
             if penetration < self.BREACH_WARN:
                 return "SAFE_NAV"
             if penetration < self.BREACH_STOP:
