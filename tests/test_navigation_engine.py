@@ -85,6 +85,90 @@ class TestSessionManagerUnit:
         sessions = manager.list_sessions()
         assert sessions == []
 
+    def test_emergency_stop_latches_and_rejects_nonzero_control(self, monkeypatch):
+        from services.navigation_engine import NavigationState
+        import services.session_manager as session_manager_module
+
+        class DummyEngine:
+            def __init__(self, **_kwargs):
+                self.intent_calls = []
+                self.step_calls = []
+                self.params = {"jtip_deg": 35.0}
+
+            def reset(self):
+                return NavigationState()
+
+            def step(self, push, rotate, support=0.0):
+                self.step_calls.append((push, rotate, support))
+                return NavigationState(episode_length=len(self.step_calls))
+
+            def set_shape_intent(self, intent, active=True):
+                self.intent_calls.append((intent, active))
+                return {"active": active}
+
+            def set_engine_params(self, params):
+                self.params.update(params)
+                return dict(self.params)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(session_manager_module, "NavigationEngine", DummyEngine)
+        manager = session_manager_module.SessionManager()
+        session_id, initial = manager.create_session()
+        engine = manager.get_session(session_id)
+
+        assert manager.emergency_stop(session_id)["emergency_stop_latched"] is True
+        assert engine.intent_calls[-1] == (None, False)
+        with pytest.raises(session_manager_module.ControlRejectedError):
+            manager.step(session_id, 0.4, 0.0)
+        assert engine.step_calls == []
+        assert manager.step(session_id, 0.0, 0.0) is initial
+        assert manager.resume(session_id)["emergency_stop_latched"] is False
+        assert manager.step(session_id, 0.4, 0.0).episode_length == 1
+
+    def test_control_protections_preserve_support_channel(self, monkeypatch):
+        from services.navigation_engine import NavigationState
+        import services.session_manager as session_manager_module
+
+        class DummyEngine:
+            def __init__(self, **_kwargs):
+                self.step_calls = []
+                self.params = {"jtip_deg": 42.0}
+
+            def reset(self):
+                return NavigationState(
+                    path_progress=0.0, path_travelled_distance=0.0
+                )
+
+            def step(self, push, rotate, support=0.0):
+                self.step_calls.append((push, rotate, support))
+                return NavigationState(path_travelled_distance=0.01)
+
+            def set_shape_intent(self, _intent, active=True):
+                return {"active": active}
+
+            def set_engine_params(self, params):
+                self.params.update(params)
+                return dict(self.params)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(session_manager_module, "NavigationEngine", DummyEngine)
+        manager = session_manager_module.SessionManager()
+        session_id, _ = manager.create_session()
+        engine = manager.get_session(session_id)
+        manager.step(session_id, -0.3, 1.0, 0.4)
+        assert engine.step_calls[-1] == (0.0, 0.5, 0.4)
+        reasons = manager.get_control_state(session_id)["last_applied_control"][
+            "protection_reasons"
+        ]
+        assert set(reasons) == {
+            "WITHDRAWAL_AT_ENTRY_BLOCKED",
+            "TORQUE_COMMAND_LIMITED",
+        }
+
 
 class TestSchemas:
     """Test Pydantic schemas."""
@@ -488,18 +572,17 @@ class TestNavigationEngineHelpers:
         assert engine._compute_safety_status(5, 0.0001, 0.0) == "SAFE_NAV"
 
     def test_safety_status_force_mode_penetration_bands(self):
-        # Force-drive safety keys on penetration = contact_force / contact_ke.
+        # Force-drive safety keys directly on independent wall penetration.
         from types import SimpleNamespace
 
-        ke = 3.0e6
         engine = self._engine()
-        engine._engine = SimpleNamespace(is_force_drive=True, contact_ke=ke, close=lambda: None)
+        engine._engine = SimpleNamespace(is_force_drive=True, close=lambda: None)
         # 0.02mm penetration < BREACH_WARN (0.05mm) -> numerical noise, safe.
-        assert engine._compute_safety_status(5, 0.0, 0.00002 * ke) == "SAFE_NAV"
+        assert engine._compute_safety_status(5, 0.0, 0.00002) == "SAFE_NAV"
         # 0.10mm penetration in [WARN, STOP) -> warning.
-        assert engine._compute_safety_status(5, 0.0, 0.0001 * ke) == "DANGER_WARNING"
+        assert engine._compute_safety_status(5, 0.0, 0.0001) == "DANGER_WARNING"
         # 0.50mm penetration >= BREACH_STOP (0.30mm) -> collision stop.
-        assert engine._compute_safety_status(5, 0.0, 0.0005 * ke) == "COLLISION_STOP"
+        assert engine._compute_safety_status(5, 0.0, 0.0005) == "COLLISION_STOP"
 
     def test_resolve_entry_none_without_path(self):
         engine = self._engine()

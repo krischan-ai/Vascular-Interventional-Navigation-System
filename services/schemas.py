@@ -92,8 +92,12 @@ class NavigationStateResponse(BaseModel):
     )
     velocity: float = Field(description="Tip velocity (m/s)")
     contact_force: float = Field(
-        description="Contact force magnitude; Newton reports a penetration-force proxy (N)"
+        description="Stabilized physical tip contact-force resultant (N)"
     )
+    contact_count: int = Field(default=0, description="PR #9 alias for active tip contacts")
+    tip_contact_count: int = Field(default=0, description="Active tip contact records")
+    rod_contact_force: float = Field(default=0.0, description="Full-rod contact resultant (N)")
+    rod_contact_count: int = Field(default=0, description="Active full-rod contact records")
     wall_contact_count: int = Field(
         default=0,
         description="Maximum concurrent guidewire-vessel contact pairs in the latest control step",
@@ -102,9 +106,13 @@ class NavigationStateResponse(BaseModel):
         default=0.0,
         description="Maximum lumen-wall penetration in the latest control step (m)",
     )
+    wall_penetration: float = Field(
+        default=0.0,
+        description="Compatibility alias for maximum lumen-wall penetration (m)",
+    )
     contact_impulse: float = Field(
         default=0.0,
-        description="Penetration-force proxy integrated over the latest control step (N s)",
+        description="Full-rod physical contact force integrated over the latest control step (N s)",
     )
     wall_distance: float = Field(default=0.0, description="Min wall distance (m)")
     curvature: float = Field(default=0.0, description="Local tip curvature (m^-1)")
@@ -113,6 +121,8 @@ class NavigationStateResponse(BaseModel):
     path_progress: float = Field(default=0.0, description="Planned-path progress [0, 1]")
     path_deviation: float = Field(default=0.0, description="Deviation from path (m)")
     remaining_distance: float = Field(default=0.0, description="Remaining path arc length (m)")
+    path_total_distance: float | None = Field(default=None, description="Total path arc length (m)")
+    path_travelled_distance: float | None = Field(default=None, description="Travelled path arc length (m)")
     vessel_radius: float | None = Field(default=None, description="Local lumen radius (m)")
     eta_seconds: float | None = Field(default=None, description="Estimated seconds to target")
     latency_ms: float | None = Field(default=None, description="Latest measured client/server RTT (ms)")

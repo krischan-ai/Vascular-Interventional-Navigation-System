@@ -46,8 +46,14 @@ class RawPose:
     tip_direction: list[float] = field(default_factory=lambda: [0.0, 0.0, 1.0])
     tip_quaternion: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0, 1.0])
     contact_force: float = 0.0
+    # PR #9 compatibility alias plus explicit semantic fields.
+    contact_count: int = 0
+    tip_contact_count: int = 0
+    rod_contact_force: float = 0.0
+    rod_contact_count: int = 0
     wall_contact_count: int = 0
     max_penetration: float = 0.0
+    wall_penetration: float = 0.0
     contact_impulse: float = 0.0
     wall_distance: float = MAX_WALL_DISTANCE
     target_position: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])

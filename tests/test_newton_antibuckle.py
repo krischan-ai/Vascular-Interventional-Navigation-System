@@ -20,10 +20,13 @@ import pytest
 from services.physics.base import PlannedPath
 from services.physics.newton_engine import (
     NewtonEngine,
+    _aggregate_rod_contact_forces,
     _count_static_dynamic_contacts,
     _feed_budget,
     _insertion_complete,
     _project_points_to_centerline,
+    _recover_vbd_constraint_reactions,
+    _stabilize_contact_force,
     _static_dynamic_force_stats,
 )
 
@@ -34,6 +37,73 @@ def _straight_path(total_len: float = 0.3, n: int = 61) -> PlannedPath:
     return PlannedPath(pts, radii=np.full(n, 0.003))
 
 
+class TestSolverContactForce:
+    def test_tip_and_rod_resultants(self):
+        tip_force, tip_count, rod_force, rod_count = _aggregate_rod_contact_forces(
+            np.array([-1, 12, -1, 10, 50]),
+            np.array([12, -1, 11, 11, 51]),
+            np.array([
+                [1.0, 0.0, 0.0],
+                [0.0, -2.0, 0.0],
+                [0.0, 0.0, 3.0],
+                [9.0, 9.0, 9.0],
+                [8.0, 8.0, 8.0],
+            ]),
+            [10, 11, 12],
+        )
+        assert tip_force == pytest.approx(np.sqrt(5.0))
+        assert tip_count == 2
+        assert rod_force == pytest.approx(np.sqrt(14.0))
+        assert rod_count == 3
+
+    def test_opposing_forces_keep_contact_count(self):
+        tip_force, tip_count, rod_force, rod_count = _aggregate_rod_contact_forces(
+            np.array([-1, -1]),
+            np.array([12, 12]),
+            np.array([[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]]),
+            [10, 11, 12],
+        )
+        assert tip_force == pytest.approx(0.0)
+        assert rod_force == pytest.approx(0.0)
+        assert tip_count == 2
+        assert rod_count == 2
+
+    def test_stabilization_scales_limits_and_filters(self):
+        value, saturated = _stabilize_contact_force(
+            100.0,
+            2.0,
+            contact_count=1,
+            scale=0.5,
+            limit_n=24.0,
+            alpha=0.25,
+        )
+        assert value == pytest.approx(7.5)
+        assert saturated is True
+
+    def test_stabilization_decays_missing_contact(self):
+        value, saturated = _stabilize_contact_force(
+            float("nan"),
+            8.0,
+            contact_count=0,
+            scale=1.0,
+            limit_n=24.0,
+            alpha=0.5,
+        )
+        assert value == pytest.approx(4.0)
+        assert saturated is False
+
+    def test_recovers_positive_constraint_reaction_for_zero_output(self):
+        forces, recovered = _recover_vbd_constraint_reactions(
+            np.array([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 0.0, 0.0]]),
+            np.array([[3.0, 1.0, 0.0], [9.0, 0.0, 0.0], [-4.0, 0.0, 0.0]]),
+            np.array([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
+        )
+        assert recovered == 1
+        assert forces[0].tolist() == pytest.approx([3.0, 1.0, 0.0])
+        assert forces[1].tolist() == pytest.approx([2.0, 0.0, 0.0])
+        assert forces[2].tolist() == pytest.approx([0.0, 0.0, 0.0])
+
+
 @pytest.fixture
 def engine(monkeypatch) -> NewtonEngine:
     # Pin the params the tests depend on so ambient env cannot skew them.
@@ -42,6 +112,13 @@ def engine(monkeypatch) -> NewtonEngine:
     monkeypatch.setenv("CATHSIM_NEWTON_FREE_LEN", "0.03")
     monkeypatch.delenv("CATHSIM_NEWTON_SHEATH_BODIES", raising=False)
     monkeypatch.delenv("CATHSIM_NEWTON_MAX_SLACK", raising=False)
+    monkeypatch.delenv("CATHSIM_NEWTON_SUBSTEPS", raising=False)
+    monkeypatch.delenv("CATHSIM_NEWTON_ITERS", raising=False)
+    monkeypatch.delenv("CATHSIM_NEWTON_SETTLE_STEPS", raising=False)
+    monkeypatch.delenv("CATHSIM_NEWTON_RETURN_SETTLE_STEPS", raising=False)
+    monkeypatch.delenv("CATHSIM_NEWTON_CONTACT_FORCE_SCALE", raising=False)
+    monkeypatch.delenv("CATHSIM_NEWTON_CONTACT_FORCE_LIMIT_N", raising=False)
+    monkeypatch.delenv("CATHSIM_NEWTON_CONTACT_FORCE_ALPHA", raising=False)
     return NewtonEngine(path=_straight_path())
 
 

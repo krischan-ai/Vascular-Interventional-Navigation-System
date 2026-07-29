@@ -40,6 +40,9 @@ class TestWebSocketHandlerUnit:
         assert MessageType.STATE_UPDATE.value == "state_update"
         assert MessageType.PING.value == "ping"
         assert MessageType.PONG.value == "pong"
+        assert MessageType.EMERGENCY_STOP.value == "emergency_stop"
+        assert MessageType.RESUME.value == "resume"
+        assert MessageType.CONTROL_REJECTED.value == "control_rejected"
 
     def test_control_data_validation(self):
         from services.websocket_handler import ControlData
@@ -149,6 +152,7 @@ class TestWebSocketHandlerUnit:
             "jtip_bodies": 4,
         }
         handler = WebSocketHandler(MagicMock())
+        handler._session_manager.is_emergency_stopped.return_value = False
         handler._session_manager.get_session.return_value = engine
         send_mock = AsyncMock()
         handler._send_message = send_mock
@@ -236,6 +240,8 @@ class TestWebSocketHandlerUnit:
             path_progress=0.25,
             path_deviation=0.001,
             remaining_distance=0.75,
+            path_total_distance=1.0,
+            path_travelled_distance=0.25,
             vessel_radius=0.004,
             eta_seconds=3.0,
             risk_score=0.2,
@@ -287,7 +293,13 @@ class TestWebSocketHandlerUnit:
         assert batch["training_score"] == batch["flow_guidance"]["training_score"]
         assert batch["flow_guidance"]["micro_advance"]["cadence_state"] == "micro_push"
         assert batch["flow_guidance"]["micro_advance"]["hard_push_score"] == pytest.approx(0.1)
-        assert batch["schema_version"] == "navigation_visual_v2"
+        assert batch["schema_version"] == "navigation_visual_v3"
+        assert batch["contact_force"] == pytest.approx(0.12)
+        assert batch["path_progress"] == pytest.approx(0.25)
+        assert batch["path_total_distance"] == pytest.approx(1.0)
+        assert batch["path_travelled_distance"] == pytest.approx(0.25)
+        assert batch["path"]["total_distance"] == pytest.approx(1.0)
+        assert batch["path"]["travelled_distance"] == pytest.approx(0.25)
         assert isinstance(batch["timestamp_ms"], int)
         mechanics = batch["safety"]["guidewire_mechanics"]
         assert mechanics["source"] == "navigation_engine.risk_assessor"
@@ -628,6 +640,63 @@ class TestWebSocketIntegration:
             assert state_response["type"] == "state_update"
             assert "tip_position" in state_response["data"]
             assert state_response["data"]["episode_length"] == 1
+
+    def test_emergency_stop_rejects_control_until_resume(self):
+        client = TestClient(app)
+        with client.websocket_connect("/ws/session") as websocket:
+            websocket.send_json({
+                "type": "session_start",
+                "data": {"phantom": "low_tort", "target": "bca"},
+            })
+            started = _recv(websocket)
+            assert started["data"]["control_state"]["emergency_stop_latched"] is False
+
+            websocket.send_json({
+                "type": "emergency_stop",
+                "data": {"reason": "operator_test"},
+            })
+            stopped = _recv(websocket)
+            assert stopped["type"] == "emergency_stop_confirmed"
+            assert stopped["data"]["control_state"]["emergency_stop_latched"] is True
+
+            websocket.send_json({
+                "type": "control",
+                "data": {
+                    "delta_push": 0.5,
+                    "delta_rotate": 0.0,
+                    "microcatheter_advance": 0.0,
+                },
+            })
+            rejected = _recv(websocket)
+            assert rejected["type"] == "control_rejected"
+
+            websocket.send_json({"type": "resume", "data": {}})
+            resumed = _recv(websocket)
+            assert resumed["type"] == "resume_confirmed"
+            assert resumed["data"]["control_state"]["emergency_stop_latched"] is False
+
+    def test_control_config_returns_effective_protections(self):
+        client = TestClient(app)
+        with client.websocket_connect("/ws/session") as websocket:
+            websocket.send_json({
+                "type": "session_start",
+                "data": {"phantom": "low_tort", "target": "bca"},
+            })
+            _recv(websocket)
+            websocket.send_json({
+                "type": "control_config",
+                "data": {
+                    "torque_limit_enabled": False,
+                    "withdrawal_protection_enabled": True,
+                    "auto_stop_push_enabled": True,
+                },
+            })
+            response = _recv(websocket)
+            assert response["type"] == "control_config"
+            protections = response["data"]["control_state"]["protections"]
+            assert protections["torque_limit_enabled"] is False
+            assert protections["withdrawal_protection_enabled"] is True
+            assert protections["auto_stop_push_enabled"] is True
 
     def test_websocket_session_reset(self):
         """Test reset command via WebSocket."""
