@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from services.main import app
+from services.physics.base import RawPose
 
 
 # ============================================================================
@@ -28,6 +29,8 @@ class TestNavigationStateDataclass:
         assert state.tip_direction == [0.0, 0.0, 1.0]
         assert state.velocity == 0.0
         assert state.contact_force == 0.0
+        assert state.contact_count == 0
+        assert state.wall_penetration == 0.0
         assert state.episode_length == 0
         assert state.reward == 0.0
         assert state.done is False
@@ -53,6 +56,8 @@ class TestNavigationStateDataclass:
         assert result["vessel_radius"] is None
         assert result["fidelity_mode"] == "physics"
         assert result["risk_regions"] == []
+        assert result["contact_count"] == 0
+        assert result["wall_penetration"] == 0.0
 
 
 class TestSessionManagerUnit:
@@ -355,28 +360,45 @@ class TestNavigationEngineHelpers:
 
     def test_safety_status_force_mode_wall_hug_is_safe(self):
         # Force-drive: the wire legitimately hugs the wall, so a tiny wall_distance
-        # with NO contact force is normal, not a collision. Regression for the
+        # with real contact force but NO penetration is normal. Regression for the
         # D5/ShapeIntent smoke's false COLLISION_STOP (doc/09 §9.5).
         from types import SimpleNamespace
 
         engine = self._engine()
-        engine._engine = SimpleNamespace(is_force_drive=True, contact_ke=3.0e6, close=lambda: None)
+        engine._engine = SimpleNamespace(is_force_drive=True, close=lambda: None)
         assert engine._is_force_physics() is True
         assert engine._compute_safety_status(5, 0.0001, 0.0) == "SAFE_NAV"
 
     def test_safety_status_force_mode_penetration_bands(self):
-        # Force-drive safety keys on penetration = contact_force / contact_ke.
+        # Force-drive safety keys directly on independent wall penetration.
         from types import SimpleNamespace
 
-        ke = 3.0e6
         engine = self._engine()
-        engine._engine = SimpleNamespace(is_force_drive=True, contact_ke=ke, close=lambda: None)
+        engine._engine = SimpleNamespace(is_force_drive=True, close=lambda: None)
         # 0.02mm penetration < BREACH_WARN (0.05mm) -> numerical noise, safe.
-        assert engine._compute_safety_status(5, 0.0, 0.00002 * ke) == "SAFE_NAV"
+        assert engine._compute_safety_status(5, 0.0, 0.00002) == "SAFE_NAV"
         # 0.10mm penetration in [WARN, STOP) -> warning.
-        assert engine._compute_safety_status(5, 0.0, 0.0001 * ke) == "DANGER_WARNING"
+        assert engine._compute_safety_status(5, 0.0, 0.0001) == "DANGER_WARNING"
         # 0.50mm penetration >= BREACH_STOP (0.30mm) -> collision stop.
-        assert engine._compute_safety_status(5, 0.0, 0.0005 * ke) == "COLLISION_STOP"
+        assert engine._compute_safety_status(5, 0.0, 0.0005) == "COLLISION_STOP"
+
+    def test_force_mode_real_contact_does_not_imply_penetration(self):
+        from types import SimpleNamespace
+
+        engine = self._engine()
+        engine._engine = SimpleNamespace(is_force_drive=True, close=lambda: None)
+        raw = RawPose(
+            wall_distance=0.0001,
+            wall_penetration=0.0,
+            contact_force=4.5,
+            contact_count=2,
+        )
+        engine._episode_length = 1
+        state = engine._assemble_state(raw)
+        assert state.contact_force == pytest.approx(4.5)
+        assert state.contact_count == 2
+        assert state.wall_penetration == 0.0
+        assert state.safety_status == "SAFE_NAV"
 
     def test_resolve_entry_none_without_path(self):
         engine = self._engine()

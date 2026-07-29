@@ -149,7 +149,9 @@ class TestWebSocketHandlerUnit:
                 }
             },
             contact_force=0.12,
+            contact_count=3,
             wall_distance=0.0012,
+            wall_penetration=0.00004,
             safety_status="DANGER_WARNING",
             fidelity_mode="physics",
         )
@@ -167,7 +169,9 @@ class TestWebSocketHandlerUnit:
         assert isinstance(batch["timestamp_ms"], int)
         # v3 canonical fields use the same data.<field> path as state_update.
         assert batch["contact_force"] == 0.12
+        assert batch["contact_count"] == 3
         assert batch["wall_distance"] == 0.0012
+        assert batch["wall_penetration"] == 0.00004
         assert batch["path_progress"] == 0.25
         assert batch["remaining_distance"] == 0.75
         assert batch["path_total_distance"] == 1.0
@@ -178,7 +182,9 @@ class TestWebSocketHandlerUnit:
         mechanics = batch["safety"]["guidewire_mechanics"]
         assert mechanics["source"] == "navigation_engine.risk_assessor"
         assert mechanics["tip_force_n"] == 0.12
+        assert mechanics["contact_count"] == 3
         assert mechanics["wall_distance_m"] == 0.0012
+        assert mechanics["wall_penetration_m"] == 0.00004
         assert mechanics["lateral_force_n"] is None
         assert mechanics["torque_nm"] is None
         assert mechanics["safety_level"] == "warning"
@@ -191,6 +197,8 @@ class TestWebSocketHandlerUnit:
         assert batch["safety"]["timestamp_ms"] == batch["timestamp_ms"]
         assert batch["safety"]["data_status"] == "fresh"
         assert batch["safety"]["contact_force"] == 0.12
+        assert batch["safety"]["contact_count"] == 3
+        assert batch["safety"]["wall_penetration"] == 0.00004
         assert batch["engine"] == "DummyBackend"
         assert batch["diagnostics"]["drive"] == "force"
         assert batch["diagnostics"]["slack_m"] == 0.002

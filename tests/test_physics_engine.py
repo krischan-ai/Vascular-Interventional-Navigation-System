@@ -92,12 +92,20 @@ class TestDerivedStateWithFakeEngine:
         assert state.path_deviation == pytest.approx(0.0)
 
     def test_progress_from_arclen_is_exact_and_continuous(self):
-        # arclen set (kinematic style) -> exact progress, zero deviation, even
-        # when the tip sits between path vertices.
+        # arclen supplies exact progress while the on-path tip has zero deviation,
+        # even when it sits between sampled path vertices.
         nav, _ = _nav_with_fake([RawPose(tip_position=[1.5, 0.0, 0.0], arclen=1.5)])
         state = nav.reset()
         assert state.path_progress == pytest.approx(0.5)
         assert state.path_deviation == pytest.approx(0.0)
+
+    def test_arclen_does_not_hide_off_path_deviation(self):
+        # Newton force-drive reports an along-path arclen even when its physical
+        # tip moves laterally. Progress stays exact and deviation stays physical.
+        nav, _ = _nav_with_fake([RawPose(tip_position=[1.5, 0.0005, 0.0], arclen=1.5)])
+        state = nav.reset()
+        assert state.path_progress == pytest.approx(0.5)
+        assert state.path_deviation == pytest.approx(0.0005)
 
     def test_deviation_off_path(self):
         nav, _ = _nav_with_fake([RawPose(tip_position=[2.0, 0.5, 0.0])])
@@ -247,6 +255,15 @@ class TestPlannedPath:
         progress, deviation = path.progress_deviation([2.0, 0.0, 0.0])
         assert progress == pytest.approx(2.0 / 3.0)
         assert deviation == pytest.approx(0.0)
+
+    def test_deviation_projects_between_sampled_vertices(self):
+        path = PlannedPath(STRAIGHT_PATH)
+        assert path.deviation([1.5, 0.0, 0.0]) == pytest.approx(0.0)
+        assert path.deviation([1.5, 0.0005, 0.0]) == pytest.approx(0.0005)
+
+    def test_deviation_handles_repeated_vertices(self):
+        path = PlannedPath([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+        assert path.deviation([0.5, 0.25, 0.0]) == pytest.approx(0.25)
 
     def test_inner_wall_offset_zero_on_straight(self):
         path = PlannedPath(STRAIGHT_PATH)

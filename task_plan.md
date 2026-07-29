@@ -4,10 +4,10 @@
 完善 Godot 前端“腔镜实时视图”板块，使其以导丝尖端的实时位姿驱动血管腔内相机，真实呈现随导丝运动变化的血管内视图，并达到参考图所示的医疗监控面板视觉效果。
 
 ## Next Step
-用户在当前已启动的 enhanced/balanced 实际客户端中进行人工体验；如需回退，可用 `--scope-render-profile=baseline` 启动。
+修复已完成；当前 9000 后端与 Godot 客户端已切换到新实现，可由用户继续推进导丝进行人工观察。
 
 ## Current Phase
-Phase 12 in progress
+Phase 17 complete
 
 ## Phases
 
@@ -186,3 +186,121 @@ Phase 12 in progress
 | 递归 `rg` 搜索多个符号在当前 Windows 工作树超时 | 1 | 改用 `Get-ChildItem -Recurse -Filter *.py | Select-String` 定位符号，不重复原扫描 |
 | 第一轮 44 项针对性测试中 7 项仍使用旧契约 | 1 | Phantom 断言改用分层默认配置；Scene 的已删除 `regenerate` 测试改为相机集合；相机矩阵比较使用方法返回值；同时修复 `add_light` 重复传入 `castshadow` 的真实缺陷 |
 | Conda 的 `pytest.exe` 未把仓库根目录加入 `sys.path`，15 个服务/工具测试收集失败 | 1 | 在 pytest 项目配置中显式加入 `pythonpath = ["."]`，统一直接入口与 `python -m pytest` 的导入行为 |
+
+### Phase 13: 偏离中心线始终为 0.0 mm 的只读诊断
+- [x] 复核当前分支、工作树、既有规划和前端交接边界
+- [x] 定位 HUD 指标的数据字段、格式化逻辑与刷新入口
+- [x] 追踪 WebSocket `state_batch` 到物理引擎的真实数据来源
+- [x] 用现有测试/运行日志或最小只读探针验证数值是否真实变化
+- [x] 区分设计语义、当前实现和异常根因并给出结论
+- **Status:** complete
+
+### Errors for Phase 13
+| Error | Attempt | Resolution |
+|-------|---------|------------|
+| 递归枚举交接文档时进入旧 `.tmp/pytest-local-20260727` 被拒绝访问 | 1 | 已取得目标交接文档路径；后续搜索显式限定源码/文档目录，不再扫描该临时目录 |
+| 第一次并行进程/日志查询被一个非零 PowerShell 子命令中断 | 1 | 拆为限定目录且显式容错的只读查询，成功取得健康、PID 和日志证据 |
+| 首次最小探针混入最近顶点的沿程采样误差，得到 500 mm | 1 | 把 tip 放到既有路径顶点并仅增加 0.5 mm 横向偏移；重跑得到 reported=0.000 mm、independent=0.500 mm |
+
+### Phase 14: 修复 Newton 真实偏离中心线计算
+- [x] 获得用户实施确认并恢复上一轮诊断上下文
+- [x] 确认共享路径几何 API 与现有测试契约
+- [x] 解耦 `raw.arclen` 进度与真实 tip 横向偏差
+- [x] 使用最近折线段投影避免最近顶点采样误差
+- [x] 补充 Kinematic、Newton-style arclen 和 off-path 回归测试
+- [x] 运行相关 pytest 与完整回归
+- [x] 通过实际 Newton/WebSocket 状态验证非零动态偏差
+- [x] 复核差异、更新三份记录并交付
+- **Status:** complete
+
+### Errors for Phase 14
+| Error | Attempt | Resolution |
+|-------|---------|------------|
+| 组合式停止 9000 旧后端并启动新后端的 PowerShell 命令在执行前被本地策略拦截 | 1 | 旧进程未受影响；不绕过策略，改在 9001 启动当前工作区代码做独立 Newton/WebSocket 验证 |
+
+### Phase 15: 切换修复后端并启动 Godot 展示
+- [x] 再次确认 9000/9001 端口进程身份和健康状态
+- [x] 按用户明确要求停止旧 9000 与临时 9001 验证服务
+- [x] 从当前工作区修复代码启动新 9000 后端
+- [x] 验证 health=`ok`、vpp_ready=true、case_001
+- [x] 发现无 Godot 进程后从正确内层项目启动可交互窗口
+- [x] 验证 RTX 4060、WebSocket、session_started、NewtonEngine、首个 state_batch
+- [x] 保持新后端与 Godot 窗口运行供用户操作
+- **Status:** complete
+
+### Errors for Phase 15
+| Error | Attempt | Resolution |
+|-------|---------|------------|
+| 首次端口预检的 PowerShell foreach 后直接接管道导致 Empty pipe element | 1 | 命令未执行任何进程操作；改为先收集 `$rows` 再格式化输出，第二次成功 |
+
+### Phase 16: 接触力始终为 0 的只读诊断
+- [x] 恢复现有工作区上下文并记录既有未提交修改
+- [x] 定位 Godot HUD 接触力字段、单位换算与刷新入口
+- [x] 追踪 WebSocket/NavigationEngine 到物理引擎的接触力来源
+- [x] 用针对性测试或最小只读探针验证根因
+- [x] 区分显示问题、数据传输问题与物理解算问题并给出修复建议
+- **Status:** complete
+
+### Errors for Phase 16
+| Error | Attempt | Resolution |
+|-------|---------|------------|
+| `rg` 同时传入不存在的 `tests/test_newton*` 路径模式后返回退出码 1 | 1 | 已保留有效匹配输出；改用 `Get-ChildItem -Filter '*newton*.py'` 取得实际测试文件名，后续使用精确路径 |
+| 首次聚合健康/进程/递归日志查询因部分 PowerShell 枚举项非零退出 | 1 | 健康与监听信息已取得；改为限定 `.tmp/runtime`、`.tmp/godot` 且 JSON 输出，成功确认进程与日志 |
+| 首轮并行验证使用了错误的 pytest 类节点名，pytest 未收集到用例并使聚合调用提前报错 | 1 | 未执行任何测试修改；先用 `--collect-only` 获取精确 node id，并确认并行的隔离探针是否仍在运行/是否已建会话，再分别复跑 |
+| 隔离 WebSocket 探针把 `session_started.data` 的会话标识误写为 `session_id`，触发 KeyError | 1 | `finally` 已收到 `session_stop=confirmed`，无遗留会话；读取实际协议键名后修正探针，不重复错误字段 |
+| VBD 直接探针首次把 `PlannedPath` 作为 NewtonEngine 位置参数传入，构造器只接受关键字参数 | 1 | 引擎尚未初始化且无 GPU/会话资源遗留；按签名改为 `NewtonEngine(path=...)` 后重跑 |
+
+### Phase 17: 接入 Newton 真实接触力并分离穿壁安全量
+- [x] 恢复 Phase 16 诊断、既有偏离中心线修复和当前运行现场
+- [x] 扩展 RawPose/NavigationState，显式传递 `wall_penetration`
+- [x] 在 Newton 8-substep VBD 循环中采集并稳定聚合尖端真实接触反力
+- [x] 将 NavigationEngine/RiskAssessor 安全判断改为独立 penetration
+- [x] 更新 WebSocket mechanics/safety 字段与兼容契约
+- [x] 增加单元与协议回归测试
+  - [x] 增加并通过 GPU Newton 回归测试
+  - [x] 运行全量 pytest、隔离真实 WebSocket 与 Godot 验证
+  - [x] 复核差异并交付，不提交、不上传
+  - **Status:** complete
+
+### Errors for Phase 17
+| Error | Attempt | Resolution |
+|-------|---------|------------|
+| 参数/文档 `rg` 搜索取得有效结果但因部分路径/匹配返回退出码 1 | 1 | 已保留有效阈值证据；后续限定源码和已知文件，不重复宽泛路径组合 |
+
+### Phase 18: 3D 解剖导航左键平移中心模式
+- [x] 用户批准实施并完成交接文档、工作树和现有相机输入链路复核
+- [x] 将选择/旋转布尔状态升级为选择/旋转/平移三态工具模式
+- [x] 新增平移工具按钮、线框图标与明确提示文字
+- [x] 复用现有中键平移数学，并让切回旋转后保留用户平移中心
+- [x] 更新前端设计说明与静态契约测试
+- [x] 运行前端 pytest、Godot 4.7.1 解析/启动和差异检查
+- [x] 启动真实 Newton/FastAPI/Godot，完成按钮截图与平移后旋转行为探针验收
+- [x] 复核冻结范围和既有未提交改动，交付但不提交、不上传
+- **Status:** complete
+
+### Errors for Phase 18
+| Error | Attempt | Resolution |
+|-------|---------|------------|
+| 方案阶段首次按默认用户目录调用 `session-catchup.py`，实际技能安装在仓库 `.codex/skills` | 1 | 改用仓库内实际脚本路径；本实施阶段恢复检查已直接成功 |
+| 方案阶段两次把 PowerShell 不展开的 `*.gd` 传给 `rg`，并假设了错误的 `ui_style.gd` 路径 | 1 | 后续统一使用 `rg --files` 或精确文件路径；未对代码和工作树造成影响 |
+| Godot 首轮解析无法从未声明类型的方向数组推断 `pan` 图标局部变量 `tip` | 1 | 将 directions 声明为 `Array[Vector2]`，循环变量和 `tip` 显式声明为 `Vector2` 后重新解析 |
+| GUI 自动拖拽首轮使用 `SetCursorPos`，按钮切换成功但 3D 区域前后采样 0% 像素变化 | 1 | Godot 原始鼠标流没有得到有效 relative；改用相对 `mouse_event(MOVE)`，并增加独立 Godot 行为探针验证 pivot 语义 |
+| 相对 `mouse_event(MOVE)` 执行期间 Codex/VS Code 重新获得前台，输入落到编辑器命令面板 | 1 | 未修改任何文件；停止桌面级拖拽自动化，改用隔离 Godot 行为探针直接执行相同 GDScript 交互方法 |
+| 行为探针首轮在 `SceneTree._initialize()` 中过早访问 Camera3D，断言通过但夹具报告节点未进入树 | 1 | 将探针主体 `call_deferred` 到场景树就绪后，并在退出前显式释放 controller/holder，随后无错误复跑 |
+| 最终截图哈希汇总把 PowerShell `foreach` 代码块直接接到管道，触发 Empty pipe element | 1 | 命令未执行任何操作；先收集 `$rows` 再传给 `Format-Table`，不重复错误语法 |
+| 最终四项只读汇总的并行聚合在 10 秒时限内未返回分项结果 | 1 | 拆成精确单项查询，并只为 Git 状态检查提高时限；不重复整组调用 |
+| 尝试对仍由运行中 Godot 持有的 stdout/stderr 日志执行 `Get-FileHash` 被文件锁拒绝 | 1 | 截图哈希已取得；运行日志已通过内容扫描验证，不停止交互客户端仅为获取非必要日志哈希 |
+
+### Phase 19: 腔镜规划路径与真实导丝可视化优化方案（只读分析）
+- [x] 恢复既有规划、核对交接文档与当前工作树
+- [x] 追踪规划路径从后端协议到 Godot 渲染器的数据链路
+- [x] 追踪腔镜私有 SubViewport 的可见层、相机和材质链路
+- [x] 识别当前腔镜中“箭头”与真实导丝几何的来源和限制
+- [x] 给出分阶段实现、视觉规范、性能与验收方案
+- [x] 复核冻结范围并交付方案，不修改产品代码
+- **Status:** complete
+
+### Errors for Phase 19
+| Error | Attempt | Resolution |
+|-------|---------|------------|
+| 首次并行执行 session-catchup/status/文件枚举时，其中一项非零导致聚合调用未返回完整分项 | 1 | 分拆为精确只读命令；session-catchup 后续确认 exit=0，status 和交接文档均已读取 |

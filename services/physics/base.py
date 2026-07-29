@@ -15,10 +15,10 @@ MuJoCo / future Warp) must satisfy, plus the value types they exchange with
   ``NavigationEngine`` (progress/deviation).
 
 The one concession to engine-specific progress semantics is ``RawPose.arclen``:
-the kinematic engine knows the *exact* inserted arc length, so it reports it and
-``NavigationEngine`` derives an exact, continuous progress; the MuJoCo engine
-leaves it ``None`` and progress falls back to nearest-vertex projection of the
-tip. This keeps both modes numerically identical to the pre-refactor behavior.
+engines that track an along-path coordinate report it so ``NavigationEngine``
+can derive exact, continuous progress; engines that leave it ``None`` fall back
+to nearest-vertex progress. Deviation is always derived independently from the
+real tip position, so an along-path coordinate cannot hide lateral displacement.
 """
 
 from __future__ import annotations
@@ -45,16 +45,21 @@ class RawPose:
     tip_position: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     tip_direction: list[float] = field(default_factory=lambda: [0.0, 0.0, 1.0])
     tip_quaternion: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0, 1.0])
+    # Resultant physical contact force at the guidewire tip (N).
     contact_force: float = 0.0
+    contact_count: int = 0
     wall_distance: float = MAX_WALL_DISTANCE
+    # Positive geometric penetration beyond the lumen boundary (m).  Kept
+    # separate from contact_force so safety does not infer breach from force.
+    wall_penetration: float = 0.0
     target_position: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     joint_positions: list[float] = field(default_factory=list)
     joint_velocities: list[float] = field(default_factory=list)
     reward: float = 0.0
     done: bool = False
-    # Exact inserted arc length along the planned path (meters), or None when the
-    # engine does not track it. When set, NavigationEngine derives an exact
-    # continuous path_progress and zero deviation (the tip rides the path).
+    # Along-path arc length (meters), or None when the engine does not track it.
+    # NavigationEngine uses this only for continuous path_progress; lateral
+    # deviation is derived independently from tip_position.
     arclen: float | None = None
 
 
@@ -190,6 +195,36 @@ class PlannedPath:
 
         progress = float(self.cumlen[idx] / self.total_len)
         return progress, float(deviation)
+
+    def deviation(self, tip) -> float:
+        """Shortest distance (m) from ``tip`` to the planned polyline.
+
+        Unlike :meth:`progress_deviation`, this projects onto every line segment
+        instead of measuring to the nearest sampled vertex. It is used when an
+        engine already supplies a continuous along-path coordinate but the real
+        tip may still move laterally, as in Newton force-drive mode.
+
+        Returns 0.0 for a degenerate zero-length path, matching the established
+        missing/degenerate path behavior of :meth:`progress_deviation`.
+        """
+        if self.total_len <= 0.0 or len(self.points) < 2:
+            return 0.0
+
+        tip = np.asarray(tip, dtype=np.float64)
+        start = self.points[:-1]
+        segment = self.points[1:] - start
+        tip_offset = tip - start
+        segment_sq = np.einsum("ij,ij->i", segment, segment)
+        projection = np.zeros_like(segment_sq)
+        valid = segment_sq > 1e-18
+        projection[valid] = (
+            np.einsum("ij,ij->i", tip_offset[valid], segment[valid])
+            / segment_sq[valid]
+        )
+        projection = np.clip(projection, 0.0, 1.0)
+        closest = start + projection[:, None] * segment
+        distance_sq = np.einsum("ij,ij->i", tip - closest, tip - closest)
+        return float(np.sqrt(np.min(distance_sq)))
 
     def inner_wall_offset(self, s: float, wall_lean: float, gain: float) -> np.ndarray:
         """Offset toward the inner (concave) side of the local curve at ``s``.

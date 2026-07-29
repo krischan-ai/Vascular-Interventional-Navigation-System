@@ -28,6 +28,89 @@ from services.devices import (
 from services.physics.base import MAX_WALL_DISTANCE, PlannedPath, RawPose, quat_from_direction
 
 
+def _aggregate_rod_contact_forces(
+    body0: np.ndarray,
+    body1: np.ndarray,
+    force_on_body1: np.ndarray,
+    rod_bodies: Sequence[int],
+) -> tuple[float, int, float, int]:
+    """Aggregate vessel-on-rod forces without double-counting mesh contacts.
+
+    VBD reports the force applied to ``body1`` for each rigid contact.  Only
+    contacts with exactly one rod body are vessel/rod contacts; rod self-contact
+    and non-rod contacts are excluded.  Per-contact vectors are summed before
+    taking a norm so mesh tessellation does not inflate the displayed force.
+
+    Returns ``(tip_resultant_n, tip_contact_count, rod_resultant_n,
+    rod_contact_count)``.
+    """
+    rod = {int(body) for body in rod_bodies}
+    if not rod:
+        return 0.0, 0, 0.0, 0
+    tip = int(rod_bodies[-1])
+    tip_vector = np.zeros(3, dtype=np.float64)
+    rod_vector = np.zeros(3, dtype=np.float64)
+    tip_count = 0
+    rod_count = 0
+
+    for raw_a, raw_b, raw_force in zip(body0, body1, force_on_body1):
+        a = int(raw_a)
+        b = int(raw_b)
+        a_is_rod = a in rod
+        b_is_rod = b in rod
+        if a_is_rod == b_is_rod:
+            continue
+        force = np.asarray(raw_force, dtype=np.float64)
+        if force.shape != (3,) or not np.isfinite(force).all():
+            continue
+        rod_body = b if b_is_rod else a
+        force_on_rod = force if b_is_rod else -force
+        rod_vector += force_on_rod
+        rod_count += 1
+        if rod_body == tip:
+            tip_vector += force_on_rod
+            tip_count += 1
+
+    return (
+        float(np.linalg.norm(tip_vector)),
+        tip_count,
+        float(np.linalg.norm(rod_vector)),
+        rod_count,
+    )
+
+
+def _stabilize_contact_force(
+    raw_force_n: float,
+    previous_force_n: float,
+    *,
+    contact_count: int,
+    scale: float,
+    limit_n: float,
+    alpha: float,
+) -> tuple[float, bool]:
+    """Convert a raw VBD sample into the bounded force exposed to consumers.
+
+    VBD contact reactions are penalty-solver samples and can contain isolated
+    high-frequency spikes.  Keep the raw value in diagnostics, while the public
+    force follows an explicit calibration scale, sensor-style upper range, and
+    one-pole low-pass.  A missing/non-finite sample targets zero and therefore
+    decays instead of becoming a sticky contact.
+    """
+    raw = float(raw_force_n)
+    previous = max(0.0, float(previous_force_n))
+    valid_contact = contact_count > 0 and math.isfinite(raw) and raw > 0.0
+    target = max(0.0, raw * max(0.0, float(scale))) if valid_contact else 0.0
+    limit = max(0.0, float(limit_n))
+    saturated = limit > 0.0 and target > limit
+    if limit > 0.0:
+        target = min(target, limit)
+    blend = float(np.clip(alpha, 0.0, 1.0))
+    value = previous + blend * (target - previous)
+    if target == 0.0 and value < 1.0e-3:
+        value = 0.0
+    return float(value), saturated
+
+
 def _parallel_frames(points: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     tang = np.zeros_like(points)
     tang[:-1] = points[1:] - points[:-1]
@@ -259,6 +342,18 @@ class NewtonEngine:
         # of the stretch constraint being shocked into 80-240% strain (D4a finding).
         self._stretch = float(os.environ.get("CATHSIM_NEWTON_STRETCH", "3.0e7" if _force else "1.0e5"))
         self._contact_ke = float(os.environ.get("CATHSIM_NEWTON_CONTACT_KE", "3000000" if _force else "1000000"))
+        # The raw VBD penalty reaction remains available in diagnostics.  The
+        # public/HUD signal is explicitly scaled, range-limited and low-pass
+        # filtered so a single solver spike cannot trip control thresholds.
+        self._contact_force_scale = float(
+            os.environ.get("CATHSIM_NEWTON_CONTACT_FORCE_SCALE", "1.0")
+        )
+        self._contact_force_limit = float(
+            os.environ.get("CATHSIM_NEWTON_CONTACT_FORCE_LIMIT_N", "24.0")
+        )
+        self._contact_force_alpha = float(
+            os.environ.get("CATHSIM_NEWTON_CONTACT_FORCE_ALPHA", "0.35")
+        )
         # 软头硬身: distal `soft_tip` joints ramp from `bend` down to `tip_bend`.
         self._soft_tip = int(os.environ.get("CATHSIM_NEWTON_SOFT_TIP", "10" if _force else "0"))
         self._tip_bend = float(os.environ.get("CATHSIM_NEWTON_TIP_BEND", "2.0"))
@@ -345,6 +440,12 @@ class NewtonEngine:
         self._control = None
         self._contacts = None
         self._rod_bodies: list[int] = []
+        self._last_tip_contact_force = 0.0
+        self._last_tip_contact_force_raw = 0.0
+        self._last_tip_contact_force_saturated = False
+        self._last_tip_contact_count = 0
+        self._last_rod_contact_force = 0.0
+        self._last_rod_contact_count = 0
         self._alpha = None
         self._base_arc = None
         self._max_s_ins = 0.0
@@ -418,14 +519,14 @@ class NewtonEngine:
         """True when driving via real force transmission (D4), not the D3 anchor.
 
         In force mode the wire legitimately rides against the lumen wall, so the
-        orchestrator must judge safety on penetration (``contact_force``) rather
-        than on raw wall clearance (see ``NavigationEngine._compute_safety_status``).
+        orchestrator must judge safety on independent geometric penetration rather
+        than on contact force or raw clearance.
         """
         return self._drive == "force"
 
     @property
     def contact_ke(self) -> float:
-        """Wall contact stiffness (N/m); ``contact_force = penetration_m * ke``."""
+        """Wall contact stiffness (N/m), retained for solver configuration."""
         return self._contact_ke
 
     def _build_tube_mesh(self, newton):
@@ -673,6 +774,12 @@ class NewtonEngine:
         self._initialized = False
         self._insert_s = 0.0
         self._twist = 0.0
+        self._last_tip_contact_force = 0.0
+        self._last_tip_contact_force_raw = 0.0
+        self._last_tip_contact_force_saturated = False
+        self._last_tip_contact_count = 0
+        self._last_rod_contact_force = 0.0
+        self._last_rod_contact_count = 0
         self._ensure_initialized()
         return self._raw_pose()
 
@@ -766,12 +873,17 @@ class NewtonEngine:
         min_steps = min(max_steps, max(0, int(self._settle_min_steps)))
         check_steps = max(1, int(self._settle_check_steps))
         previous_xyz = None
+        import warp as wp
 
         for used in range(1, max_steps + 1):
+            collect_contacts = used % check_steps == 0
+            body_q_prev = wp.clone(self._solver.body_q_prev) if collect_contacts else None
             self._s0.clear_forces()
             self._model.collide(self._s0, self._contacts)
             self._solver.step(self._s0, self._s1, self._control, self._contacts, self._sim_dt)
             self._s0, self._s1 = self._s1, self._s0
+            if body_q_prev is not None:
+                self._collect_solver_contact_forces(body_q_prev)
             self._apply_glue(self._insert_s)
 
             if used % check_steps != 0:
@@ -792,7 +904,7 @@ class NewtonEngine:
         return float(_nearest_arclen(self._centerline, self._cl_cum, tip))
 
     def _breach_stats(self, xyz: np.ndarray) -> tuple[float, float, float]:
-        """Worst lumen breach plus wall-distance/contact-force for rod bodies."""
+        """Worst lumen breach, wall distance and legacy breach penalty."""
         d2 = np.sum((xyz[:, None, :] - self._centerline[None, :, :]) ** 2, axis=2)
         nearest = np.argmin(d2, axis=1)
         dist = np.sqrt(d2[np.arange(len(xyz)), nearest])
@@ -801,6 +913,54 @@ class NewtonEngine:
         wall_distance = max(0.0, -worst)
         contact_force = max(0.0, worst) * self._contact_ke
         return worst, wall_distance, contact_force
+
+    def _collect_solver_contact_forces(self, body_q_prev) -> None:
+        """Read source-backed VBD contact forces for the current solver substep."""
+        body0, body1, _point0, _point1, force_on_body1, count_array = (
+            self._solver.collect_rigid_contact_forces(
+                self._s0.body_q,
+                body_q_prev,
+                self._contacts,
+                self._sim_dt,
+            )
+        )
+        count = int(count_array.numpy()[0])
+        if count <= 0:
+            self._last_tip_contact_force_raw = 0.0
+            self._last_tip_contact_force, self._last_tip_contact_force_saturated = (
+                _stabilize_contact_force(
+                    0.0,
+                    self._last_tip_contact_force,
+                    contact_count=0,
+                    scale=self._contact_force_scale,
+                    limit_n=self._contact_force_limit,
+                    alpha=self._contact_force_alpha,
+                )
+            )
+            self._last_tip_contact_count = 0
+            self._last_rod_contact_force = 0.0
+            self._last_rod_contact_count = 0
+            return
+        tip_force, tip_count, rod_force, rod_count = _aggregate_rod_contact_forces(
+            body0.numpy()[:count],
+            body1.numpy()[:count],
+            force_on_body1.numpy()[:count],
+            self._rod_bodies,
+        )
+        self._last_tip_contact_force_raw = tip_force
+        self._last_tip_contact_force, self._last_tip_contact_force_saturated = (
+            _stabilize_contact_force(
+                tip_force,
+                self._last_tip_contact_force,
+                contact_count=tip_count,
+                scale=self._contact_force_scale,
+                limit_n=self._contact_force_limit,
+                alpha=self._contact_force_alpha,
+            )
+        )
+        self._last_tip_contact_count = tip_count
+        self._last_rod_contact_force = rod_force
+        self._last_rod_contact_count = rod_count
 
     def diagnostics(self) -> dict:
         """Human-facing Newton debug metrics streamed to the front end.
@@ -827,6 +987,9 @@ class NewtonEngine:
             "insertion_margin_m": self._insertion_margin,
             "sheath_bodies": self._sheath_bodies,
             "contact_ke": self._contact_ke,
+            "contact_force_scale": self._contact_force_scale,
+            "contact_force_limit_n": self._contact_force_limit,
+            "contact_force_alpha": self._contact_force_alpha,
             "guidewire": self._guidewire_diagnostics(),
             "support": self._support_diagnostics(self._rod_length * 1000.0),
             "procedure": self._procedure_diagnostics(),
@@ -840,7 +1003,7 @@ class NewtonEngine:
         tip_arclen = self._tip_arclen()
         fed_arclen = self._insert_s + float(self._base_arc[-1])
         slack = fed_arclen - tip_arclen
-        worst, wall_distance, contact_force = self._breach_stats(xyz)
+        worst, wall_distance, breach_penalty_force = self._breach_stats(xyz)
         wall_metrics = self._tip_wall_metrics(xyz, tip_arclen)
         torsion_lag_deg = self._torsion_lag_deg(xyz, tip_arclen)
         out.update({
@@ -853,8 +1016,15 @@ class NewtonEngine:
                 else float("inf")
             ),
             "max_breach_m": worst,
+            "wall_penetration_m": max(0.0, worst),
             "wall_distance_m": min(wall_distance, MAX_WALL_DISTANCE),
-            "contact_force": contact_force,
+            "contact_force": self._last_tip_contact_force,
+            "raw_tip_contact_force_n": self._last_tip_contact_force_raw,
+            "contact_force_saturated": self._last_tip_contact_force_saturated,
+            "contact_count": self._last_tip_contact_count,
+            "rod_contact_force_n": self._last_rod_contact_force,
+            "rod_contact_count": self._last_rod_contact_count,
+            "breach_penalty_force_n": breach_penalty_force,
             "normal_poking_score": wall_metrics["normal_poking_score"],
             "tangential_slide_score": wall_metrics["tangential_slide_score"],
             "wall_slide_state": wall_metrics["wall_slide_state"],
@@ -981,6 +1151,7 @@ class NewtonEngine:
 
     def step(self, push: float, rotate: float) -> RawPose:
         self._ensure_initialized()
+        import warp as wp
 
         direction = 1.0 if push >= 0.0 else -1.0
         prev_insert_s = self._insert_s
@@ -1000,10 +1171,14 @@ class NewtonEngine:
         for sub in range(self._substeps):
             frac = (sub + 1) / self._substeps
             s_ins = prev_insert_s + (self._insert_s - prev_insert_s) * frac
+            collect_contacts = sub == self._substeps - 1
+            body_q_prev = wp.clone(self._solver.body_q_prev) if collect_contacts else None
             self._s0.clear_forces()
             self._model.collide(self._s0, self._contacts)
             self._solver.step(self._s0, self._s1, self._control, self._contacts, self._sim_dt)
             self._s0, self._s1 = self._s1, self._s0
+            if body_q_prev is not None:
+                self._collect_solver_contact_forces(body_q_prev)
             self._apply_glue(s_ins)
 
         if (
@@ -1029,7 +1204,7 @@ class NewtonEngine:
         else:
             direction = direction / norm
 
-        worst, wall_distance, contact_force = self._breach_stats(xyz)
+        worst, wall_distance, _breach_penalty_force = self._breach_stats(xyz)
         target = self._path.points[-1].tolist()
         # Anchor mode rides the route so inserted arc is exact; force mode lets the
         # tip physically lag, so report its actual projected arc along the route.
@@ -1042,8 +1217,10 @@ class NewtonEngine:
             tip_position=[float(v) for v in tip],
             tip_direction=[float(v) for v in direction],
             tip_quaternion=quat_from_direction(direction),
-            contact_force=float(contact_force),
+            contact_force=float(self._last_tip_contact_force),
+            contact_count=int(self._last_tip_contact_count),
             wall_distance=float(min(wall_distance, MAX_WALL_DISTANCE)),
+            wall_penetration=float(max(0.0, worst)),
             target_position=[float(v) for v in target],
             joint_positions=[],
             joint_velocities=[],
@@ -1096,4 +1273,10 @@ class NewtonEngine:
         self._control = None
         self._contacts = None
         self._rod_bodies = []
+        self._last_tip_contact_force = 0.0
+        self._last_tip_contact_force_raw = 0.0
+        self._last_tip_contact_force_saturated = False
+        self._last_tip_contact_count = 0
+        self._last_rod_contact_force = 0.0
+        self._last_rod_contact_count = 0
         self._initialized = False
