@@ -79,7 +79,6 @@ RUN python -m pip install \
 COPY pyproject.toml README.md LICENSE ./
 COPY src ./src
 COPY services ./services
-COPY data ./data
 COPY reinforcement_learning ./reinforcement_learning
 COPY server ./server
 
@@ -87,11 +86,13 @@ RUN python -m pip install --no-deps --no-build-isolation . \
     && mkdir -p \
         /home/cathsim/.cache/matplotlib \
         /home/cathsim/.cache/warp \
+        /app/data/vpp_assets \
         /app/reinforcement_learning/logs \
         /app/reinforcement_learning/models \
         /app/reinforcement_learning/runs \
     && chown -R cathsim:cathsim \
         /home/cathsim/.cache \
+        /app/data/vpp_assets \
         /app/reinforcement_learning/logs \
         /app/reinforcement_learning/models \
         /app/reinforcement_learning/runs

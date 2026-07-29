@@ -13,6 +13,17 @@ release aliases start at `v1.1` and `latest`. Deployment prefers the LAN
 registry, falls back to SWR, and rejects the artifact unless both registry
 pushes produced the same `sha256:` digest.
 
+The same workflow also builds the full API, simulation, and RL training image
+from `server/Dockerfile` and publishes it to:
+
+- `swr.cn-east-3.myhuaweicloud.com/siat/cathsim-server`
+
+It receives the same `sha-<40-character-git-sha>`, `v1.1`, and `latest` tag
+scheme. The workflow verifies that all three server tags report the same
+`sha256:` digest. This full image is published for server and training use but
+is not selected by the production deployment job; production continues to use
+the smaller, independently verified simulation image.
+
 Configure `SWR_USERNAME` and `SWR_PASSWORD` as GitHub Actions secrets. Do not
 store registry credentials in this repository or in `/etc/cathsim/backend.env`.
 
@@ -51,4 +62,7 @@ The bootstrap is intentionally operator-reviewed because the current port 9000 s
 Do not store SSH, root, SWR, or runner registration credentials in this
 directory.
 
-The VPP case assets are not tracked on this branch. Both Compose files mount `CATHSIM_VPP_ASSETS_HOST` read-only at `/app/data/vpp_assets`; deployment still requires `vpp_ready=true`.
+The VPP case assets are not tracked on this branch. The images contain an empty
+`/app/data/vpp_assets` mount point rather than embedding private case data.
+Production Compose files mount `CATHSIM_VPP_ASSETS_HOST` read-only at that path;
+deployment still requires `vpp_ready=true`.

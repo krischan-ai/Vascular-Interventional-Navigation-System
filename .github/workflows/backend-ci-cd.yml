@@ -47,6 +47,7 @@ env:
   LAN_IMAGE: 192.168.1.107:5001/siat/cathsim-simulation
   SWR_REGISTRY: swr.cn-east-3.myhuaweicloud.com
   SWR_IMAGE: swr.cn-east-3.myhuaweicloud.com/siat/cathsim-simulation
+  SWR_SERVER_IMAGE: swr.cn-east-3.myhuaweicloud.com/siat/cathsim-server
   RELEASE_TAG: v1.1
 
 jobs:
@@ -94,7 +95,7 @@ jobs:
             -k "not vpp_routes_are_selectable_without_mujoco"
 
   build:
-    name: Build and publish simulation image
+    name: Build and publish backend images
     needs: test
     permissions:
       contents: read
@@ -111,6 +112,8 @@ jobs:
       lan_image: ${{ steps.image.outputs.lan_ref }}
       remote_image: ${{ steps.image.outputs.remote_ref }}
       digest: ${{ steps.publish.outputs.digest }}
+      server_image: ${{ steps.image.outputs.server_ref }}
+      server_digest: ${{ steps.publish_server.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -128,6 +131,7 @@ jobs:
         run: |
           echo "lan_ref=${LAN_IMAGE}:sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
           echo "remote_ref=${SWR_IMAGE}:sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "server_ref=${SWR_SERVER_IMAGE}:sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
       - id: publish
         name: Build once and publish both channels
@@ -157,6 +161,34 @@ jobs:
           [[ "$lan_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$remote_digest" == "$lan_digest" ]]
           echo "digest=$remote_digest" >> "$GITHUB_OUTPUT"
+
+      - id: publish_server
+        name: Build and publish full backend image to SWR
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          server_ref="${{ steps.image.outputs.server_ref }}"
+
+          docker build \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --tag "$server_ref" \
+            --tag "${SWR_SERVER_IMAGE}:${RELEASE_TAG}" \
+            --tag "${SWR_SERVER_IMAGE}:latest" \
+            --file server/Dockerfile \
+            .
+
+          sha_output="$(docker push "$server_ref")"
+          release_output="$(docker push "${SWR_SERVER_IMAGE}:${RELEASE_TAG}")"
+          latest_output="$(docker push "${SWR_SERVER_IMAGE}:latest")"
+
+          sha_digest="$(awk '/digest: sha256:/{print $3}' <<<"$sha_output" | tail -1)"
+          release_digest="$(awk '/digest: sha256:/{print $3}' <<<"$release_output" | tail -1)"
+          latest_digest="$(awk '/digest: sha256:/{print $3}' <<<"$latest_output" | tail -1)"
+          [[ "$sha_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$release_digest" == "$sha_digest" ]]
+          [[ "$latest_digest" == "$sha_digest" ]]
+          echo "digest=$sha_digest" >> "$GITHUB_OUTPUT"
 
       - name: Logout from SWR
         if: always()
