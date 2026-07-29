@@ -238,7 +238,7 @@ def remote_install_command(
             if not project.is_dir():
                 raise SystemExit(f"remote project not found: {project}")
 
-            backup = project.parent / f"{project.name}_predeploy_{ts}"
+            backup = project / "backup" / f"{project.name}_predeploy_{ts}"
             backup.mkdir(parents=True, exist_ok=True)
             for rel in ["services", "src/cathsim", "data/vpp_assets/case_001"]:
                 src = project / rel

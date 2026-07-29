@@ -9,6 +9,7 @@ made once, by data, and the orchestrator holds a single engine.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from typing import Sequence
 
 from services.physics.base import PhysicsEngine, PlannedPath
@@ -35,6 +36,7 @@ def make_engine(
     advance_per_step: float = 0.01,
     wall_lean: float = 0.0025,
     engine_mode: str | None = None,
+    newton_params: Mapping[str, object] | None = None,
 ) -> PhysicsEngine:
     """Construct the appropriate physics backend.
 
@@ -55,6 +57,7 @@ def make_engine(
             n_substeps=n_substeps,
             entry_point=entry_point,
             entry_direction=entry_direction,
+            **dict(newton_params or {}),
         )
 
     if requested in {"mujoco", "physics"}:

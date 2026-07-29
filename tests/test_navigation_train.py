@@ -44,6 +44,29 @@ class DummyPPO:
         self.saved_path = path
         Path(path).with_suffix(".zip").write_text("dummy", encoding="utf-8")
 
+    @classmethod
+    def load(cls, path, env=None, tensorboard_log=None):
+        model = cls("loaded", env, tensorboard_log=tensorboard_log)
+        model.loaded_path = path
+        return model
+
+
+class DummySAC(DummyPPO):
+    instances = []
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        DummySAC.instances.append(self)
+        self.saved_replay_buffer = None
+        self.loaded_replay_buffer = None
+
+    def save_replay_buffer(self, path):
+        self.saved_replay_buffer = path
+        Path(path).write_text("replay", encoding="utf-8")
+
+    def load_replay_buffer(self, path):
+        self.loaded_replay_buffer = path
+
 
 class DummyCheckpointCallback:
     def __init__(self, **kwargs):
@@ -59,6 +82,7 @@ class DummyEvalCallback:
 def install_fake_sb3(monkeypatch):
     sb3 = types.ModuleType("stable_baselines3")
     sb3.PPO = DummyPPO
+    sb3.SAC = DummySAC
     common = types.ModuleType("stable_baselines3.common")
     monitor = types.ModuleType("stable_baselines3.common.monitor")
     monitor.Monitor = DummyMonitor
@@ -90,6 +114,10 @@ def test_train_navigation_ppo_builds_pipeline(monkeypatch, tmp_path):
         run_name="stage0_test",
         total_timesteps=20,
         eval_episodes=2,
+        newton_rod_length=0.012,
+        newton_free_len=0.006,
+        newton_max_slack=0.006,
+        newton_insertion_margin=0.0,
         ppo_kwargs={"n_steps": 8},
     )
     model_path = train_navigation_ppo(config)
@@ -97,6 +125,13 @@ def test_train_navigation_ppo_builds_pipeline(monkeypatch, tmp_path):
     assert made[0][0] == "cathsim/NavigationGym-v0"
     assert made[0][1]["phantom"] == "aorta_tree"
     assert made[0][1]["route_target"] == "endpoint_0"
+    assert made[0][1]["physics_engine"] == "newton"
+    assert made[0][1]["newton_params"] == {
+        "rod_length": 0.012,
+        "free_len": 0.006,
+        "max_slack": 0.006,
+        "insertion_margin": 0.0,
+    }
     assert len(DummyPPO.instances) == 1
     model = DummyPPO.instances[0]
     assert model.policy == "MultiInputPolicy"
@@ -119,4 +154,65 @@ def test_make_navigation_env_uses_monitor(monkeypatch, tmp_path):
     env = make_navigation_env(config, monitor=True)
 
     assert isinstance(env, DummyMonitor)
-    assert env.filename == str(config.monitor_dir / "monitor.csv")
+    assert env.filename == str(config.monitor_dir / "train.csv")
+
+
+def test_make_navigation_env_env_kwargs_override_newton_config(monkeypatch, tmp_path):
+    import gymnasium as gym
+    from cathsim.rl.navigation_train import NavigationTrainConfig, make_navigation_env
+
+    install_fake_sb3(monkeypatch)
+    made = []
+    monkeypatch.setattr(gym, "make", lambda *args, **kwargs: made.append((args, kwargs)) or DummyEnv())
+
+    config = NavigationTrainConfig(
+        output_dir=tmp_path,
+        newton_rod_length=0.012,
+        env_kwargs={"newton_params": {"rod_length": 0.015}},
+    )
+    make_navigation_env(config, monitor=False)
+
+    assert made[0][1]["newton_params"]["rod_length"] == 0.015
+
+
+def test_train_navigation_sac_saves_replay_and_metadata(monkeypatch, tmp_path):
+    import gymnasium as gym
+    from cathsim.rl.navigation_train import NavigationTrainConfig, train_navigation
+
+    DummySAC.instances.clear()
+    install_fake_sb3(monkeypatch)
+    monkeypatch.setattr(gym, "make", lambda *_, **__: DummyEnv())
+    config = NavigationTrainConfig(
+        output_dir=tmp_path, run_name="sac_test", algorithm="sac",
+        total_timesteps=10, progress_bar=False,
+    )
+
+    model_path = train_navigation(config)
+
+    model = DummySAC.instances[-1]
+    assert model_path.exists()
+    assert model.kwargs["buffer_size"] == 100_000
+    assert model.kwargs["learning_starts"] == 1_000
+    assert model.saved_replay_buffer == str(config.model_dir / "final_replay_buffer.pkl")
+    assert (config.run_dir / "run_config.json").exists()
+    assert '"status": "completed"' in (config.run_dir / "run_status.json").read_text(encoding="utf-8")
+
+
+def test_train_navigation_resume_keeps_timestep_counter(monkeypatch, tmp_path):
+    import gymnasium as gym
+    from cathsim.rl.navigation_train import NavigationTrainConfig, train_navigation
+
+    DummyPPO.instances.clear()
+    install_fake_sb3(monkeypatch)
+    monkeypatch.setattr(gym, "make", lambda *_, **__: DummyEnv())
+    resume = tmp_path / "checkpoint.zip"
+    resume.write_text("dummy", encoding="utf-8")
+
+    train_navigation(NavigationTrainConfig(
+        output_dir=tmp_path, run_name="resume_test", total_timesteps=5,
+        resume_model=resume, progress_bar=False,
+    ))
+
+    model = DummyPPO.instances[-1]
+    assert model.loaded_path == str(resume)
+    assert model.learn_args["reset_num_timesteps"] is False
