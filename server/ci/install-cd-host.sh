@@ -37,7 +37,7 @@ if [[ ! -f /etc/cathsim/backend.env ]]; then
 fi
 
 cat >/etc/sudoers.d/cathsim-runner <<'EOF'
-Defaults!/usr/local/sbin/cathsim-deploy env_keep += "CATHSIM_IMAGE CATHSIM_IMAGE_DIGEST CATHSIM_EXPECTED_SHA CATHSIM_RUN_ID"
+Defaults!/usr/local/sbin/cathsim-deploy env_keep += "CATHSIM_IMAGE CATHSIM_IMAGE_DIGEST CATHSIM_EXPECTED_SHA CATHSIM_RUN_ID CATHSIM_ENABLE_FIRST_CUTOVER"
 cathsim-runner ALL=(root) NOPASSWD: /usr/local/sbin/cathsim-deploy
 cathsim-runner ALL=(root) NOPASSWD: /usr/local/sbin/cathsim-deploy-diagnostics
 EOF
