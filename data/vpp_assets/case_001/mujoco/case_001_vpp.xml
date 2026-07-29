@@ -1,0 +1,296 @@
+﻿<mujoco model="case_001_vpp">
+  <compiler meshdir="meshes" />
+  <default>
+    <geom type="mesh" />
+  </default>
+  <asset>
+    <mesh name="hull_0" file="case_001/hull_0.stl" />
+    <mesh name="hull_1" file="case_001/hull_1.stl" />
+    <mesh name="hull_2" file="case_001/hull_2.stl" />
+    <mesh name="hull_3" file="case_001/hull_3.stl" />
+    <mesh name="hull_4" file="case_001/hull_4.stl" />
+    <mesh name="hull_5" file="case_001/hull_5.stl" />
+    <mesh name="hull_6" file="case_001/hull_6.stl" />
+    <mesh name="hull_7" file="case_001/hull_7.stl" />
+    <mesh name="hull_8" file="case_001/hull_8.stl" />
+    <mesh name="hull_9" file="case_001/hull_9.stl" />
+    <mesh name="hull_10" file="case_001/hull_10.stl" />
+    <mesh name="hull_11" file="case_001/hull_11.stl" />
+    <mesh name="hull_12" file="case_001/hull_12.stl" />
+    <mesh name="hull_13" file="case_001/hull_13.stl" />
+    <mesh name="hull_14" file="case_001/hull_14.stl" />
+    <mesh name="hull_15" file="case_001/hull_15.stl" />
+    <mesh name="hull_16" file="case_001/hull_16.stl" />
+    <mesh name="hull_17" file="case_001/hull_17.stl" />
+    <mesh name="hull_18" file="case_001/hull_18.stl" />
+    <mesh name="hull_19" file="case_001/hull_19.stl" />
+    <mesh name="hull_20" file="case_001/hull_20.stl" />
+    <mesh name="hull_21" file="case_001/hull_21.stl" />
+    <mesh name="hull_22" file="case_001/hull_22.stl" />
+    <mesh name="hull_23" file="case_001/hull_23.stl" />
+    <mesh name="hull_24" file="case_001/hull_24.stl" />
+    <mesh name="hull_25" file="case_001/hull_25.stl" />
+    <mesh name="hull_26" file="case_001/hull_26.stl" />
+    <mesh name="hull_27" file="case_001/hull_27.stl" />
+    <mesh name="hull_28" file="case_001/hull_28.stl" />
+    <mesh name="hull_29" file="case_001/hull_29.stl" />
+    <mesh name="hull_30" file="case_001/hull_30.stl" />
+    <mesh name="hull_31" file="case_001/hull_31.stl" />
+    <mesh name="hull_32" file="case_001/hull_32.stl" />
+    <mesh name="hull_33" file="case_001/hull_33.stl" />
+    <mesh name="hull_34" file="case_001/hull_34.stl" />
+    <mesh name="hull_35" file="case_001/hull_35.stl" />
+    <mesh name="hull_36" file="case_001/hull_36.stl" />
+    <mesh name="hull_37" file="case_001/hull_37.stl" />
+    <mesh name="hull_38" file="case_001/hull_38.stl" />
+    <mesh name="hull_39" file="case_001/hull_39.stl" />
+    <mesh name="hull_40" file="case_001/hull_40.stl" />
+    <mesh name="hull_41" file="case_001/hull_41.stl" />
+    <mesh name="hull_42" file="case_001/hull_42.stl" />
+    <mesh name="hull_43" file="case_001/hull_43.stl" />
+    <mesh name="hull_44" file="case_001/hull_44.stl" />
+    <mesh name="hull_45" file="case_001/hull_45.stl" />
+    <mesh name="hull_46" file="case_001/hull_46.stl" />
+    <mesh name="hull_47" file="case_001/hull_47.stl" />
+    <mesh name="hull_48" file="case_001/hull_48.stl" />
+    <mesh name="hull_49" file="case_001/hull_49.stl" />
+    <mesh name="hull_50" file="case_001/hull_50.stl" />
+    <mesh name="hull_51" file="case_001/hull_51.stl" />
+    <mesh name="hull_52" file="case_001/hull_52.stl" />
+    <mesh name="hull_53" file="case_001/hull_53.stl" />
+    <mesh name="hull_54" file="case_001/hull_54.stl" />
+    <mesh name="hull_55" file="case_001/hull_55.stl" />
+    <mesh name="hull_56" file="case_001/hull_56.stl" />
+    <mesh name="hull_57" file="case_001/hull_57.stl" />
+    <mesh name="hull_58" file="case_001/hull_58.stl" />
+    <mesh name="hull_59" file="case_001/hull_59.stl" />
+    <mesh name="hull_60" file="case_001/hull_60.stl" />
+    <mesh name="hull_61" file="case_001/hull_61.stl" />
+    <mesh name="hull_62" file="case_001/hull_62.stl" />
+    <mesh name="hull_63" file="case_001/hull_63.stl" />
+    <mesh name="hull_64" file="case_001/hull_64.stl" />
+    <mesh name="hull_65" file="case_001/hull_65.stl" />
+    <mesh name="hull_66" file="case_001/hull_66.stl" />
+    <mesh name="hull_67" file="case_001/hull_67.stl" />
+    <mesh name="hull_68" file="case_001/hull_68.stl" />
+    <mesh name="hull_69" file="case_001/hull_69.stl" />
+    <mesh name="hull_70" file="case_001/hull_70.stl" />
+    <mesh name="hull_71" file="case_001/hull_71.stl" />
+    <mesh name="hull_72" file="case_001/hull_72.stl" />
+    <mesh name="hull_73" file="case_001/hull_73.stl" />
+    <mesh name="hull_74" file="case_001/hull_74.stl" />
+    <mesh name="hull_75" file="case_001/hull_75.stl" />
+    <mesh name="hull_76" file="case_001/hull_76.stl" />
+    <mesh name="hull_77" file="case_001/hull_77.stl" />
+    <mesh name="hull_78" file="case_001/hull_78.stl" />
+    <mesh name="hull_79" file="case_001/hull_79.stl" />
+    <mesh name="hull_80" file="case_001/hull_80.stl" />
+    <mesh name="hull_81" file="case_001/hull_81.stl" />
+    <mesh name="hull_82" file="case_001/hull_82.stl" />
+    <mesh name="hull_83" file="case_001/hull_83.stl" />
+    <mesh name="hull_84" file="case_001/hull_84.stl" />
+    <mesh name="hull_85" file="case_001/hull_85.stl" />
+    <mesh name="hull_86" file="case_001/hull_86.stl" />
+    <mesh name="hull_87" file="case_001/hull_87.stl" />
+    <mesh name="hull_88" file="case_001/hull_88.stl" />
+    <mesh name="hull_89" file="case_001/hull_89.stl" />
+    <mesh name="hull_90" file="case_001/hull_90.stl" />
+    <mesh name="hull_91" file="case_001/hull_91.stl" />
+    <mesh name="hull_92" file="case_001/hull_92.stl" />
+    <mesh name="hull_93" file="case_001/hull_93.stl" />
+    <mesh name="hull_94" file="case_001/hull_94.stl" />
+    <mesh name="hull_95" file="case_001/hull_95.stl" />
+    <mesh name="hull_96" file="case_001/hull_96.stl" />
+    <mesh name="hull_97" file="case_001/hull_97.stl" />
+    <mesh name="hull_98" file="case_001/hull_98.stl" />
+    <mesh name="hull_99" file="case_001/hull_99.stl" />
+    <mesh name="hull_100" file="case_001/hull_100.stl" />
+    <mesh name="hull_101" file="case_001/hull_101.stl" />
+    <mesh name="hull_102" file="case_001/hull_102.stl" />
+    <mesh name="hull_103" file="case_001/hull_103.stl" />
+    <mesh name="hull_104" file="case_001/hull_104.stl" />
+    <mesh name="hull_105" file="case_001/hull_105.stl" />
+    <mesh name="hull_106" file="case_001/hull_106.stl" />
+    <mesh name="hull_107" file="case_001/hull_107.stl" />
+    <mesh name="hull_108" file="case_001/hull_108.stl" />
+    <mesh name="hull_109" file="case_001/hull_109.stl" />
+    <mesh name="hull_110" file="case_001/hull_110.stl" />
+    <mesh name="hull_111" file="case_001/hull_111.stl" />
+    <mesh name="hull_112" file="case_001/hull_112.stl" />
+    <mesh name="hull_113" file="case_001/hull_113.stl" />
+    <mesh name="hull_114" file="case_001/hull_114.stl" />
+    <mesh name="hull_115" file="case_001/hull_115.stl" />
+    <mesh name="hull_116" file="case_001/hull_116.stl" />
+    <mesh name="hull_117" file="case_001/hull_117.stl" />
+    <mesh name="hull_118" file="case_001/hull_118.stl" />
+    <mesh name="hull_119" file="case_001/hull_119.stl" />
+    <mesh name="hull_120" file="case_001/hull_120.stl" />
+    <mesh name="hull_121" file="case_001/hull_121.stl" />
+    <mesh name="hull_122" file="case_001/hull_122.stl" />
+    <mesh name="hull_123" file="case_001/hull_123.stl" />
+    <mesh name="hull_124" file="case_001/hull_124.stl" />
+    <mesh name="hull_125" file="case_001/hull_125.stl" />
+    <mesh name="hull_126" file="case_001/hull_126.stl" />
+    <mesh name="hull_127" file="case_001/hull_127.stl" />
+    <mesh name="hull_128" file="case_001/hull_128.stl" />
+  </asset>
+  <worldbody>
+    <site name="endpoints_1" pos="-0.97565564 -0.21722368 0.25031761" />
+    <site name="endpoints_2" pos="-0.90776233 -0.26037671 0.39620566" />
+    <site name="endpoints_3" pos="-0.90771936 -0.26233334 0.11036095" />
+    <site name="endpoints_4" pos="-1.17102087 -0.24674849 0.24477652" />
+    <site name="endpoints_5" pos="-1.15734705 -0.25084888 0.26812244" />
+    <site name="endpoints_6" pos="-1.25394312 -0.23330309 0.21617598" />
+    <site name="endpoints_7" pos="-1.29206592 -0.21924661 0.24013234" />
+    <site name="endpoints_8" pos="-1.30431580 -0.22208078 0.26246848" />
+    <site name="endpoints_9" pos="-1.21645520 -0.22423975 0.27582574" />
+    <site name="endpoints_10" pos="-0.79187250 -0.22029068 0.22277884" />
+    <site name="endpoints_11" pos="-0.77052740 -0.21046396 0.24235225" />
+    <site name="endpoints_12" pos="-0.82207550 -0.22214305 0.26179581" />
+    <site name="endpoints_13" pos="-0.76894678 -0.23328632 0.21170306" />
+    <site name="endpoints_14" pos="-0.78496729 -0.22477074 0.29506146" />
+    <site name="endpoints_15" pos="-0.70334460 -0.21500244 0.25564326" />
+    <site name="endpoints_16" pos="-0.53067249 -0.25382115 0.22342601" />
+    <site name="endpoints_17" pos="-0.52665576 -0.24914653 0.23239810" />
+    <site name="endpoints_18" pos="-0.52871130 -0.24989865 0.27398944" />
+    <site name="endpoints_19" pos="-0.54219073 -0.23644162 0.29597104" />
+    <site name="endpoints_20" pos="-0.40793869 -0.22635368 0.19707231" />
+    <site name="endpoints_21" pos="-0.40182492 -0.23257327 0.29812061" />
+    <site name="endpoints_22" pos="0.00079031 -0.26273886 0.20875809" />
+    <site name="endpoints_23" pos="0.00060089 -0.26062344 0.19748457" />
+    <site name="endpoints_24" pos="0.00017329 -0.26824069 0.29124646" />
+    <site name="endpoints_25" pos="0.00065561 -0.26573322 0.30435474" />
+    <body name="phantom">
+      <geom mesh="hull_0" />
+      <geom mesh="hull_1" />
+      <geom mesh="hull_2" />
+      <geom mesh="hull_3" />
+      <geom mesh="hull_4" />
+      <geom mesh="hull_5" />
+      <geom mesh="hull_6" />
+      <geom mesh="hull_7" />
+      <geom mesh="hull_8" />
+      <geom mesh="hull_9" />
+      <geom mesh="hull_10" />
+      <geom mesh="hull_11" />
+      <geom mesh="hull_12" />
+      <geom mesh="hull_13" />
+      <geom mesh="hull_14" />
+      <geom mesh="hull_15" />
+      <geom mesh="hull_16" />
+      <geom mesh="hull_17" />
+      <geom mesh="hull_18" />
+      <geom mesh="hull_19" />
+      <geom mesh="hull_20" />
+      <geom mesh="hull_21" />
+      <geom mesh="hull_22" />
+      <geom mesh="hull_23" />
+      <geom mesh="hull_24" />
+      <geom mesh="hull_25" />
+      <geom mesh="hull_26" />
+      <geom mesh="hull_27" />
+      <geom mesh="hull_28" />
+      <geom mesh="hull_29" />
+      <geom mesh="hull_30" />
+      <geom mesh="hull_31" />
+      <geom mesh="hull_32" />
+      <geom mesh="hull_33" />
+      <geom mesh="hull_34" />
+      <geom mesh="hull_35" />
+      <geom mesh="hull_36" />
+      <geom mesh="hull_37" />
+      <geom mesh="hull_38" />
+      <geom mesh="hull_39" />
+      <geom mesh="hull_40" />
+      <geom mesh="hull_41" />
+      <geom mesh="hull_42" />
+      <geom mesh="hull_43" />
+      <geom mesh="hull_44" />
+      <geom mesh="hull_45" />
+      <geom mesh="hull_46" />
+      <geom mesh="hull_47" />
+      <geom mesh="hull_48" />
+      <geom mesh="hull_49" />
+      <geom mesh="hull_50" />
+      <geom mesh="hull_51" />
+      <geom mesh="hull_52" />
+      <geom mesh="hull_53" />
+      <geom mesh="hull_54" />
+      <geom mesh="hull_55" />
+      <geom mesh="hull_56" />
+      <geom mesh="hull_57" />
+      <geom mesh="hull_58" />
+      <geom mesh="hull_59" />
+      <geom mesh="hull_60" />
+      <geom mesh="hull_61" />
+      <geom mesh="hull_62" />
+      <geom mesh="hull_63" />
+      <geom mesh="hull_64" />
+      <geom mesh="hull_65" />
+      <geom mesh="hull_66" />
+      <geom mesh="hull_67" />
+      <geom mesh="hull_68" />
+      <geom mesh="hull_69" />
+      <geom mesh="hull_70" />
+      <geom mesh="hull_71" />
+      <geom mesh="hull_72" />
+      <geom mesh="hull_73" />
+      <geom mesh="hull_74" />
+      <geom mesh="hull_75" />
+      <geom mesh="hull_76" />
+      <geom mesh="hull_77" />
+      <geom mesh="hull_78" />
+      <geom mesh="hull_79" />
+      <geom mesh="hull_80" />
+      <geom mesh="hull_81" />
+      <geom mesh="hull_82" />
+      <geom mesh="hull_83" />
+      <geom mesh="hull_84" />
+      <geom mesh="hull_85" />
+      <geom mesh="hull_86" />
+      <geom mesh="hull_87" />
+      <geom mesh="hull_88" />
+      <geom mesh="hull_89" />
+      <geom mesh="hull_90" />
+      <geom mesh="hull_91" />
+      <geom mesh="hull_92" />
+      <geom mesh="hull_93" />
+      <geom mesh="hull_94" />
+      <geom mesh="hull_95" />
+      <geom mesh="hull_96" />
+      <geom mesh="hull_97" />
+      <geom mesh="hull_98" />
+      <geom mesh="hull_99" />
+      <geom mesh="hull_100" />
+      <geom mesh="hull_101" />
+      <geom mesh="hull_102" />
+      <geom mesh="hull_103" />
+      <geom mesh="hull_104" />
+      <geom mesh="hull_105" />
+      <geom mesh="hull_106" />
+      <geom mesh="hull_107" />
+      <geom mesh="hull_108" />
+      <geom mesh="hull_109" />
+      <geom mesh="hull_110" />
+      <geom mesh="hull_111" />
+      <geom mesh="hull_112" />
+      <geom mesh="hull_113" />
+      <geom mesh="hull_114" />
+      <geom mesh="hull_115" />
+      <geom mesh="hull_116" />
+      <geom mesh="hull_117" />
+      <geom mesh="hull_118" />
+      <geom mesh="hull_119" />
+      <geom mesh="hull_120" />
+      <geom mesh="hull_121" />
+      <geom mesh="hull_122" />
+      <geom mesh="hull_123" />
+      <geom mesh="hull_124" />
+      <geom mesh="hull_125" />
+      <geom mesh="hull_126" />
+      <geom mesh="hull_127" />
+      <geom mesh="hull_128" />
+    </body>
+  </worldbody>
+</mujoco>
+

@@ -92,8 +92,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--route-target", default="endpoint_0")
     parser.add_argument("--physics-engine", choices=["newton", "mujoco", "guided"], default="newton")
     parser.add_argument("--max-episode-steps", type=int, default=300)
+    parser.add_argument("--newton-rod-length", type=float)
+    parser.add_argument("--newton-free-len", type=float)
+    parser.add_argument("--newton-max-slack", type=float)
+    parser.add_argument("--newton-insertion-margin", type=float)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
+
+    newton_params = {
+        key: value
+        for key, value in {
+            "rod_length": args.newton_rod_length,
+            "free_len": args.newton_free_len,
+            "max_slack": args.newton_max_slack,
+            "insertion_margin": args.newton_insertion_margin,
+        }.items()
+        if value is not None
+    }
 
     env = gym.make(
         "cathsim/NavigationGym-v0",
@@ -102,6 +117,7 @@ def main(argv: list[str] | None = None) -> int:
         action_mode="shape_intent",
         physics_engine=args.physics_engine,
         max_episode_steps=args.max_episode_steps,
+        newton_params=newton_params,
     )
     try:
         result = evaluate_navigation_model(
@@ -111,7 +127,8 @@ def main(argv: list[str] | None = None) -> int:
         env.close()
     result.update({"model": str(args.model), "algorithm": args.algorithm,
                    "phantom": args.phantom, "route_target": args.route_target,
-                   "physics_engine": args.physics_engine})
+                   "physics_engine": args.physics_engine,
+                   "newton_params": newton_params})
     text = json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
