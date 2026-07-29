@@ -1,0 +1,13 @@
+services:
+  registry:
+    image: registry:3
+    container_name: cathsim-registry
+    restart: unless-stopped
+    ports:
+      - "192.168.1.107:5001:5000"
+    environment:
+      REGISTRY_HTTP_TLS_CERTIFICATE: /certs/registry.crt
+      REGISTRY_HTTP_TLS_KEY: /certs/registry.key
+    volumes:
+      - /opt/cathsim/registry/data:/var/lib/registry
+      - /opt/cathsim/registry/certs:/certs:ro

@@ -24,11 +24,16 @@ require_root() {
 
 validate_inputs() {
   : "${CATHSIM_IMAGE:?CATHSIM_IMAGE is required}"
+  : "${CATHSIM_IMAGE_DIGEST:?CATHSIM_IMAGE_DIGEST is required}"
   : "${CATHSIM_EXPECTED_SHA:?CATHSIM_EXPECTED_SHA is required}"
   [[ "$CATHSIM_EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] ||
     die "expected SHA must be a full 40-character commit SHA"
-  [[ "$CATHSIM_IMAGE" =~ ^ghcr\.io/krischan-ai/cathsim-centerline/simulation:sha-[0-9a-f]{40}@sha256:[0-9a-f]{64}$ ]] ||
+  [[ "$CATHSIM_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] ||
+    die "image digest is not a SHA256 digest"
+  [[ "$CATHSIM_IMAGE" =~ ^(192\.168\.1\.107:5001|swr\.cn-east-3\.myhuaweicloud\.com)/siat/cathsim-simulation:sha-[0-9a-f]{40}@sha256:[0-9a-f]{64}$ ]] ||
     die "image is outside the approved repository or is not an immutable SHA tag"
+  [[ "$CATHSIM_IMAGE" == *"@${CATHSIM_IMAGE_DIGEST}" ]] ||
+    die "image reference digest does not match CATHSIM_IMAGE_DIGEST"
 }
 
 wait_for_health() {

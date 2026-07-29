@@ -1,5 +1,21 @@
 # Backend CI/CD host integration
 
+## Image publication channels
+
+The production runner builds the simulation image once and publishes the same
+content-addressed image through both channels:
+
+- LAN: `192.168.1.107:5001/siat/cathsim-simulation`
+- Remote fallback: `swr.cn-east-3.myhuaweicloud.com/siat/cathsim-simulation`
+
+Every commit receives an immutable `sha-<40-character-git-sha>` tag. The
+release aliases start at `v1.1` and `latest`. Deployment prefers the LAN
+registry, falls back to SWR, and rejects the artifact unless both registry
+pushes produced the same `sha256:` digest.
+
+Configure `SWR_USERNAME` and `SWR_PASSWORD` as GitHub Actions secrets. Do not
+store registry credentials in this repository or in `/etc/cathsim/backend.env`.
+
 The repository workflow builds an immutable simulation image tagged with the
 full Git commit SHA. A repository-scoped self-hosted runner invokes the
 root-owned `/usr/local/sbin/cathsim-deploy` entrypoint.
@@ -31,7 +47,7 @@ root-owned `/usr/local/sbin/cathsim-deploy` entrypoint.
 
 The bootstrap is intentionally operator-reviewed because the current port 9000 service is a root-owned Conda/Uvicorn process. After that one-time cutover, deployments and rollbacks are automatic.
 
-Do not store SSH, root, GHCR, or runner registration credentials in this
+Do not store SSH, root, SWR, or runner registration credentials in this
 directory.
 
 The VPP case assets are not tracked on this branch. Both Compose files mount `CATHSIM_VPP_ASSETS_HOST` read-only at `/app/data/vpp_assets`; deployment still requires `vpp_ready=true`.

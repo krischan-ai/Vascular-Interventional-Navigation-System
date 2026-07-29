@@ -39,8 +39,10 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}/simulation
+  LAN_IMAGE: 192.168.1.107:5001/siat/cathsim-simulation
+  SWR_REGISTRY: swr.cn-east-3.myhuaweicloud.com
+  SWR_IMAGE: swr.cn-east-3.myhuaweicloud.com/siat/cathsim-simulation
+  RELEASE_TAG: v1.1
 
 jobs:
   test:
@@ -87,50 +89,73 @@ jobs:
             -k "not vpp_routes_are_selectable_without_mujoco"
 
   build:
-    name: Build immutable simulation image
+    name: Build and publish simulation image
     needs: test
     permissions:
       contents: read
-      packages: write
     if: >-
       github.event_name == 'push' ||
       (github.event_name == 'workflow_dispatch' && inputs.deploy)
-    runs-on: ubuntu-latest
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - cathsim-production
     timeout-minutes: 60
     outputs:
-      image: ${{ steps.image.outputs.ref }}
-      digest: ${{ steps.build.outputs.digest }}
+      lan_image: ${{ steps.image.outputs.lan_ref }}
+      remote_image: ${{ steps.image.outputs.remote_ref }}
+      digest: ${{ steps.publish.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
 
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/login-action@v3
+      - name: Authenticate to Huawei Cloud SWR
+        uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          registry: ${{ env.SWR_REGISTRY }}
+          username: ${{ secrets.SWR_USERNAME }}
+          password: ${{ secrets.SWR_PASSWORD }}
 
       - id: image
         shell: bash
         run: |
-          image="${REGISTRY}/${IMAGE_NAME,,}:sha-${GITHUB_SHA}"
-          echo "ref=$image" >> "$GITHUB_OUTPUT"
+          echo "lan_ref=${LAN_IMAGE}:sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "remote_ref=${SWR_IMAGE}:sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
-      - id: build
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: server/Dockerfile.simulation
-          push: true
-          tags: ${{ steps.image.outputs.ref }}
-          labels: |
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-          cache-from: type=gha,scope=cathsim-simulation
-          cache-to: type=gha,mode=max,scope=cathsim-simulation
+      - id: publish
+        name: Build once and publish both channels
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          lan_ref="${{ steps.image.outputs.lan_ref }}"
+          remote_ref="${{ steps.image.outputs.remote_ref }}"
+
+          docker build \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --tag "$lan_ref" \
+            --tag "$remote_ref" \
+            --tag "${SWR_IMAGE}:${RELEASE_TAG}" \
+            --tag "${SWR_IMAGE}:latest" \
+            --file server/Dockerfile.simulation \
+            .
+
+          lan_output="$(docker push "$lan_ref")"
+          remote_output="$(docker push "$remote_ref")"
+          docker push "${SWR_IMAGE}:${RELEASE_TAG}"
+          docker push "${SWR_IMAGE}:latest"
+
+          lan_digest="$(awk '/digest: sha256:/{print $3}' <<<"$lan_output" | tail -1)"
+          remote_digest="$(awk '/digest: sha256:/{print $3}' <<<"$remote_output" | tail -1)"
+          [[ "$lan_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$remote_digest" == "$lan_digest" ]]
+          echo "digest=$remote_digest" >> "$GITHUB_OUTPUT"
+
+      - name: Logout from SWR
+        if: always()
+        run: docker logout "${SWR_REGISTRY}" || true
 
   deploy:
     name: Deploy production
@@ -149,21 +174,38 @@ jobs:
       url: http://192.168.1.107:9000/api/v1/health
     permissions:
       contents: read
-      packages: read
     steps:
-      - name: Authenticate to GHCR
+      - name: Authenticate to Huawei Cloud SWR
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          registry: ${{ env.SWR_REGISTRY }}
+          username: ${{ secrets.SWR_USERNAME }}
+          password: ${{ secrets.SWR_PASSWORD }}
 
-      - name: Pull immutable image as runner
-        run: docker pull "${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}"
+      - id: channel
+        name: Prefer LAN registry, fall back to SWR
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          digest="${{ needs.build.outputs.digest }}"
+          lan="${{ needs.build.outputs.lan_image }}@${digest}"
+          remote="${{ needs.build.outputs.remote_image }}@${digest}"
+          if docker pull "$lan"; then
+            selected="$lan"
+            channel="lan"
+          else
+            docker pull "$remote"
+            selected="$remote"
+            channel="swr"
+          fi
+          actual="$(docker image inspect "$selected" --format '{{index .RepoDigests 0}}')"
+          [[ "$actual" == *"@${digest}" ]]
+          echo "image=$selected" >> "$GITHUB_OUTPUT"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
 
       - name: Deploy verified image
         env:
-          CATHSIM_IMAGE: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+          CATHSIM_IMAGE: ${{ steps.channel.outputs.image }}
           CATHSIM_IMAGE_DIGEST: ${{ needs.build.outputs.digest }}
           CATHSIM_EXPECTED_SHA: ${{ github.sha }}
           CATHSIM_RUN_ID: ${{ github.run_id }}
@@ -178,9 +220,9 @@ jobs:
           sudo --non-interactive /usr/local/sbin/cathsim-deploy-diagnostics \
             > "$RUNNER_TEMP/cathsim-deploy-diagnostics.txt"
 
-      - name: Logout from GHCR
+      - name: Logout from SWR
         if: always()
-        run: docker logout ghcr.io || true
+        run: docker logout "${SWR_REGISTRY}" || true
 
       - name: Upload diagnostics
         if: failure()
