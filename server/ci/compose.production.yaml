@@ -1,0 +1,30 @@
+name: cathsim-production
+
+services:
+  cathsim:
+    image: "${CATHSIM_IMAGE:?CATHSIM_IMAGE is required}"
+    pull_policy: never
+    container_name: cathsim-production
+    restart: unless-stopped
+    stop_grace_period: 30s
+    gpus: all
+    shm_size: "2gb"
+    ports:
+      - "${CATHSIM_PRODUCTION_BIND:-0.0.0.0}:${CATHSIM_PRODUCTION_PORT:-9000}:9000"
+    env_file:
+      - /etc/cathsim/backend.env
+    volumes:
+      - "${CATHSIM_VPP_ASSETS_HOST:-/home/ps/cathsim-warp/data/vpp_assets}:/app/data/vpp_assets:ro"
+    environment:
+      CATHSIM_PORT: "9000"
+      CUDA_VISIBLE_DEVICES: "${CUDA_VISIBLE_DEVICES:-0}"
+      MUJOCO_GL: egl
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,graphics
+      NVIDIA_VISIBLE_DEVICES: all
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"

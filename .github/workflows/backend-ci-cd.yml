@@ -1,0 +1,234 @@
+name: Backend CI/CD
+
+on:
+  pull_request:
+    branches:
+      - feature/backend-rl-training-framework
+    paths:
+      - "services/**"
+      - "src/cathsim/**"
+      - "data/vpp_assets/**"
+      - "server/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - ".github/workflows/backend-ci-cd.yml"
+  push:
+    branches:
+      - feature/backend-rl-training-framework
+    paths:
+      - "services/**"
+      - "src/cathsim/**"
+      - "data/vpp_assets/**"
+      - "server/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - ".github/workflows/backend-ci-cd.yml"
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: "Deploy this branch revision after CI"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-production-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  LAN_IMAGE: 192.168.1.107:5001/siat/cathsim-simulation
+  SWR_REGISTRY: swr.cn-east-3.myhuaweicloud.com
+  SWR_IMAGE: swr.cn-east-3.myhuaweicloud.com/siat/cathsim-simulation
+  RELEASE_TAG: v1.1
+
+jobs:
+  test:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install headless MuJoCo libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libosmesa6 libgl1 libglfw3
+
+      - name: Install test runtime
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            pytest numpy scipy pydantic fastapi httpx websockets PyYAML matplotlib \
+            dm-control==1.0.14 mujoco==2.3.7 pympler trimesh
+
+      - name: Compile backend
+        run: python -m compileall -q services src/cathsim
+
+      - name: Run backend contract tests
+        env:
+          MUJOCO_GL: osmesa
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+        run: |
+          python -m pytest -q \
+            tests/test_websocket.py::TestWebSocketHandlerUnit \
+            tests/test_websocket.py::TestWebSocketProtocolExtensions \
+            tests/test_navigation_engine.py \
+            tests/test_frontend_contract.py \
+            -k "not vpp_routes_are_selectable_without_mujoco"
+
+  build:
+    name: Build and publish simulation image
+    needs: test
+    permissions:
+      contents: read
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.deploy)
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - cathsim-production
+    timeout-minutes: 60
+    outputs:
+      lan_image: ${{ steps.image.outputs.lan_ref }}
+      remote_image: ${{ steps.image.outputs.remote_ref }}
+      digest: ${{ steps.publish.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Authenticate to Huawei Cloud SWR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.SWR_REGISTRY }}
+          username: ${{ secrets.SWR_USERNAME }}
+          password: ${{ secrets.SWR_PASSWORD }}
+
+      - id: image
+        shell: bash
+        run: |
+          echo "lan_ref=${LAN_IMAGE}:sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "remote_ref=${SWR_IMAGE}:sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - id: publish
+        name: Build once and publish both channels
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          lan_ref="${{ steps.image.outputs.lan_ref }}"
+          remote_ref="${{ steps.image.outputs.remote_ref }}"
+
+          docker build \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --tag "$lan_ref" \
+            --tag "$remote_ref" \
+            --tag "${SWR_IMAGE}:${RELEASE_TAG}" \
+            --tag "${SWR_IMAGE}:latest" \
+            --file server/Dockerfile.simulation \
+            .
+
+          lan_output="$(docker push "$lan_ref")"
+          remote_output="$(docker push "$remote_ref")"
+          docker push "${SWR_IMAGE}:${RELEASE_TAG}"
+          docker push "${SWR_IMAGE}:latest"
+
+          lan_digest="$(awk '/digest: sha256:/{print $3}' <<<"$lan_output" | tail -1)"
+          remote_digest="$(awk '/digest: sha256:/{print $3}' <<<"$remote_output" | tail -1)"
+          [[ "$lan_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$remote_digest" == "$lan_digest" ]]
+          echo "digest=$remote_digest" >> "$GITHUB_OUTPUT"
+
+      - name: Logout from SWR
+        if: always()
+        run: docker logout "${SWR_REGISTRY}" || true
+
+  deploy:
+    name: Deploy production
+    needs: build
+    if: >-
+      github.repository == 'krischan-ai/cathsim-centerline' &&
+      github.ref == 'refs/heads/feature/backend-rl-training-framework'
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - cathsim-production
+    timeout-minutes: 15
+    environment:
+      name: production
+      url: http://192.168.1.107:9000/api/v1/health
+    permissions:
+      contents: read
+    steps:
+      - name: Authenticate to Huawei Cloud SWR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.SWR_REGISTRY }}
+          username: ${{ secrets.SWR_USERNAME }}
+          password: ${{ secrets.SWR_PASSWORD }}
+
+      - id: channel
+        name: Prefer LAN registry, fall back to SWR
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          digest="${{ needs.build.outputs.digest }}"
+          lan="${{ needs.build.outputs.lan_image }}@${digest}"
+          remote="${{ needs.build.outputs.remote_image }}@${digest}"
+          if docker pull "$lan"; then
+            selected="$lan"
+            channel="lan"
+          else
+            docker pull "$remote"
+            selected="$remote"
+            channel="swr"
+          fi
+          actual="$(docker image inspect "$selected" --format '{{index .RepoDigests 0}}')"
+          [[ "$actual" == *"@${digest}" ]]
+          echo "image=$selected" >> "$GITHUB_OUTPUT"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy verified image
+        env:
+          CATHSIM_IMAGE: ${{ steps.channel.outputs.image }}
+          CATHSIM_IMAGE_DIGEST: ${{ needs.build.outputs.digest }}
+          CATHSIM_EXPECTED_SHA: ${{ github.sha }}
+          CATHSIM_RUN_ID: ${{ github.run_id }}
+        run: >-
+          sudo --non-interactive
+          --preserve-env=CATHSIM_IMAGE,CATHSIM_IMAGE_DIGEST,CATHSIM_EXPECTED_SHA,CATHSIM_RUN_ID
+          /usr/local/sbin/cathsim-deploy
+
+      - name: Publish diagnostics on failure
+        if: failure()
+        run: |
+          sudo --non-interactive /usr/local/sbin/cathsim-deploy-diagnostics \
+            > "$RUNNER_TEMP/cathsim-deploy-diagnostics.txt"
+
+      - name: Logout from SWR
+        if: always()
+        run: docker logout "${SWR_REGISTRY}" || true
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cathsim-deploy-${{ github.run_id }}
+          path: ${{ runner.temp }}/cathsim-deploy-diagnostics.txt
+          if-no-files-found: ignore
+          retention-days: 14

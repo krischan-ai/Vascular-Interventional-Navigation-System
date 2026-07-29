@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly STATE_DIR="/var/lib/cathsim-deploy"
+readonly CONFIG_DIR="/etc/cathsim"
+readonly COMPOSE_DIR="/opt/cathsim/compose"
+readonly LOCK_FILE="/run/lock/cathsim-deploy.lock"
+readonly CANDIDATE_PORT="${CATHSIM_CANDIDATE_PORT:-19001}"
+readonly PRODUCTION_PORT="${CATHSIM_PRODUCTION_PORT:-9000}"
+readonly HEALTH_TIMEOUT="${CATHSIM_HEALTH_TIMEOUT:-120}"
+
+log() {
+  printf '%s %s\n' "$(date --iso-8601=seconds)" "$*"
+}
+
+die() {
+  log "ERROR: $*" >&2
+  exit 1
+}
+
+require_root() {
+  [[ "$(id -u)" -eq 0 ]] || die "deployment must run as root"
+}
+
+validate_inputs() {
+  : "${CATHSIM_IMAGE:?CATHSIM_IMAGE is required}"
+  : "${CATHSIM_IMAGE_DIGEST:?CATHSIM_IMAGE_DIGEST is required}"
+  : "${CATHSIM_EXPECTED_SHA:?CATHSIM_EXPECTED_SHA is required}"
+  [[ "$CATHSIM_EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+    die "expected SHA must be a full 40-character commit SHA"
+  [[ "$CATHSIM_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] ||
+    die "image digest is not a SHA256 digest"
+  [[ "$CATHSIM_IMAGE" =~ ^(192\.168\.1\.107:5001|swr\.cn-east-3\.myhuaweicloud\.com)/siat/cathsim-simulation:sha-[0-9a-f]{40}@sha256:[0-9a-f]{64}$ ]] ||
+    die "image is outside the approved repository or is not an immutable SHA tag"
+  [[ "$CATHSIM_IMAGE" == *"@${CATHSIM_IMAGE_DIGEST}" ]] ||
+    die "image reference digest does not match CATHSIM_IMAGE_DIGEST"
+}
+
+wait_for_health() {
+  local port="$1"
+  local deadline=$((SECONDS + HEALTH_TIMEOUT))
+  local response=""
+  while ((SECONDS < deadline)); do
+    response="$(curl --silent --show-error --fail --max-time 4 \
+      "http://127.0.0.1:${port}/api/v1/health" 2>/dev/null || true)"
+    if python3 - "$response" <<'PY'
+import json
+import sys
+
+try:
+    payload = json.loads(sys.argv[1])
+except Exception:
+    raise SystemExit(1)
+raise SystemExit(
+    0 if payload.get("status") == "ok" and payload.get("vpp_ready") is True else 1
+)
+PY
+    then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+verify_container() {
+  local container="$1"
+  docker exec "$container" python server/verify_simulation.py >/dev/null
+}
+
+compose_candidate() {
+  CATHSIM_IMAGE="$CATHSIM_IMAGE" \
+    CATHSIM_CANDIDATE_PORT="$CANDIDATE_PORT" \
+    docker compose -f "$COMPOSE_DIR/compose.candidate.yaml" "$@"
+}
+
+compose_production() {
+  local image="$1"
+  shift
+  CATHSIM_IMAGE="$image" \
+    CATHSIM_PRODUCTION_PORT="$PRODUCTION_PORT" \
+    docker compose -f "$COMPOSE_DIR/compose.production.yaml" "$@"
+}
+
+cleanup_candidate() {
+  compose_candidate down --remove-orphans >/dev/null 2>&1 || true
+}
+
+rollback() {
+  local previous_image="$1"
+  [[ -n "$previous_image" ]] || die "deployment failed and no previous image is recorded"
+  log "rolling back production to $previous_image"
+  compose_production "$CATHSIM_IMAGE" down --remove-orphans || true
+  compose_production "$previous_image" up -d --remove-orphans
+  wait_for_health "$PRODUCTION_PORT" ||
+    die "rollback container failed health verification"
+  printf '%s\n' "$previous_image" >"$STATE_DIR/current-image"
+  log "rollback completed"
+}
+
+main() {
+  require_root
+  validate_inputs
+  command -v docker >/dev/null || die "docker is not installed"
+  command -v curl >/dev/null || die "curl is not installed"
+  [[ -f "$CONFIG_DIR/backend.env" ]] || die "$CONFIG_DIR/backend.env is missing"
+  [[ -f "$COMPOSE_DIR/compose.candidate.yaml" ]] ||
+    die "candidate compose file is not installed"
+  [[ -f "$COMPOSE_DIR/compose.production.yaml" ]] ||
+    die "production compose file is not installed"
+
+  mkdir -p "$STATE_DIR" "$(dirname "$LOCK_FILE")"
+  exec 9>"$LOCK_FILE"
+  flock --nonblock 9 || die "another deployment is in progress"
+
+  local previous_image=""
+  if [[ -f "$STATE_DIR/current-image" ]]; then
+    previous_image="$(<"$STATE_DIR/current-image")"
+  fi
+
+  docker image inspect "$CATHSIM_IMAGE" >/dev/null 2>&1 ||
+    die "immutable image is not present in the local Docker store"
+  local revision
+  revision="$(docker image inspect "$CATHSIM_IMAGE" \
+    --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
+  [[ "$revision" == "$CATHSIM_EXPECTED_SHA" ]] ||
+    die "image revision $revision does not match $CATHSIM_EXPECTED_SHA"
+
+  cleanup_candidate
+  trap cleanup_candidate EXIT
+  compose_candidate up -d --remove-orphans
+  wait_for_health "$CANDIDATE_PORT" || {
+    compose_candidate logs --tail 200 >&2 || true
+    die "candidate failed health verification"
+  }
+  verify_container cathsim-candidate ||
+    die "candidate failed simulation verification"
+  log "candidate verified"
+
+  if [[ ! -f "$STATE_DIR/container-production-enabled" ]]; then
+    die "production container cutover is not bootstrapped; run cathsim-deploy-bootstrap once"
+  fi
+
+  if [[ -n "$previous_image" ]]; then
+    printf '%s\n' "$previous_image" >"$STATE_DIR/previous-image"
+  fi
+
+  if ! compose_production "$CATHSIM_IMAGE" up -d --remove-orphans; then
+    rollback "$previous_image"
+    die "production compose update failed"
+  fi
+  if ! wait_for_health "$PRODUCTION_PORT"; then
+    compose_production "$CATHSIM_IMAGE" logs --tail 200 >&2 || true
+    rollback "$previous_image"
+    die "production failed health verification"
+  fi
+  if ! verify_container cathsim-production; then
+    rollback "$previous_image"
+    die "production failed simulation verification"
+  fi
+
+  printf '%s\n' "$CATHSIM_IMAGE" >"$STATE_DIR/current-image"
+  printf '%s\n' "${CATHSIM_RUN_ID:-unknown}" >"$STATE_DIR/last-run-id"
+  printf '%s\n' "$CATHSIM_EXPECTED_SHA" >"$STATE_DIR/current-commit"
+  log "production deployment completed"
+}
+
+main "$@"
