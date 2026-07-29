@@ -1,0 +1,5 @@
+# Production automation and runtime boundaries require repository-owner review.
+/.github/workflows/ @krischan-ai
+/server/ci/ @krischan-ai
+/server/Dockerfile* @krischan-ai
+/server/compose* @krischan-ai
