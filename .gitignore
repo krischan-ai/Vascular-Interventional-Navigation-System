@@ -10,7 +10,7 @@ _site
 .sass-cache
 .jekyll-metadata
 Gemfile.lock
-
+.planning/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

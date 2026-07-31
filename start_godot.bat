@@ -2,6 +2,8 @@
 setlocal
 cd /d "%~dp0"
 
+if not defined CATHSIM_SERVER_URL set "CATHSIM_SERVER_URL=ws://192.168.1.107:9000/ws/session"
+
 set "GODOT_EXE="
 for /f "delims=" %%F in ('where godot 2^>nul') do if not defined GODOT_EXE set "GODOT_EXE=%%F"
 for /f "delims=" %%F in ('where godot4 2^>nul') do if not defined GODOT_EXE set "GODOT_EXE=%%F"
@@ -23,4 +25,5 @@ pause
 echo Starting CathSim Godot client...
 echo   Godot:  %GODOT_EXE%
 echo   Project: %~dp0godot_client
-start "CathSim Godot Client" "%GODOT_EXE%" --path "%~dp0godot_client"
+echo   Backend: %CATHSIM_SERVER_URL%
+start "CathSim Godot Client" "%GODOT_EXE%" --path "%~dp0godot_client" -- --server-url=%CATHSIM_SERVER_URL%

@@ -84,6 +84,9 @@ func _ready() -> void:
 	# Allow project setting override of the endpoint.
 	if ProjectSettings.has_setting("network/config/server_url"):
 		server_url = str(ProjectSettings.get_setting("network/config/server_url"))
+	for argument in OS.get_cmdline_user_args():
+		if argument.begins_with("--server-url="):
+			server_url = argument.trim_prefix("--server-url=")
 	_connect_socket(false)
 
 

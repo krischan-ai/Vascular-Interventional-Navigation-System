@@ -1,10 +1,14 @@
 @echo off
 REM ============================================================
 REM  CathSim backend launcher  (double-click to start)
-REM  Starts the FastAPI/uvicorn server on http://localhost:9000
+REM  Starts the FastAPI/uvicorn server on http://localhost:%CATHSIM_PORT%
 REM ============================================================
 title CathSim Backend (port 9000)
 cd /d "%~dp0"
+
+REM Port 9000 is commonly occupied by local IDE port forwarding. The
+REM double-click launchers use 9001 by default; set CATHSIM_PORT to override.
+if not defined CATHSIM_PORT set "CATHSIM_PORT=9001"
 
 set "PY=%~dp0.venv\Scripts\python.exe"
 if not exist "%PY%" (
@@ -30,8 +34,8 @@ if not defined CATHSIM_NEWTON_RETURN_SETTLE_STEPS set "CATHSIM_NEWTON_RETURN_SET
 if not defined CATHSIM_NEWTON_ROTATE_SPEED set "CATHSIM_NEWTON_ROTATE_SPEED=5.0"
 
 echo Starting CathSim backend...
-echo   URL:   http://localhost:9000
-echo   Docs:  http://localhost:9000/docs
+echo   URL:   http://localhost:%CATHSIM_PORT%
+echo   Docs:  http://localhost:%CATHSIM_PORT%/docs
 echo   Python: %PY%
 echo   Warp cache: %WARP_CACHE_PATH%
 echo   Newton: %CATHSIM_NEWTON_SUBSTEPS%x%CATHSIM_NEWTON_ITERS% iterations, settle %CATHSIM_NEWTON_SETTLE_STEPS%
