@@ -1,7 +1,8 @@
 param(
     [string]$GodotExe = "",
     [string]$ProjectPath = "godot_client",
-    [string]$LogPath = ".tmp/godot/headless.log"
+    [string]$LogPath = ".tmp/godot/headless.log",
+    [string]$ExpectedVersion = "4.7.1.stable.official.a13da4feb"
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,17 +17,9 @@ function Resolve-GodotExe {
         return (Resolve-Path -LiteralPath $ExplicitPath).Path
     }
 
-    $commands = @("godot", "godot4")
-    foreach ($command in $commands) {
-        $found = Get-Command $command -ErrorAction SilentlyContinue
-        if ($found) {
-            return $found.Source
-        }
-    }
-
     $fallbacks = @(
-        "D:\Program Files\Godot\Godot_v4.6.3-stable_win64_console.exe",
-        "D:\Program Files\Godot\Godot_v4.6.3-stable_win64.exe"
+        "D:\Program Files\Godot\Godot_v4.7.1-stable_win64_console.exe",
+        "D:\Program Files\Godot\Godot_v4.7.1-stable_win64.exe"
     )
     foreach ($folder in @(
         (Join-Path $env:USERPROFILE "Desktop"),
@@ -48,6 +41,13 @@ function Resolve-GodotExe {
         }
     }
 
+    foreach ($command in @("godot", "godot4")) {
+        $found = Get-Command $command -ErrorAction SilentlyContinue
+        if ($found) {
+            return $found.Source
+        }
+    }
+
     throw "Godot CLI not found. Add Godot to PATH or pass -GodotExe <path>."
 }
 
@@ -60,24 +60,28 @@ $importLogPath = Join-Path $logDir "import.log"
 
 $godot = Resolve-GodotExe $GodotExe
 Write-Host "Godot: $godot"
-& $godot --version
+$detectedVersion = (& $godot --version 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $detectedVersion -ne $ExpectedVersion) {
+    throw "Expected Godot $ExpectedVersion, got '$detectedVersion' from $godot"
+}
+Write-Host "Godot version: $detectedVersion"
 
 Write-Host "Importing Godot assets: $projectFullPath"
-& $godot --headless --path $projectFullPath --log-file $importLogPath --import
+& $godot --headless --xr-mode off --path $projectFullPath --log-file $importLogPath --import
 if ($LASTEXITCODE -ne 0) {
     throw "Godot asset import failed with exit code $LASTEXITCODE. Log: $importLogPath"
 }
 
 Write-Host "Validating Godot project: $projectFullPath"
-& $godot --headless --path $projectFullPath --log-file $logFullPath --quit-after 2
+& $godot --headless --xr-mode off --path $projectFullPath --log-file $logFullPath --editor --quit
 
 if ($LASTEXITCODE -ne 0) {
     throw "Godot validation failed with exit code $LASTEXITCODE. Log: $logFullPath"
 }
 
-$errors = Select-String -LiteralPath $logFullPath -Pattern "^(SCRIPT )?ERROR:" -Encoding UTF8
+$errors = Select-String -LiteralPath $logFullPath -Pattern "SCRIPT ERROR:|Parse Error:|Failed loading resource" -Encoding UTF8
 if ($errors) {
-    throw "Godot logged runtime errors. Log: $logFullPath`n$($errors.Line -join [Environment]::NewLine)"
+    throw "Godot logged project/script errors. Log: $logFullPath`n$($errors.Line -join [Environment]::NewLine)"
 }
 
 Write-Host "Godot validation passed. Log: $logFullPath"

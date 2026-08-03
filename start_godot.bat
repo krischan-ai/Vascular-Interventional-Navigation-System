@@ -2,7 +2,7 @@
 setlocal
 cd /d "%~dp0"
 
-if not defined CATHSIM_SERVER_URL set "CATHSIM_SERVER_URL=ws://192.168.1.107:9000/ws/session"
+if not defined CATHSIM_SERVER_URL set "CATHSIM_SERVER_URL=ws://127.0.0.1:9000/ws/session"
 
 set "GODOT_EXE="
 for /f "delims=" %%F in ('where godot 2^>nul') do if not defined GODOT_EXE set "GODOT_EXE=%%F"

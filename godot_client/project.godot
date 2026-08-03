@@ -27,4 +27,9 @@ window/stretch/mode="canvas_items"
 
 [network]
 
-config/server_url="ws://192.168.1.107:9000/ws/session"
+config/server_url="ws://127.0.0.1:9000/ws/session"
+
+[xr]
+
+openxr/enabled=true
+shaders/enabled=true

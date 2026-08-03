@@ -745,3 +745,87 @@
 - Delivered scope:
   - 根因、目标架构、视觉语义、分阶段实现、性能预算和实际运行验收标准。
   - DSA、RL 训练、数据采集/回放继续冻结；未 commit、未 push、未上传。
+
+## 2026-08-03 PICO 4 Ultra Enterprise VR 前端开发规划重构
+- **Status:** in_progress
+- 已完整读取 `planning-with-files` 技能说明。
+- 默认用户目录中的 session-catchup 脚本不存在；改用仓库内脚本后恢复检查成功。
+- 已确认目标文档存在，并记录当前工作区已有修改，后续只编辑指定开发规划与过程记录。
+- 已完整通读 1549 行设计方案和 774 行现有开发规划，并提取技术栈、安全状态机、坐标/快照、输入、空间 UI、性能、部署和验收约束。
+- 已定位现规划的失效引用、命名漂移、里程碑依赖倒置、FOCUSED/VISIBLE 语义偏差、空间尺寸/性能档位冲突和错误章节引用。
+- 已将目标文档重构为 13 个主章节、M0–M7 八个里程碑和三组跨阶段验收/追踪机制。
+- 已修正设计依据路径、v2.0/OpenXR 1.1/Gradle 基线、FOCUSED/VISIBLE 控制语义、VR Safe 档位、空间尺寸和发布完成定义。
+- 结构扫描确认关键设计术语均被覆盖，代码围栏成对；目标文档 `git diff --check` 已通过。
+- **Status:** complete
+- 最终文档 736 行，包含 8 个里程碑、17 项正式完成清单；失效设计路径和 `VR Lite` 残留均为 0。
+- 最终 `git diff --check` 对目标文档和三份过程记录通过，仅有 Windows LF→CRLF 提示。
+- 工作区原有 `.gitignore` 修改及设计方案旧文件删除/新文件未跟踪状态保持不变；本轮产品交付只修改指定开发规划。
+- 完成记录首次补丁调用误写底层工具路径，命令未执行且未产生文件改动；已改用已验证路径完成。
+
+## 2026-08-03 PICO 4 Ultra Enterprise VR 前端验收方案重构
+- **Status:** in_progress
+- 已重新读取 `planning-with-files` 技能并使用仓库内 session-catchup 恢复上下文。
+- 已确认验收方案存在、共 852 行，并记录其 24 个主章节和当前工作区保护范围。
+- 已完整通读现有验收方案并与设计方案 v2.0、开发规划 v2.0 对照。
+- 已定位旧路径/版本、VR Lite、模块命名、Session 语义、空间尺寸、固定 90Hz/10 分钟假设和缺失测试覆盖。
+- 已更新验收方案元数据、OpenXR 1.1/Gradle/Compatibility 基线、版本矩阵、冻结参数、日志字段和“同周期归零”证据定义。
+- 已新增 M0–M7 里程碑验收门禁映射，并将后续章节顺延为第 10–25 节。
+- 已补充自动化、Session/Action、Reference Space、快照批次、统一坐标、网络线程与 Delayed 数据验收用例。
+- 已统一控制/急停用例的同周期归零语义，补充 Action、Space、发送异常和消息优先级测试。
+- 已更新空间 UI 尺寸、舒适性边界、VR Safe、设备实际刷新率、10/30 分钟稳定性和部署版本矩阵用例。
+- 已强化缺陷/总体判定、执行顺序、用例/性能/舒适性/总报告模板，并新增设计开发追踪矩阵和新版最终发布检查表。
+- 首轮结构校验发现 2 处残留“同帧”措辞和 M3 漏列 DATA-14；已统一为“同周期”并改为 DATA 全组。
+- **Status:** complete
+- 最终验收方案 973 行、26 个连续主章节、157 个唯一且分组连续的用例 ID；代码围栏成对、表格列一致。
+- 关键术语覆盖检查通过，旧路径/版本/VR Lite/旧模块名/旧尺寸/旧阈值符号/同帧措辞残留为 0。
+- `git diff --check` 通过，仅有 Windows LF→CRLF 提示；工作区原有非本任务修改保持不变。
+
+## 2026-08-03 PICO 4 Ultra Enterprise VR 前端开发规划 v3.0 同步
+- **Status:** complete
+- 已使用仓库内 `planning-with-files` 恢复上下文并核对工作区保护范围。
+- 已确认设计方案已升级为 v3.0，而开发规划仍停留在 v2.0；本轮将同步视觉基准、双影像、动态腔镜、状态语义和 M0–M8 路线。
+- 已将开发规划元数据升级为 v3.0，补齐四区空间构图、精确视觉令牌、双影像架构、本地影像状态和真实性边界。
+- 已把 M0–M7 重排为 M0–M8：视觉骨架、DSA/动态腔镜、导航/相机、控制/状态语义分别形成独立门禁。
+- 已更新持续质量门禁、端到端验收矩阵、设计追踪矩阵、最终完成定义、风险降级和变更控制。
+- 最终文档 868 行、13 个主章节、9 个里程碑、23 项正式完成清单；16 个代码围栏成对，表格无列错位，关键旧术语残留为 0。
+- `git diff --check` 对开发规划与三份过程记录通过，仅有 Windows LF→CRLF 提示；未修改验收方案、产品代码或其他用户成果。
+## 2026-08-03 PICO 4 Ultra Enterprise VR 最新设计图开发启动规划
+- **Status:** complete
+- 已完整读取 `planning-with-files` 技能说明。
+- 技能默认用户目录的 session-catchup 路径不存在；已改用仓库内脚本并成功完成恢复检查。
+- 已确认 Phase 20–22 已完成设计方案、开发规划与验收方案的 v3.0 同步；本轮新增 Phase 23，保留既有成果。
+- 已把最新设计图初步拆分为左侧影像、中央主视区、右侧导航安全、底部运动控制和双手柄交互五个域。
+- 当前未修改产品代码；后续仅在核对设计、规划和仓库现状后更新开发规划与过程记录。
+- 已通读设计方案第 1–10.1 节，确认技术路线、四区空间布局、共享核心、双影像、权威安全面板和控制坞语义。
+- 已发现设计图与安全语义的关键修正：Tab 不能让另一影像默认消失，CONNECTED/SAFE/Deadman 均不能被简化为单一布尔状态。
+- 已完整通读设计方案 1571 行，确认 Action、相机模式、急停闭环、数据契约、性能、Android 部署、A–H 路线与验收基线。
+- 已通读开发规划主要内容，确认 M0–M8 排期、质量门禁、追踪矩阵、完成定义、风险和团队节奏；下一步补读被工具输出截断的 M2–M6 段落并转入仓库现状核对。
+- 已补读 M2–M6 完整任务与门禁，并开始核对当前 Godot 项目；已确认当前没有 XR 实现引用，项目仍是单桌面入口与 Forward Plus。
+- 已追踪当前桌面前端的主控制器、WebSocket、HUD 和契约测试，形成“可复用算法/协议”与“必须拆分的桌面呈现/巨型控制器”边界。
+- 已完成本机初步环境核验：Godot 命令存在，Java 仅 8，ADB/javac/Gradle 未在 PATH；前端契约测试 3 项全部通过。
+- 深入核验发现 Godot 4.7.1 文件实际存在，但命令包装器错误指向已删除的 4.6.3；常见目录未找到 Android SDK/Studio 或 JDK 17。
+- 使用精确 4.7.1 console 路径完成版本与 headless 解析验证，项目解析通过；确认无 Vendors Plugin/addons，Android export template 仍未形成可验证基线。
+- 已将开发规划升级为 v3.1，新增第 14 节“开发启动执行包”，包含开工判断、设计图映射、Sprint 0 边界、S0-01～S0-13、10 日执行顺序、仓库迁移原则与完成定义。
+- 已将开发规划进一步升级为 v3.2，新增第 15 节“下一步开发执行计划（2026-08-03 已核验版）”，把当前仓库核验、首 72 小时任务、可提前准备但不得关闭的任务和暂不进入范围落盘。
+- 前端契约复跑：`pytest tests/test_frontend_contract.py -q` → `3 passed in 0.18s`。
+- Godot 精确版本复跑：`D:\Program Files\Godot\Godot_v4.7.1-stable_win64_console.exe --version` → `4.7.1.stable.official.a13da4feb`。
+- Godot headless editor 解析复跑：精确 4.7.1 console + `--headless --path godot_client --editor --quit` 退出码 0；仍有 Windows 根证书和用户级 editor settings 写入警告，未见项目脚本失败。
+- `git diff --check -- doc/4.前端层/PICO4_Ultra_Enterprise_VR前端开发规划.md task_plan.md findings.md progress.md` 通过，仅有 Windows LF→CRLF 提示。
+- 当前仍未修改产品代码；本轮只更新开发规划与三份持久化规划记录。下一轮可直接从 S0-01/S0-04/S0-02 开始。
+## 2026-08-03 PICO 4 Ultra Enterprise VR 前端 Sprint 0 开工
+- **Status:** in_progress
+- 已读取 `planning-with-files` 技能并使用仓库内 session-catchup 恢复上下文。
+- 已确认前一轮 Phase 23 只完成开发规划 v3.2，没有修改产品代码；当前新增 Phase 24 执行 Sprint 0。
+- 已复核开发规划 M0、第 14 节执行包和第 15 节首 72 小时顺序，确定先实施环境入口、能力审计、版本矩阵、控制/数据契约、视觉基线与零控制 XR 骨架。
+- 已记录当前工作区已有 `.gitignore`、三份 VR 方案/验收文档及规划记录修改；本轮不回退、不覆盖这些既有成果。
+- 已重新核验本机 Godot/Java/Android 工具链；Godot 4.7.1 可用，JDK 17、ADB、Gradle、Android SDK 与 4.7.1 Build Template 均未就绪，已作为外部阻断记录。
+- 已新增 `scripts/godot.ps1`，只接受精确 `4.7.1.stable.official.a13da4feb`，并修复 `scripts/validate_godot.ps1` 的失效 4.6.3 fallback 与版本断言。
+- 已在 `project.godot` 启用 OpenXR/shaders，但保留桌面 `main.tscn` 主入口。
+- 已新增独立 `scenes/xr/MainXR.tscn` 与 `scripts/xr/xr_bootstrap.gd`：包含头部、左右 Aim/Grip 跟踪节点，只发布能力/状态快照，业务控制永久中性且不引用 WebSocket 控制发送。
+- 已新增 `docs/xr/version-matrix.md`、`current-capability-audit.md`、`control-data-contract.md`、`visual-baseline.md` 和 `imaging-boundary.md`。
+- 已新增 `tests/test_xr_sprint0_contract.py`，覆盖桌面/XR 双入口、Godot 版本、零控制不变量、安全/真实性文档关键字段；待执行。
+- 最终前端+XR 契约：`6 passed in 0.29s`；WebSocket 协议回归：`44 passed in 90.38s`。
+- `scripts/validate_godot.ps1` 最终通过 Godot 4.7.1 导入与静态脚本/资源解析；受限环境根证书和用户 editor settings 写入错误保留在日志但不掩盖项目错误。
+- MainXR headless 最终 exit 0；日志明确 `runtime_unavailable`、四路 tracking=false、`deadman=false`、`controls_blocked=true`、push/rotate=0。
+- 实时桌面连接成功但 `.venv` 缺 `newton`，Session 未建立；已停止 PID 25200/35864，并在基线索引与状态台账中保留阻断。
+- `git diff --check` 通过，新增/修改范围已复核；当前 Phase 24 保持 in_progress，等待 Android/Vendors/PICO 外部依赖。

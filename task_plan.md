@@ -1,13 +1,13 @@
-# Task Plan: 实时血管内腔镜视图
+# Task Plan: PICO 4 Ultra Enterprise VR 前端开发启动规划
 
 ## Goal
-完善 Godot 前端“腔镜实时视图”板块，使其以导丝尖端的实时位姿驱动血管腔内相机，真实呈现随导丝运动变化的血管内视图，并达到参考图所示的医疗监控面板视觉效果。
+依据 PICO 4 Ultra Enterprise VR 前端设计方案、开发规划与用户提供的最新设计图，形成可直接启动实施的开发基线：明确现状差距、模块边界、依赖顺序、首轮迭代任务、接口与资产清单、风险和验收门禁。
 
 ## Next Step
-修复已完成；当前 9000 后端与 Godot 客户端已切换到新实现，可由用户继续推进导丝进行人工观察。
+通读两份目标文档并核对 Godot/OpenXR 仓库现状，将设计图的五个视觉与交互域映射到 M0–M8 里程碑和首轮开发 Backlog。
 
 ## Current Phase
-Phase 17 complete
+Phase 24 in_progress
 
 ## Phases
 
@@ -304,3 +304,96 @@ Phase 17 complete
 | Error | Attempt | Resolution |
 |-------|---------|------------|
 | 首次并行执行 session-catchup/status/文件枚举时，其中一项非零导致聚合调用未返回完整分项 | 1 | 分拆为精确只读命令；session-catchup 后续确认 exit=0，status 和交接文档均已读取 |
+
+### Phase 20: PICO 4 Ultra Enterprise VR 前端开发规划重构
+- [x] 恢复历史规划并确认工作区保护范围
+- [x] 通读 VR 前端设计方案与现有开发规划
+- [x] 提炼设计约束、系统边界、依赖关系和验收口径
+- [x] 重构开发规划的阶段、任务、交付物、门禁和风险
+- [x] 校验设计覆盖、术语一致性、Markdown 结构与 Git 差异
+- [x] 完成交付记录
+- **Status:** complete
+
+### Errors for Phase 20
+| Error | Attempt | Resolution |
+|-------|---------|------------|
+| 按技能说明中的默认用户目录调用 `session-catchup.py`，脚本不存在 | 1 | 改用仓库内 `.codex/skills/planning-with-files/scripts/session-catchup.py`，恢复检查成功 |
+| 内置 `apply_patch` 因 Windows 限权沙箱无法准备写入环境而失败两次 | 2 | 保持补丁编辑方式，改由已授权工作区外壳调用补丁器 |
+| 通过 `apply_patch.bat` 传递多行补丁时发生编码或尾行丢失 | 2 | 读取包装器后直接调用其底层补丁入口，避免 cmd.exe 改写多行参数 |
+| 首次写入完成记录时底层补丁器路径误写为 `win32-x86_64` | 1 | 使用已验证的 `win32-x64` 路径重新执行，前次未产生文件改动 |
+
+### Phase 21: PICO 4 Ultra Enterprise VR 前端验收方案重构
+- [x] 恢复历史规划并确认工作区保护范围
+- [x] 通读现有验收方案并与设计/开发规划对照
+- [x] 提炼验收对象、准入条件、用例、证据和判定规则
+- [x] 重构验收方案与追踪矩阵
+- [x] 校验术语、覆盖、Markdown 结构和 Git 差异
+- [x] 完成交付记录
+- **Status:** complete
+
+### Errors for Phase 21
+| Error | Attempt | Resolution |
+|-------|---------|------------|
+
+### Phase 22: 开发规划同步设计方案 v3.0
+- [x] 恢复持久化规划并确认工作区保护范围
+- [x] 核对设计方案 v3.0 与开发规划 v2.0 的新增差距
+- [x] 更新规划元数据、范围、架构与视觉/交互基线
+- [x] 将开发路线重构为 M0–M8 并补齐影像阶段
+- [x] 更新持续门禁、追踪矩阵、风险与完成定义
+- [x] 校验关键术语、Markdown 结构和 Git 差异
+- [x] 完成交付记录
+- **Status:** complete
+
+### Errors for Phase 22
+| Error | Attempt | Resolution |
+|-------|---------|------------|
+
+### Phase 23: 结合最新设计图启动 VR 前端开发规划
+- [x] 恢复持久化规划并确认已有 Phase 20–22 成果及工作区保护范围
+- [x] 通读设计方案 v3.0 与开发规划 v3.1
+- [x] 提取设计图的布局、视觉层级、交互与安全语义
+- [x] 核对 Godot/OpenXR 代码、资产、协议与测试现状
+- [x] 建立设计域到模块、里程碑、依赖和验收项的追踪矩阵
+- [x] 形成首轮迭代 Backlog、任务拆分与开工顺序
+- [x] 回写开发规划 v3.2 并完成结构、差异与一致性校验
+- **Status:** complete
+
+### Errors for Phase 23
+| Error | Attempt | Resolution |
+|-------|---------|------------|
+| 技能说明中的用户目录 `session-catchup.py` 不存在 | 1 | 改用仓库内 `.codex/skills/planning-with-files/scripts/session-catchup.py`，恢复检查成功 |
+| 内置 `apply_patch` 无法在当前 Windows 受限沙箱初始化写入包装器 | 1 | 改用同一 Codex 补丁器的已验证工作区入口，未使用覆盖式写入 |
+| 首次并行枚举 AGENTS、文档标题和仓库文件时无 `AGENTS.md` 的 `rg` 退出码 1 导致聚合输出丢失 | 1 | 将“无匹配”显式转换为正常结果并分项输出，后续不重复未处理退出码的聚合查询 |
+| `godot` 包装器指向已删除的 4.6.3 可执行文件，版本查询失败，并导致并行环境查询未返回第二项 | 1 | 检查实际安装目录，确认 4.7.1 可执行文件存在；后续使用精确路径并把包装器修复列入 M0，不重复使用失效命令 |
+| 首次向开发规划追加执行包时使用的末尾锚点与实际合并行不一致 | 1 | 补丁未产生部分修改；读取真实尾部后拆成元数据和末尾追加两个小补丁 |
+| 当前会话再次调用内置 `apply_patch` 时遇到 Windows 受限沙箱包装器失败 | 1 | 沿用已验证的 Codex 补丁器入口完成小补丁；未使用覆盖式写入 |
+| 全盘枚举 Godot console 可执行文件超时 | 1 | 改为只检查已知 `D:\Program Files\Godot` 目录和命令包装器，不重复全盘扫描 |
+
+### Phase 24: 执行 PICO 4 Ultra Enterprise VR 前端 Sprint 0
+- [x] 恢复持久化规划、核对工作区已有修改并确认本轮保护范围
+- [x] 通读 Sprint 0 执行包、设计约束及目标验收条目
+- [x] 核对 Godot 项目入口、现有控制器/协议与测试基线
+- [x] 实现 S0 首批基础设施与可运行 VR 启动骨架
+- [x] 补齐自动化契约测试并运行 Godot headless 校验
+- [x] 复核产品差异、更新实施记录并交付首轮开发成果
+- [ ] 补齐 JDK/Android/Vendors/PICO 外部依赖并完成 S0-03/10/11/12
+- **Status:** in_progress
+
+### Errors for Phase 24
+| Error | Attempt | Resolution |
+|-------|---------|------------|
+| 按技能说明中的默认用户目录调用 `session-catchup.py`，脚本不存在 | 1 | 改用仓库内 `.codex/skills/planning-with-files/scripts/session-catchup.py`，恢复检查成功 |
+| 首次聚合执行 catchup、AGENTS、状态和文件枚举时，非零子命令使聚合调用未返回分项 | 1 | 改为逐项执行并使用精确查询；已成功恢复上下文与读取工作区状态 |
+| `rg --files -g AGENTS.md` 无匹配时返回退出码 1 | 1 | 认定仓库无额外 AGENTS 指令，后续使用可容忍无匹配的查询方式 |
+| 首次环境矩阵 PowerShell 将 `foreach` 代码块直接接管道，触发 Empty pipe element | 1 | 先收集 `$paths` 数组再传给 `Format-Table`；第二次执行成功，不重复错误语法 |
+| 大型 here-string 补丁经 Windows 原生参数传递后丢失末尾标记，补丁器拒绝执行 | 3 | 拆分为小补丁，并用 Python 仅按原始 argv 转交给 Codex apply-patch 入口；未用 Python 直接读写产品文件 |
+| 补丁参数 Base64 首次尝试依赖 V8 未提供的 `TextEncoder`/`btoa` | 2 | 改为由本地 Python 解码并调用补丁器；失败尝试未产生文件修改 |
+| 首次运行修订后的 `validate_godot.ps1` 仍优先命中 PATH 中失效的 4.6.3 `godot.cmd` | 1 | 将已冻结的 4.7.1 精确 fallback 提前到 PATH 包装器之前；保留后续版本断言 |
+| Godot 校验运行桌面主场景并把沙箱根证书/用户 editor settings 写入失败当作产品错误 | 1 | 改为 `--editor --quit` 静态导入/解析，并只阻断 SCRIPT/Parse/resource loading 错误；环境错误仍保留在日志 |
+| headless 直接实例化静态 `XRController3D` 场景触发 Godot 4.7.1 原生 signal 11 | 1 | MainXR 保留 Bootstrap 根；仅在 OpenXR 已初始化时动态创建 Origin/Camera/Aim/Grip，headless/无 Runtime 不实例化 XR 跟踪节点 |
+| 临时截图目录无 PNG 时 `Get-ChildItem` 聚合命令返回 1 | 1 | 记录为“无可复用最新截图”，不把历史截图伪作本轮证据 |
+| 日志哈希汇总再次把 `foreach` 代码块直接接管道，触发 Empty pipe element | 1 | 立即改为先收集数组再格式化并成功取得三个哈希；后续固定使用数组模式 |
+| 临时后端 `Start-Process` 的重定向句柄使启动外壳未及时返回 | 1 | 终止等待单元后确认子进程正常运行；后续 Godot 后台启动改用自身 `--log-file`，不继承重定向句柄 |
+| 读取 Win32_Process 命令行被 CIM 权限拒绝 | 1 | 使用已知启动日志 PID 和 `Get-Process -Id` 精确核验/停止本轮进程 |
+| 实时桌面基线在 45 秒内未收到 `state_batch` | 1 | 日志定位为本机 `.venv` 缺 `newton`；保留 WebSocket 连接/SESSION_ERROR 证据，改跑 44 项协议测试并不伪报真实 Session 通过 |

@@ -25,6 +25,14 @@ godot_client/
 > 设计取舍：场景采用「最小 `.tscn` + 代码构建」，把节点装配放进 GDScript，
 > 降低手写 `.tscn`/`InputMap` 序列化出错的风险。键盘用物理按键轮询，无需自定义 InputMap。
 
+## Sprint 0 XR 零控制入口
+
+- 桌面主入口仍为 `res://scenes/main.tscn`。
+- XR 准备入口为 `res://scenes/xr/MainXR.tscn`，由 `scripts/xr/xr_bootstrap.gd` 启动。
+- 无 OpenXR Runtime 时，该入口只输出 `controls_blocked=true` 的中性快照；不会创建控制发送链路。
+- Aim/Grip 节点只在 Runtime 已初始化后创建，避免 headless/无头显环境实例化 XR 跟踪节点。
+- 当前尚无 Vendors Plugin、Action Map、Android 导出或 PICO 真机通过结论，详见 `docs/xr/sprint0-status.md`。
+
 ## 前置：生成血管/体模 GLB
 
 Godot 只能导入 glTF/GLB，无法直接读 VTK/STL。
