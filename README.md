@@ -1,515 +1,408 @@
-# 血管介入仿真数字孪生平台 - 总体技术方案
+# CathSim 血管介入仿真与智能导航平台
 
-> 版本：v2.0 | 更新日期：2026-07-08  
-> 基线来源：`doc/06`-`doc/13` 按时间持续迭代后的当前方案  
-> 核心结论：平台已从早期 “CathSim(MuJoCo) + VPP + Godot” 融合原型，演进为 **Newton 物理底座 + ShapeIntent 控制层 + HCI/RL 双模式一体化平台 + 医疗导航工作站前端**。
+CathSim 是面向血管介入导丝/导管导航研究的数字孪生仿真平台，覆盖血管资产与路径规划、Newton/MuJoCo 物理仿真、ShapeIntent 控制、FastAPI/WebSocket 服务、Godot 医疗导航工作站，以及 Gymnasium + Stable-Baselines3 训练与评估。
 
----
+> 文档基线：2026-08-04
+> 当前阶段：**主链路可运行，训练闭环和 PICO XR 客户端持续开发，物理真实性仍在迭代增强。**
+> 使用边界：本项目用于科研仿真、教学和人机交互实验，不构成真实临床控制系统、医疗器械认证或临床操作指南。
 
-## 一、项目定位
+## 项目状态
 
-本项目构建面向血管介入导丝/导管导航的高保真数字孪生仿真平台，覆盖：
-
-- **术前规划**：血管中心线、分支图、全局路径规划和目标分支选择。
-- **术中导航**：人机交互、点击导航、手动/自动/策略辅助控制和实时风险反馈。
-- **物理验证**：Newton GPU 物理导丝、真实腔碰撞、导丝力驱动、扭转/J-tip 转向和抗屈曲。
-- **训练评估**：Gymnasium/SB3 强化学习接口、会话录制回放、评分和后续 Isaac Lab 提升。
-- **医学可视化**：Godot 医疗工作站 UI、3D 玻璃血管导航视图、DSA/X-ray 风格叠加和安全 HUD。
-
-### 1.1 总体设计原则
-
-| 原则 | 当前方案 |
-|---|---|
-| 物理保真 | MuJoCo 保留为兼容/历史引擎，主线采用 Newton/Warp GPU 物理；通过 `PhysicsEngine` 协议隔离引擎实现。 |
-| 控制解耦 | Human 与 RL 均下达 `ShapeIntent`，由 `ShapeIntentController` 解算为真实 `push/rotate`，物理层保持纯物理。 |
-| 共享核心 | HCI 与 RL 共用 `NavigationEngine + ShapeIntentController + PhysicsEngine + PathPlanner`，只在入口和出口分叉。 |
-| 数据真实 | 路径、半径、碰撞、风险区必须来自真实中心线/SDF/后端字段；禁止用 mock 红色禁入区表达医学语义。 |
-| 渲染与物理解耦 | 视觉使用高质量 GLB/Shader/相机；碰撞使用 Newton/SDF/厚壁环管；两类资产分离。 |
-| 可演进 | 当前以 Newton 独立后端最快迭代；未来 RTX 渲染、Isaac Lab、ROS/数字孪生通过 Isaac Sim 提升，而非重写。 |
-
----
-
-## 二、总体架构
-
-```text
-┌──────────────────────────────────────────────────────────────────────┐
-│                         Godot 医疗导航客户端                          │
-│  HCI 入口：键盘/手柄/点击导航/形变调参                                 │
-│  可视化：医疗工作站 UI + 3D 玻璃血管 + DSA/X-ray 叠加 + HUD              │
-└───────────────────────────────┬──────────────────────────────────────┘
-                                │ WebSocket / REST
-                                ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│                         FastAPI 平台服务层                            │
-│  SessionManager / WebSocketHandler / Path API / Health / Replay        │
-│  HCI 模式：实时 session                                                │
-│  RL 模式：Gym env 进程内复用核心模块                                    │
-└───────────────────────────────┬──────────────────────────────────────┘
-                                ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│                           共享核心 Shared Core                         │
-│  ShapeIntentController                                                │
-│      ShapeIntent(target_direction / target_waypoint / intensity)       │
-│      → push / rotate                                                   │
-│  NavigationEngine                                                      │
-│      progress / deviation / curvature / risk / safety / reward fields  │
-│  PathPlanner                                                           │
-│      graph A* / route switching / B-spline smooth path                 │
-└───────────────────────────────┬──────────────────────────────────────┘
-                                ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│                         PhysicsEngine 抽象层                           │
-│  KinematicEngine    ：guided 演示/可达性                               │
-│  MuJoCoEngine       ：历史兼容/对照                                    │
-│  NewtonEngine       ：当前主线，GPU 物理导丝 + 真实腔碰撞                 │
-│  future Warp/Isaac  ：满足同一协议后灰度替换                            │
-└───────────────────────────────┬──────────────────────────────────────┘
-                                ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│                           数据与资产管线                               │
-│  VPP / 3D Slicer / VMTK → centerline / graph / routes / radius          │
-│  STL/GLB 视觉资产、SDF/厚壁环管碰撞资产、训练与回放数据                  │
-└──────────────────────────────────────────────────────────────────────┘
-```
-
-### 2.1 分层职责
-
-| 层级 | 主要模块 | 职责 |
-|---|---|---|
-| Godot 客户端 | `main_controller.gd`、`guidewire_renderer.gd`、`path_renderer.gd`、HUD/UI | 实时交互、导丝/血管/路径渲染、点击导航、参数调节、状态显示。 |
-| FastAPI 服务 | `services/main.py`、`websocket_handler.py`、`session_manager.py` | WebSocket 会话、REST API、状态流、路径请求、策略加载入口。 |
-| 控制层 | `services/shape_intent.py`、`physics_autopilot.py` | 将 Human/RL 的高层意图统一解算为底层 `push/rotate`。 |
-| 编排层 | `services/navigation_engine.py` | 统一路径、物理、风险、progress、deviation、safety、reward 派生。 |
-| 物理层 | `services/physics/base.py`、`newton_engine.py`、`mujoco_engine.py`、`kinematic_engine.py` | 引擎协议与实现；Newton 为当前高保真主线。 |
-| 路径规划 | `services/path_planner.py`、graph/routes 数据 | A* 图搜索、B-spline 平滑、分支目标切换。 |
-| 训练层 | `src/cathsim/gym/`、SB3 | Newton Navigation Gym env、PPO/SAC、curriculum、domain randomization。 |
-| 资产工具 | `tools/export_godot_assets.py` 等 | 高质量视觉 GLB、preview GLB、SDF/碰撞资产、法线/平滑/LOD。 |
-
----
-
-## 三、物理引擎基线
-
-### 3.1 当前结论
-
-早期方案以 MuJoCo 为核心，但 `aorta_trunk` 高节数导丝在单核串行 `mj_step` 下存在约 3Hz 控制延迟地板，无法靠堆硬件解决。当前主线已经切换为：
-
-- **Newton 独立后端优先**：底层仍是 Warp/CUDA，可向 Isaac Sim/Isaac Lab 提升。
-- **`PhysicsEngine` 协议隔离**：上层不依赖 Newton API，后续可灰度替换。
-- **NewtonEngine 已上线验证**：D0-D5 阶段完成，支持 60Hz 级导丝物理、真实腔碰撞、力驱动、J-tip/扭转控制、autopilot 和抗屈曲。
-
-### 3.2 PhysicsEngine 协议
-
-```python
-class PhysicsEngine(Protocol):
-    def reset(self) -> RawPose: ...
-    def step(self, push: float, rotate: float) -> RawPose: ...
-    def render_bodies(self) -> list[dict]: ...
-    def close(self) -> None: ...
-
-    @property
-    def control_timestep(self) -> float: ...
-    @property
-    def planned_path(self) -> PlannedPath: ...
-```
-
-`RawPose` 只暴露跨引擎稳定量：tip 位姿、body 位姿、接触力、壁距、目标、弧长等。`progress/deviation/curvature/risk/safety` 等派生量保留在 `NavigationEngine`，避免引擎实现污染上层算法。
-
-### 3.3 NewtonEngine 当前能力
-
-| 能力 | 状态 | 说明 |
-|---|---|---|
-| GPU 导丝物理 | 已完成 | Newton 1.3.0，实测满足 60Hz 级控制判据。 |
-| 真实腔碰撞 | 已完成 | aorta_tree 使用带半径 routes 构建变半径厚壁环管；segment_part 使用高质量网格/SDF 路线。 |
-| 上层零改接入 | 已完成 | `newton_engine.py` 实现 `PhysicsEngine`，`NavigationEngine` 和 WebSocket 协议保持稳定。 |
-| 真实力驱动 | 已完成 | 替代 D3 graded soft-anchor 的运动学过渡方案。 |
-| 扭转/J-tip 转向 | 已完成 | 与 `PhysicsAutopilot`/ShapeIntent 控制链路联动。 |
-| 抗屈曲/sheath 约束 | 已完成并验证 | 通过 slack guard 和 sheath 自动模式减少自由段柱屈曲。 |
-| 风险判定分模式 | 已完成 | force physics 模式按穿透量/接触刚度判定，避免正常贴壁误报。 |
-| 后续真实导管/sheath | 规划中 | 更真实的推送传导、软头硬身材料和导管-导丝耦合仍是后续物理主线。 |
-
-### 3.4 物理模式语义
-
-| 模式 | 引擎 | 语义 | 用途 |
+| 子系统 | 当前状态 | 已有能力 | 主要边界 |
 |---|---|---|---|
-| `guided` | `KinematicEngine` | 沿中心线运动学覆盖，低保真。 | 演示、路径可达性、前端调试。 |
-| `physics` | `NewtonEngine` | 力驱动 + 真实碰撞，高保真。 | 人机交互、算法验证、训练。 |
-| `rl` | `NewtonEngine` | 策略输出 ShapeIntent，高保真。 | 策略推理、AI 辅助驾驶。 |
-| `mujoco` | `MuJoCoEngine` | 历史兼容/对照。 | 回归、旧数据复现。 |
+| 资产与路径规划 | 已验证 | VPP/内置 phantom、中心线图、A*、B-spline、半径感知路线与质量报告 | 部分旧 phantom 仍缺完整 centerline/radius/routes |
+| 后端服务 | 已验证 | FastAPI、REST、WebSocket、session、`navigation_visual_v3`、急停锁存与恢复 | 部署实例和协议版本仍需按发布批次固定 |
+| 物理仿真 | 可运行、持续增强 | Newton GPU 导丝、变半径厚壁 SDF、MuJoCo 对照、guided 可达性模式 | 完整器械级分段、真实力/扭矩来源和跨病例标定未全部完成 |
+| 桌面医疗工作站 | 核心功能已实现 | DSA/腔镜/3D 导航布局、风险与安全状态、控制门控、相机与回放基础 | DSA 是占位/模拟输入；不代表真实机器人已连接 |
+| 强化学习 | 工程骨架已验证 | `NavigationGymEnv`、ShapeIntent/direct 动作、PPO/SAC 训练与评估入口 | 正式轨迹记录器、BC 数据转换、成规模数据与泛化证据待补齐 |
+| PICO 4 Ultra XR | 开发中 | Godot 4.7/OpenXR 工程、XR 输入快照、零控制 SafetyGate、Android 导出边界 | Debug APK 构建/静态审计已通过；build-ready 判定和真机验收尚未完成 |
+| 真实临床/机器人控制 | 不在当前范围 | 仿真协议与安全研究接口 | 无真实患者数据流、真实硬件急停或临床控制授权 |
 
----
+状态判断以代码、自动化测试、指定硬件验收记录和最新进度文档共同为准；设计方案中的目标、界面概念或实验参数不自动等同于已实现能力。
 
-## 四、控制层：ShapeIntent
+## 总体架构
 
-### 4.1 设计目标
+![血管介入导航系统前后端总体架构](docs/assets/images-cathsim/design/system-architecture-vla-safety.png)
 
-ShapeIntent 是当前平台的人机交互与强化学习统一控制抽象。它不是物理力场，不直接拉拽导丝各段位置，而是高层意图：
+*目标架构概念图：展示层、通信层、后端服务、智能策略与安全监督、控制执行及反馈闭环。图中的 VLA/自主交互属于演进方向，当前稳定控制主线仍是 ShapeIntent → Controller → push/rotate → PhysicsEngine。*
 
-```text
-Human / RL Policy
-    → ShapeIntent(target_direction | target_waypoint | intensity)
-    → ShapeIntentController
-    → push / rotate
-    → PhysicsEngine.step(push, rotate)
-```
-
-这样可以同时满足：
-
-- 手动驾驶、点击导航、自动循线、RL 策略共享同一控制接口。
-- 物理引擎只接收真实 2-DOF 控制量，不被策略层污染。
-- RL 学到的策略可直接加载到 HCI 模式作为辅助驾驶。
-
-### 4.2 ShapeIntent 数据模型
-
-```python
-@dataclass
-class ShapeIntent:
-    target_direction: np.ndarray | None = None
-    target_waypoint: np.ndarray | None = None
-    intensity: float = 1.0
-```
-
-映射关系：
-
-| 来源 | ShapeIntent |
-|---|---|
-| 鼠标点击血管/路径 | `target_waypoint` |
-| 手柄摇杆 | `target_direction` |
-| RL policy | `target_direction + intensity` 或 `waypoint_offset` |
-| 默认 autopilot | Controller 内部前视点，不需要外部 intent |
-
-### 4.3 Controller 契约
-
-`ShapeIntentController` 泛化自当前 `PhysicsAutopilot`，核心控制律包括：
-
-- look-ahead 朝向误差。
-- J-tip 方位不可观测下的爬山式旋转符号搜索。
-- 接触力门控推速。
-- stall 扫掠/回拉。
-- waypoint/方向目标 override。
-
-`intent=None` 时必须逐帧退化为原有 autopilot 行为，作为回归基线。
-
----
-
-## 五、HCI/RL 一体化平台
-
-### 5.1 双模式共享核心
+### 分层架构
 
 ```text
-HCI 模式：
-Godot → WebSocket → SessionManager → NavigationEngine → NewtonEngine → state_batch → Godot
-
-RL 模式：
-Gymnasium Env → NavigationEngine → NewtonEngine → obs/reward/done → SB3
+┌────────────────────────────────────┐     ┌─────────────────────────────────┐
+│ Godot HCI / PICO XR 交互入口       │     │ RL Policy / PPO / SAC 训练入口  │
+│ 桌面 UI / 3D / 腔镜 / HUD          │     │ headless train / evaluate       │
+│ OpenXR / Deadman / SafetyGate      │     │ Dict observation / ShapeIntent  │
+└──────────────────┬─────────────────┘     └────────────────┬────────────────┘
+                   │ WebSocket / REST                       │ Gymnasium API
+                   ▼                                        ▼
+┌────────────────────────────────────┐     ┌─────────────────────────────────┐
+│ FastAPI 平台服务适配层             │     │ NavigationGym 训练适配层        │
+│ SessionManager / WebSocketHandler  │     │ reset / step / reward / done    │
+│ Path API / Health / Recording      │     │ PPO/SAC callback / checkpoint   │
+│ 急停锁存 / 恢复 / 状态批次         │     │ 进程内复用，无需 WebSocket      │
+└──────────────────┬─────────────────┘     └────────────────┬────────────────┘
+                   └────────────────────────┬───────────────┘
+                                            ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│                           共享核心 Shared Core                              │
+│  PathPlanner            graph A* / route switching / B-spline / radii      │
+│  ShapeIntentController  target direction / waypoint / intensity            │
+│                         → push / rotate                                     │
+│  NavigationEngine       progress / deviation / curvature / mechanics       │
+│  Safety & Risk          safety status / risk / control gate / flow guidance│
+└───────────────────────────────┬────────────────────────────────────────────┘
+                                ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│                         PhysicsEngine 抽象层                                │
+│  KinematicEngine  guided 演示与可达性验证                                  │
+│  MuJoCoEngine     原始 CathSim 兼容与物理对照                              │
+│  NewtonEngine     当前 GPU 高保真主线：导丝、SDF 腔碰撞、分段与支撑诊断     │
+└───────────────────────────────┬────────────────────────────────────────────┘
+                                ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│                           数据、资产与证据层                                │
+│  VPP / 3D Slicer / VMTK → centerline / graph / routes / radius             │
+│  STL/GLB 视觉资产 | SDF/厚壁环管碰撞资产 | session/trajectory/评估报告      │
+└────────────────────────────────────────────────────────────────────────────┘
 ```
 
-两种模式共享：
+其中 HCI/XR 通过 FastAPI 实时服务进入共享核心；RL 训练为提高采样效率，可在 Python 进程内直接复用 `NavigationEngine`、`ShapeIntentController` 和 `PhysicsEngine`，不要求经过 WebSocket。两条入口最终必须遵守相同的动作、安全和保真度语义。
 
-- 同一 `NewtonEngine`。
-- 同一 `ShapeIntentController`。
-- 同一 `NavigationState`。
-- 同一 `PathPlanner` 和中心线/半径/分支图资产。
-
-### 5.2 HCI 模式
-
-| 交互 | 消息/API | 行为 |
-|---|---|---|
-| 键盘/手柄 | `control(delta_push, delta_rotate)` | 手动直通或更新 latest input。 |
-| 点击导航 | `shape_intent(target_waypoint)` | 自动朝目标 waypoint 推进。 |
-| ESC/手动介入 | `shape_intent(active=false)` | 退出自动控制。 |
-| 分支切换 | `select_route(target)` | 切换 `routes.json` 目标并重建 planned path。 |
-| 形变调参 | `engine_params` | 在线调整 sheath、slack、刚度等参数。 |
-| 状态流 | `state_batch` | bodies/path/tip/safety/seq/t_phys。 |
-
-### 5.3 RL 模式
-
-近期目标是新增 Newton Navigation Gym env，复用现有 wrappers 和 SB3 管线。
-
-| 项 | 方案 |
-|---|---|
-| Observation | tip 位姿、方向、progress、deviation、contact_force、wall_distance、curvature、risk、局部 tangent 等。 |
-| Action | 推荐 `ShapeIntent`：`desired_direction(3) + intensity(1)`；保留 `direct push/rotate` baseline。 |
-| Reward | 以 `Δprogress` 为主项，加对齐奖励、接触/风险惩罚、到达/失败终止。 |
-| Curriculum | `endpoint_0 → endpoint_9 → endpoint_3 → 多目标/全树`。 |
-| 并行 | 近期多进程；远期提升到 Isaac Lab 千环境。 |
-
-### 5.4 模式显式化
-
-所有 API/HUD/state_batch 必须明确当前模式：
+### 核心数据流
 
 ```text
-guided | physics | rl
+血管影像 / STL / VTK / 中心线 / 半径
+                    │
+                    ▼
+         资产转换与 PathPlanner
+       graph + A* + B-spline + routes
+                    │
+         ┌──────────┴──────────┐
+         ▼                     ▼
+Godot HCI / PICO XR      NavigationGym + PPO/SAC
+         │                     │
+         └──────────┬──────────┘
+                    ▼
+        ShapeIntentController
+             push / rotate
+                    │
+                    ▼
+ NavigationEngine + Safety/Risk
+                    │
+                    ▼
+ PhysicsEngine: Newton / MuJoCo / Kinematic
+                    │
+                    ▼
+ navigation_visual_v3 / session recording / evaluation
 ```
 
-避免把低保真 guided 演示误当作真实物理，也避免把正常贴壁误判为穿壁。
+### 模块职责
 
----
+| 层级 | 主要模块 | 职责与边界 |
+|---|---|---|
+| 桌面交互 | `godot_client/scenes/main.tscn`、`main_controller.gd`、HUD/UI | 医疗工作站显示、键鼠/点击输入、导丝/血管/路径渲染和状态反馈 |
+| XR 交互 | `MainXR.tscn`、XR input snapshot、`SafetyGate` | OpenXR 生命周期、空间 UI、手柄输入与客户端同周期归零；当前仍处安全骨架阶段 |
+| 平台服务 | `services/main.py`、`websocket_handler.py`、`session_manager.py` | REST/WebSocket、实时会话、状态批次、路径请求、急停锁存与恢复 |
+| 训练适配 | `src/cathsim/gym/envs/navigation.py`、`navigation_train.py` | 将共享核心包装为 Gymnasium 环境，管理 observation、action、reward、episode 和训练产物 |
+| 路径规划 | `services/path_planner.py`、graph/routes/radius 资产 | A*、路线切换、B-spline 平滑、路径半径和质量验证 |
+| 控制抽象 | `services/shape_intent.py`、`physics_autopilot.py` | 将 Human/RL 的方向、路点与强度意图解算为底层 `push/rotate` |
+| 导航编排 | `services/navigation_engine.py` | 汇总物理、路径、进度、偏差、曲率、器械诊断、风险与流程状态 |
+| 安全与风险 | `risk_assessor.py`、控制门控、`flow_guidance` | 产生后端权威安全状态、风险原因和流程建议；不允许前端补造 |
+| 物理抽象 | `services/physics/` | 在统一接口后提供 Newton、MuJoCo 与 Kinematic 实现并声明保真度 |
+| 数据与证据 | `data/`、`tools/`、session/trajectory/report | 管理病例、视觉/碰撞资产、训练记录、质量报告和验收证据 |
 
-## 六、路径规划与血管图
+核心原则：
 
-### 6.1 segment_part 图规划结论
+- HCI 与 RL 共用路径、状态、控制抽象和物理接口，避免维护两套行为语义。
+- 策略或用户只提交高层意图或 `push/rotate`，不得直接改写导丝节点位置。
+- `guided` 只用于演示和可达性验证，不能冒充 Newton 物理结果。
+- 风险、安全、力和设备状态必须可追溯到真实后端字段；缺失时显示 `unknown`、`stale` 或 `null`。
+- 渲染资产与碰撞/SDF 资产分离，视觉效果不能改变物理或医学语义。
 
-`doc/06` 的核心结论是：单条 B 样条中心线不能支撑多分支导航和 sim2real 平滑推进，应从 `segment_part.stl` 或分割体中提取完整中心线图：
+## 快速开始
+
+### 1. 环境准备
+
+基础开发环境：
+
+- Python 3.10+
+- Windows PowerShell（当前主要开发环境）
+- Godot 4.7.x（桌面与 XR 项目基线）
+- 可选：Newton/Warp GPU 环境、PICO 4 Ultra Enterprise 与 Android 工具链
+
+```powershell
+python -m venv .venv
+..venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e .
+```
+
+`pyproject.toml` 是 Python 依赖版本的当前入口。Newton/Warp、Android 和 PICO 环境需要额外配置，分别参见后端物理与 XR 文档。
+
+### 2. 启动后端
+
+推荐先使用与 Godot 默认配置一致的 `9000` 端口：
+
+```powershell
+$env:CATHSIM_PORT="9000"
+python -m services.main
+```
+
+验证服务：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:9000/api/v1/health
+```
+
+启动后可访问：
+
+- OpenAPI：`http://127.0.0.1:9000/docs`
+- REST：`http://127.0.0.1:9000/api/v1/...`
+- WebSocket：`ws://127.0.0.1:9000/ws/session`
+
+`start_backend.bat` 为避免本机端口冲突默认使用 `9001`，而 Godot 默认连接 `9000`。若使用批处理脚本，应显式统一两端：
+
+```powershell
+# 终端 1
+$env:CATHSIM_PORT="9001"
+.start_backend.bat
+
+# 终端 2
+$env:CATHSIM_SERVER_URL="ws://127.0.0.1:9001/ws/session"
+.start_godot.bat
+```
+
+### 3. 启动 Godot 桌面客户端
+
+```powershell
+.start_godot.bat
+```
+
+也可以使用 Godot 4.7 打开 `godot_client/project.godot` 后按 F5。桌面入口是 `res://scenes/main.tscn`，Android/XR 构建使用 `res://scenes/xr/MainXR.tscn`。
+
+### 4. 运行核心回归
+
+```powershell
+python -m pytest `
+  tests/test_services_api.py `
+  tests/test_navigation_gym_env.py `
+  tests/test_navigation_train.py `
+  tests/test_frontend_contract.py `
+  tests/test_xr_sprint0_contract.py -q
+```
+
+完整测试集包含需要可选资产、MuJoCo、Newton/Warp、Godot 或真机环境的测试，运行前应先确认对应依赖。
+
+## 运行模式与保真度
+
+| 模式 | 实现 | 用途 | 不可声称的能力 |
+|---|---|---|---|
+| `newton` / `newton_demo` | `NewtonEngine` | 当前 GPU 高保真主线、SDF 碰撞、导丝力学与训练 | 未标定场景不能直接外推为临床真实性 |
+| `mujoco` / `physics` | `MuJoCoEngine` | 原始 CathSim 兼容、回归与物理对照 | 不代表当前 Newton 主线结果 |
+| `guided` / `kinematic` | `KinematicEngine` | 中心线循路演示、可达性和前端验证 | 不产生完整真实接触/屈曲语义，不得混入物理训练数据 |
+| `rl` | NavigationGym + policy | 进程内训练或策略推理的上层模式 | 仍必须明确底层实际使用的物理引擎和安全门控 |
+
+会话可通过 `physics_engine` 显式选择后端，也可用 `CATHSIM_PHYSICS_ENGINE` 配置。客户端和实验记录必须保存 `engine`、`fidelity_mode`、phantom、route、代码版本和物理参数。
+
+## 资产与路径规划
+
+主要资产来源：
+
+- CathSim 内置 phantom：`src/cathsim/dm/components/phantom_assets/`
+- VPP 外部病例：`data/vpp_assets/<case_id>/`
+- Godot 视觉资产：`godot_client/assets/models/`
+- 路径与质量工具：`tools/`
+
+当前代表性基线：
+
+| 资产 | 当前用途 | 状态说明 |
+|---|---|---|
+| `aorta_tree` | Newton 主场景、18 条 endpoint route、训练 curriculum | 内置多路线主资产 |
+| `aorta_trunk` | 单路线与低难度基线 | 适合物理/控制对照 |
+| `segment_part` | 中心线图、分支规划与 wrong-branch/recovery 研究 | 复杂图质量仍需持续验收 |
+| `case_001` | VPP 外部病例、25 条可达路线、半径感知规划 | `endpoints_24/25` 应按特殊路线处理 |
+
+VPP 资产校验与视觉导出示例：
+
+```powershell
+python tools/validate_vpp_assets.py data/vpp_assets/case_001
+python tools/export_godot_assets.py --case-id case_001 --quality visual_high
+python tools/build_route_quality_report.py data/vpp_assets/case_001 --no-smooth
+```
+
+## 后端、协议与安全
+
+后端入口为 `services/main.py`。主要接口：
+
+| 类型 | 路径/消息 | 用途 |
+|---|---|---|
+| REST | `GET /api/v1/health` | 服务健康检查 |
+| REST | `GET /api/v1/assets/cases` | 病例/资产清单 |
+| REST | `POST /api/v1/path/plan` | 路径规划 |
+| REST | `/api/v1/session/...` | 会话创建、查询、步进、重置和删除 |
+| WebSocket | `/ws/session` | 实时控制、状态批次、路径切换、急停与恢复 |
+
+前后端统一使用 `navigation_visual_v3`。关键消息包括：
+
+- 客户端到服务端：`session_start`、`control`、`shape_intent`、`path_request`、`select_route`、`reset`、`emergency_stop`、`resume`。
+- 服务端到客户端：`session_started`、`state_update`、`state_batch`、`path_response`、`control_rejected` 和急停/恢复确认。
+
+安全结论由后端权威状态产生。前端可以做同周期归零、数据新鲜度和控制权限门控，但不得依据屏幕颜色或局部曲率重新推导一套安全状态。
+
+## Godot 医疗导航前端
+
+![医疗导航工作站界面设计](docs/assets/images-cathsim/design/medical-navigation-workstation-ui.png)
+
+*桌面工作站设计：DSA 影像区、3D 血管导航、导航与安全数据、运动控制和告警。当前 DSA 内容属于占位/模拟边界，3D 血管、路径、导丝和安全数据由项目资产及后端状态驱动。*
+
+桌面端当前包含：
+
+- 顶部系统、模式、进度、半径、曲率、壁距、风险和急停状态；
+- DSA、动态腔镜和 3D 玻璃血管导航视图；
+- 路径、目标、导丝、风险/安全状态与导航相机；
+- 手动控制、点击导航、自动控制、急停锁存/恢复和会话重连；
+- 深色医疗工业风 UI，以及真实数据缺失时的 stale/unknown 显示。
+
+程序化腔镜材质用于增强仿真可读性，不是患者真实黏膜纹理或诊断影像。
+
+## PICO 4 Ultra Enterprise XR
+
+![VR 血管介入导航交互设计](docs/assets/images-cathsim/design/vr-navigation-workspace.png)
+
+*XR 目标构图：中央血管与导丝、左侧双影像、右侧安全导航面板、下方控制坞和双手柄交互。该图是产品与视觉基准，不是当前完成度截图。*
+
+技术基线：Godot 4.7.1、OpenXR 1.1、匹配的 Vendors Plugin、PICO OpenXR Runtime、Android arm64 APK。
+
+当前仓库已建立桌面/XR 双入口、只读 XR 输入快照、零控制 SafetyGate、PICO profile 和 Android 导出边界。M1-R4 Debug APK 构建与静态审计已经通过；M1 build-ready 判定、APK 真机安装和功能/安全/性能验收仍按后续里程碑推进。
+
+环境预检与 Debug APK 构建：
+
+```powershell
+.\scripts\check_android_env.ps1
+.\scripts\build_android_pico_debug.ps1
+.\scripts\audit_android_pico_apk.ps1
+```
+
+第一版明确不包含真实机器人控制、真实 DSA/腔镜硬件流、VR 内启动 RL 训练、MR 透视、多人协作、语音控制和手势连续操控。
+
+## 强化学习训练
+
+当前新主线：
 
 ```text
-segment_part.stl / segmentation
-    → voxelize + skeletonize
-    → junction/endpoints
-    → branch clustering
-    → per-branch downsample + B-spline smooth
-    → graph.json + centerline_branch_*.json
-    → NavigationEngine.plan_to_target()
+cathsim/NavigationGym-v0
+  → NavigationGymEnv
+  → NavigationEngine
+  → ShapeIntentController
+  → NewtonEngine / MuJoCoEngine / KinematicEngine
+  → PPO 或 SAC
 ```
 
-### 6.2 路径数据格式
+训练入口支持 `shape_intent` 与 `direct` 两种动作模式。推荐策略接口是四维 ShapeIntent：`[direction_x, direction_y, direction_z, intensity]`；`direct=[push, rotate]` 主要用于消融和可达性对照。
 
-| 资产 | 用途 |
-|---|---|
-| `centerline.json` | 主路径、渲染、progress/deviation 投影。 |
-| `centerlines/*.json` | 分支中心线。 |
-| `graph.json` | A* 拓扑图。 |
-| `routes.json` | aorta_tree 多目标路径及半径 `radius_m`。 |
-| `visual.stl/glb` | 渲染资产。 |
-| `Segmentation.seg.nrrd` / SDF | 碰撞/距离场资产。 |
+先运行环境与训练管线测试：
 
-### 6.3 规划服务
-
-`PathPlanner` 负责：
-
-- 起终点映射到图节点。
-- A* / Dijkstra 搜索。
-- B-spline 平滑。
-- 生成 `PlannedPath`，提供弧长、局部 tangent、半径插值。
-- 支持分支切换后通知 `NewtonEngine.set_path()` 重建内部几何。
-
----
-
-## 七、风险与安全体系
-
-### 7.1 状态等级
-
-| 状态 | 语义 |
-|---|---|
-| `STANDBY` | 会话启动/复位，未开始控制。 |
-| `SAFE_NAV` | 正常导航。 |
-| `DANGER_WARNING` | 接近阈值或轻度穿透/风险升高，允许受控调整。 |
-| `COLLISION_STOP` | 严重穿透/碰撞/越界，禁止继续推进或触发回退。 |
-
-### 7.2 模式化风险判定
-
-| 模式 | 判定依据 |
-|---|---|
-| guided | 以 wall distance、路径偏差、曲率、速度等启发式为主。 |
-| Newton force physics | 以 `contact_force / contact_ke` 推算穿透量，正常贴壁不应全程报 `COLLISION_STOP`。 |
-| 后续真实 risk_regions | 必须携带 `source`、空间位置和类型字段；前端只渲染真实来源。 |
-
-### 7.3 真实风险区契约
-
-前端只接受后端真实空间风险字段：
-
-```json
-{
-  "id": "stenosis_001",
-  "level": "warning|danger",
-  "kind": "stenosis|collision|no_go|high_curvature",
-  "center": [0.0, 0.0, 0.0],
-  "radius": 0.008,
-  "orientation": [0.0, 0.0, 0.0, 1.0],
-  "extent": [0.008, 0.008, 0.008],
-  "source": "sdf|annotation|planner"
-}
+```powershell
+python -m pytest tests/test_navigation_gym_env.py tests/test_navigation_train.py -q
+python -m cathsim.rl.navigation_train --help
+python -m cathsim.rl.navigation_evaluate --help
 ```
 
-缺少 `source` 或空间字段的 placeholder 不得渲染成红色/橙色体积。
+单路线 PPO 示例：
 
----
-
-## 八、前端总体方案
-
-### 8.1 医疗导航工作站 UI
-
-Godot 前端应从调试 HUD 演进为医疗机器人导航工作站：
-
-```text
-1920x1080
-├─ TopStatusBar      机器人状态 / 导航模式 / 路径进度 / 半径 / 曲率 / 壁距 / 风险 / 急停
-├─ MainWorkspace
-│  ├─ DSA 实时影像区  灰度医学影像 + 导管/路径/目标/图例/工具栏叠加
-│  └─ 右侧导航区
-│     ├─ 3D 血管导航  玻璃血管 + 导丝 + 路径 + 相机工具
-│     └─ 导航安全数据 2x4 数据卡
-└─ BottomControlBar  系统状态 / 机器人连接 / 运动控制 / 日志 / 告警
+```powershell
+python -m cathsim.rl.navigation_train `
+  --algorithm ppo `
+  --run-name stage0_endpoint0_seed0 `
+  --phantom aorta_tree `
+  --route-target endpoint_0 `
+  --action-mode shape_intent `
+  --physics-engine newton `
+  --total-timesteps 100000 `
+  --seed 0
 ```
 
-视觉基调：
+训练结果不能只看累计奖励。至少同时报告成功率、终止原因、最终/最大进度、接触峰值与积分、碰撞/超时/错误分支、不同 seed 离散程度和未见几何表现。
 
-- 深色医疗工业风。
-- 面板色 `#101A26`，背景 `#071019`。
-- 强调蓝 `#2F8CFF`，安全绿 `#4EE66B`，警告黄 `#FFD447`，危险红 `#FF4D4F`。
-- 禁止默认 Godot 灰色控件、emoji 图标和游戏 HUD 风格。
+当前旧 `src/cathsim/rl/train.py`、`bc.py` 和 `data.py` 保留为 MuJoCo/图像研究基线；在数据转换器和闭环测试完成前，不应把旧 BC 权重直接当作 NavigationGym + ShapeIntent 主线模型。
 
-### 8.2 3D 玻璃血管导航
+## 仓库结构
 
-`doc/12-13` 的当前方向：
-
-| 主题 | 方案 |
+| 路径 | 职责 |
 |---|---|
-| 几何 | 使用 `segment_part` 或 VPP 高质量血管 GLB；新增 `visual_high` 与 `preview` 资产分层。 |
-| 材质 | 半透明核心 + Fresnel 边缘高光 + bloom + 距离衰减，不再整体 cyan 发光。 |
-| 相机 | 默认 `Clinical Orbit`，围绕导丝 tip 近景斜俯视；全树只作为 overview。 |
-| 景深 | tip 附近清晰，远端分支暗化/虚化。 |
-| 路径/导丝 | 作为细亮导航 overlay，不压过血管本体；tip 标记小型高对比。 |
-| 风险 | 无真实 `risk_regions` 时不显示红色禁入体积。 |
+| `services/` | FastAPI、WebSocket、session、NavigationEngine、控制、安全和物理引擎 |
+| `src/cathsim/` | Python 包、Gym 环境、RL 训练/评估与原始 CathSim 能力 |
+| `godot_client/` | Godot 4.7 桌面与 Android/OpenXR 客户端 |
+| `data/` | VPP 病例、中心线、路线、报告与实验数据 |
+| `tools/` | 资产转换、路径质量、物理审计与部署工具 |
+| `scripts/` | 启动、验证、Android/PICO 构建和辅助脚本 |
+| `tests/` | 服务、物理、训练、前端契约与 XR 合同测试 |
+| `doc/` | 按五层职责组织的中文设计、进度、验收和教程文档 |
+| `docs/` | 网站文档与 XR 专项状态记录 |
+| `artifacts/` | 可复现验收/构建产物目录 |
 
-### 8.3 视觉资产策略
+## 文档地图
 
-| 类型 | 文件建议 | 用途 |
-|---|---|---|
-| 高质量视觉 mesh | `*_visual_high.glb` | 最终医疗视图验收。 |
-| 预览 mesh | `*_preview.glb` | 调试/低配预览。 |
-| 碰撞/SDF 资产 | `collision_sdf`、厚壁环管、分割体 | Newton 物理碰撞。 |
+README 只提供入口和当前边界，详细设计与历史证据以 `doc/` 为准。阅读优先级建议为：代码与测试 → 最新进度/交接 → 分层验收 → 专题方案 → 历史设计。
 
-`tools/export_godot_assets.py` 后续应支持：
+### 1. 整体设计
 
-```text
---quality visual_high|preview
---max-faces 300000
---no-decimate
---smooth-normals
---taubin-smooth-iter N
-```
+- [总体技术方案](doc/1.整体设计/01-总体技术方案.md)
+- [资产与数据规格](doc/1.整体设计/02-资产与数据规格.md)
+- [API 与通信协议](doc/1.整体设计/03-API与通信协议.md)
+- [部署与开发指南](doc/1.整体设计/04-部署与开发指南.md)
+- [开发进度记录](doc/1.整体设计/05-开发进度记录.md)
+- [分层验收与开发规划](doc/1.整体设计/06-分层验收与开发规划.md)
 
----
+### 2. 图像分割与路径规划
 
-## 九、API 与通信
+- [Segment_part 中心线图规划方案](doc/2.图像分割路径规划层/06-segment_part_graph规划方案.md)
 
-### 9.1 REST
+### 3. 后端仿真
 
-| 端点 | 用途 |
-|---|---|
-| `GET /api/v1/health` | 健康检查。 |
-| `GET /api/v1/assets/cases` | 列出可用 case/phantom。 |
-| `POST /api/v1/path/plan` | 路径规划。 |
-| `POST /api/v1/session/start` | 创建 session。 |
-| `POST /api/v1/session/{id}/step` | 单步推进。 |
-| `POST /api/v1/session/{id}/reset` | 重置。 |
-| `DELETE /api/v1/session/{id}` | 关闭 session。 |
+- [Newton 导丝物理仿真开发记录与规划](doc/3.后端仿真层/07-Newton导丝物理仿真开发记录与规划.md)
+- [物理引擎抽象与实时性能架构](doc/3.后端仿真层/07-物理引擎抽象与实时性能架构.md)
+- [Warp/XPBD/Newton 迁移与选型](doc/3.后端仿真层/08-导丝物理迁移技术方案-Warp-XPBD-Newton.md)
+- [aorta_tree Newton 迁移 VPP 方案](<doc/3.后端仿真层/14-aorta_tree Newton物理引擎迁移VPP方案.md>)
+- [后端 CI/CD 工作流设计（设计稿）](doc/3.后端仿真层/16-CathSim后端CI-CD工作流设计.md)
+- [导丝分段连续体建模](doc/3.后端仿真层/导丝分段仿真建模与参数设定方案.md)
+- [导丝器械与手术流程开发计划](doc/3.后端仿真层/导丝器械设计与手术流程设计开发计划.md)
+- [大曲率转弯流程引导](doc/3.后端仿真层/介入导丝大曲率转弯流程引导设计方案.md)
 
-### 9.2 WebSocket `/ws/session`
+### 4. Godot 桌面与 PICO XR 前端
 
-| 消息 | 方向 | 说明 |
-|---|---|---|
-| `session_start` | C→S | phantom、target、route、mode、batch_mode。 |
-| `session_started` | S→C | session_id、初始 state、routes。 |
-| `control` | C→S | `delta_push`、`delta_rotate`。 |
-| `shape_intent` | C→S | 点击导航/方向导航/强度。 |
-| `select_route` | C→S | 切换分支目标。 |
-| `engine_params` | C→S | Newton/sheath/slack/形变参数。 |
-| `path_request` | C→S | 起终点规划请求。 |
-| `state_batch` | S→C | bodies、path、tip、state、safety、seq、t_phys。 |
-| `state_update` | S→C | 轻量状态更新。 |
-| `reset` | C→S | 重置会话。 |
+- [医疗导航前端设计方案](doc/4.前端层/11-前端设计方案.md)
+- [三维血管导航渲染方案](doc/4.前端层/12-三维血管导航渲染改造方案.md)
+- [三维血管导航开发计划](doc/4.前端层/13-三维血管导航渲染开发计划.md)
+- [三维血管导航改进版](doc/4.前端层/三维血管导航渲染改造方案_改进版.md)
+- [前端开发交接文档](doc/4.前端层/前端开发交接文档_2026-07-23.md)
+- [腔镜血管内壁渲染优化](doc/4.前端层/腔镜血管内壁渲染优化方案_2026-07-24.md)
+- [PICO 4 Ultra Enterprise VR 设计方案](doc/4.前端层/PICO4_Ultra_Enterprise_VR前端设计方案.md)
+- [PICO 4 Ultra Enterprise VR 开发规划](doc/4.前端层/PICO4_Ultra_Enterprise_VR前端开发规划.md)
+- [PICO 4 Ultra Enterprise VR 验收方案](doc/4.前端层/PICO4_Ultra_Enterprise_VR前端验收方案.md)
 
----
+### 5. HCI、训练与数据
 
-## 十、部署架构
+- [ShapeIntent 控制层](doc/5.训练层/09-人机交互与强化学习架构-ShapeIntent.md)
+- [HCI/RL 一体化平台设计](doc/5.训练层/10-介入手术人机交互与强化学习一体化平台设计.md)
+- [强化学习训练设计方案](doc/5.训练层/11-强化学习训练设计方案.md)
+- [自采数据训练方案与清单](doc/5.训练层/12-自采数据训练方案与数据收集清单.md)
+- [自采数据操作员教程](doc/5.训练层/13-自采数据基础教程-操作员版.md)
+- [介入导丝智能训练新手教程](doc/5.训练层/新手教程/README.md)
+- [项目实战训练全过程](doc/5.训练层/新手教程/13-项目实战训练全过程.md)
+- [强化学习自主导航实验设计](doc/5.训练层/新手教程/14.基于强化学习的介入导丝自主导航实验设计.md)
 
-### 10.1 组件分布
+## 真实性与安全边界
 
-| 组件 | 运行位置 | 说明 |
-|---|---|---|
-| Godot 客户端 | 本地原生 Windows/Mac/Linux | 显示、输入、交互。 |
-| FastAPI + Newton 后端 | Linux + NVIDIA GPU Docker | A6000 服务器为主，本地 WSL2/3060 可开发。 |
-| RL 训练 | 同一 Docker 镜像 | Headless Gym/SB3。 |
-| 模型/回放/训练日志 | 挂载卷 | 策略权重、TensorBoard、回放轨迹。 |
+- 本项目中的“设备就绪”表示仿真会话/引擎就绪，不表示真实机器人硬件已连接。
+- DSA 首版为明确占位；腔镜来自本地三维仿真视图，不是硬件视频流。
+- 程序化材质、玻璃血管和风险配色用于仿真可读性，不应解释为患者真实组织或诊断结论。
+- `lateral_force_n`、`axial_force_n`、`torque_nm` 等没有可靠来源时必须保持空值，不能由前端补造。
+- Guided、mock、占位数据和实验性 UI 必须明确标识，不得进入高保真训练或验收结论。
+- 软件急停和 SafetyGate 是仿真安全机制，不替代真实设备的物理急停和法规流程。
+- 模型训练与评估结论仅适用于记录的代码、资产、物理参数、硬件、seed 和测试病例。
 
-### 10.2 工作流
+## License 与贡献
 
-1. **远程开发推荐**：VS Code Remote-SSH 到 A6000 服务器，Godot 本地连接远端 WebSocket。
-2. **本地容器开发**：WSL2 + Docker Desktop + GPU 直通，运行同一镜像。
-3. **生产部署**：`docker compose up` 启动后端；Godot 只切换 `server_url`。
-
-### 10.3 Isaac Sim 演进
-
-当前不直接以完整 Isaac Sim 作为运行时。触发条件是以下任一成为现行目标：
-
-- RTX 拟真渲染/合成数据。
-- Isaac Lab 千环境 RL。
-- ROS2 桥/真实机器人数字孪生。
-
-届时将 `NewtonEngine` 场景提升到 `isaacsim.physics.newton`，底层 Newton 物理不重写。
-
----
-
-## 十一、当前实施路线图
-
-### 11.1 物理轨道 D
-
-| 阶段 | 状态 | 内容 |
-|---|---|---|
-| D0-D3 | 已完成 | Newton gate、真腔碰撞、`NewtonEngine` 接入、上层零改。 |
-| D4-D5 | 已完成 | 真实力驱动、扭转/J-tip、autopilot、ShapeIntent 链路。 |
-| D4 hardening | 已验证 | 安全阈值分模式、点击导航反馈、抗屈曲/sheath/slack guard。 |
-| D6 | 规划中 | 推广到 segment_part 细管与更多分支目标，完善真实风险/半径/碰撞。 |
-| D7 | 规划中 | Docker/compose/devcontainer 固化。 |
-
-### 11.2 平台轨道 P/T
-
-| 优先级 | 内容 |
-|---|---|
-| P0 | segment_part graph 连通性、路线图稳定、模式显式化。 |
-| P1 | 第三人称相机可视性、X-ray/DSA 分屏、训练闭环录制回放评分。 |
-| P1/T0-T2 | Newton Navigation Gym env、SB3 训练管线、curriculum/domain randomization。 |
-| P2/T3-T7 | 策略加载到 HCI、RL 辅助驾驶、多进程训练、Isaac Lab 提升。 |
-
-### 11.3 前端视觉轨道 V
-
-| 阶段 | 内容 |
-|---|---|
-| V0 | 风险语义收口，禁止 mock 禁入区回归。 |
-| V1 | 高质量视觉 GLB 导出，优先加载 `*_visual_high.glb`。 |
-| V2 | 医学玻璃血管材质参数化。 |
-| V3 | `Clinical Orbit` 默认相机预设。 |
-| V4 | 路径与导丝 overlay 细化。 |
-| V5 | 景深/远端层次。 |
-| V6 | 真实 `risk_regions` 渲染器。 |
-
----
-
-## 十二、与历史方案的关系
-
-| 维度 | v1.0 旧方案 | v2.0 当前方案 |
-|---|---|---|
-| 物理主线 | MuJoCo/CathSim | NewtonEngine 为主，MuJoCo 兼容。 |
-| 导丝性能判断 | 30Hz WebSocket + MuJoCo step | 60Hz 级 GPU 物理 + PhysicsWorker + 插值可缩短。 |
-| 控制方式 | 手动 push/rotate、规划跟踪 | ShapeIntent 统一 Human/RL/Autopilot。 |
-| 路径数据 | 单中心线 + VPP 图 | 分支图、routes、半径、PlannedPath、graph A*。 |
-| 风险 | wall distance 启发式 | 按模式判定，真实 risk_regions 才渲染空间风险。 |
-| 前端 | 基础 3D/HUD/X-ray 设想 | 医疗工作站 UI + 玻璃血管导航 + DSA/3D 双区。 |
-| RL | Gymnasium/SB3 设想 | Newton Navigation Gym + ShapeIntent action + HCI 策略复用路线。 |
-| 部署 | Docker Compose 计划 | GPU Docker + 远程开发 + Isaac Sim 提升路径。 |
-
----
-
-## 十三、关键边界
-
-1. `ShapeIntent` 不得实现为分段位置软约束，否则会回退到低保真运动学覆盖。
-2. guided 模式只用于演示/可达性，不作为训练保真物理。
-3. 红色/橙色风险体积必须来自真实后端 `risk_regions`，不得由固定路径比例或 mock 球体生成。
-4. 视觉 mesh 与碰撞/SDF 资产必须分离，不能为了观感破坏物理稳定性。
-5. Newton 当前的抗屈曲和 sheath/slack guard 是工程硬化，后续仍需更真实的导管/sheath 与推送传导模型。
-6. Isaac Sim 是未来 RTX/RL/ROS 的提升目标，不是当前单根导丝物理可行性验证的起点。
-
----
-
-## 十四、关联文档
-
-- [06-segment_part_graph规划方案.md](06-segment_part_graph规划方案.md)
-- [07-物理引擎抽象与实时性能架构.md](07-物理引擎抽象与实时性能架构.md)
-- [07-Newton导丝物理仿真开发记录与规划.md](07-Newton导丝物理仿真开发记录与规划.md)
-- [08-导丝物理迁移技术方案-Warp-XPBD-Newton.md](08-导丝物理迁移技术方案-Warp-XPBD-Newton.md)
-- [09-人机交互与强化学习架构-ShapeIntent.md](09-人机交互与强化学习架构-ShapeIntent.md)
-- [10-介入手术人机交互与强化学习一体化平台设计.md](10-介入手术人机交互与强化学习一体化平台设计.md)
-- [11-前端设计方案.md](11-前端设计方案.md)
-- [12-三维血管导航渲染改造方案.md](12-三维血管导航渲染改造方案.md)
-- [13-三维血管导航渲染开发计划.md](13-三维血管导航渲染开发计划.md)
+项目采用 [LICENSE](LICENSE) 中的非商业许可条款。贡献前请阅读 [contributors.md](contributors.md)，并确保新增数据、模型和医学资产具有清晰来源、许可和去标识化记录。
