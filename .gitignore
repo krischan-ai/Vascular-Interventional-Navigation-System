@@ -172,3 +172,48 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 doc/5.训练层/新手教程
+OpenXR_Native_SDK/
+
+# === 敏感医学数据（禁止公开） ===
+# 真实血管案例资产
+data/vpp_assets/
+data/aorta_centerline/
+# 大曲率审计结果（含真实路径几何）
+data/large_curvature_audit_*.json
+# 体模网格数据
+src/cathsim/dm/components/phantom_assets/meshes/
+# 内部开发工具配置
+.codex/
+.trae/
+artifacts/
+findings.md
+sensitive_paths.txt
+
+# === 大文件（超过 GitHub 50MB 限制） ===
+# 训练检查点
+shape-prediction/
+*.ckpt
+*.zip
+# 流体仿真导出
+src/cathsim/dm/fluid/export*.csv
+
+# Godot Android project sources are versioned; local Gradle outputs are not.
+# The explicit build-directory exceptions override the generic build/ rule
+# above so a future custom Gradle template can be committed safely.
+!godot_client/android/
+!godot_client/android/build/
+!godot_client/android/build/**
+godot_client/android/build/.gradle/
+godot_client/android/build/build/
+godot_client/android/build/.cxx/
+godot_client/android/build/local.properties
+
+# Android build outputs and local signing material.
+.gradle/
+.cxx/
+*.apk
+*.aab
+*.idsig
+*.keystore
+*.jks
+local.properties
